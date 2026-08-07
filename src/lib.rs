@@ -3,4 +3,8 @@
 pub mod config;
 pub mod engine;
 pub mod sampler;
-// pub mod api; — добавит агент HTTP-слоя.
+
+// Result<T, Response> намеренно: Response — готовый early-return для axum
+#[allow(clippy::result_large_err)]
+pub mod api;
+pub mod engine_types;

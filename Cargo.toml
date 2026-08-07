@@ -15,14 +15,16 @@ async-trait = "0.1"
 futures = "0.3"
 tokio-stream = "0.1"
 clap = { version = "4", features = ["derive"] }
+uuid = { version = "1", features = ["v4"] }
 
-# Прямые зависимости от candle-форка НЕ нужны: candle_core/tokenizers
-# ре-экспортируются через qwen35-batch (см. lib ре-экспорты ниже не требуются —
-# qwen35-batch сам тащит candle-core и tokenizers как transitive deps;
-# для типов Device/Tokenizer объявляем их явно с теми же версиями).
+# Прямые зависимости от candle-форка: для типов Device/Tokenizer в engine.
 candle-core = { path = "/Volumes/Askid Dev/Projects/candle-fork-qwen35-batch/candle-core" }
 tokenizers = { version = "0.22.0", default-features = false, features = ["onig"] }
 memmap2 = "0.9.3"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
 
 [features]
 # Backend: metal на macOS (разработка), cuda на Windows (yttri-win), иначе CPU.
