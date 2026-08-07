@@ -150,11 +150,13 @@ impl BatchedEngine {
             tokenizer: Arc::new(Mutex::new(tokenizer)),
         });
 
-        let tokenizer = Arc::clone(&engine.tokenizer);
+        let tokenizer = engine.tokenizer.clone();
         let in_flight = Arc::clone(&engine.in_flight);
         let cfg2 = Arc::clone(&cfg);
-        tokio::spawn(async move {
-            dispatch_loop(scheduler, rx_ingest, cfg2, in_flight, tokenizer).await;
+        // scheduler/adapter не Send (CUDA context не thread-safe) → свой thread,
+        // не tokio::spawn. dispatch_loop синхронная; blocking_recv на idle.
+        std::thread::spawn(move || {
+            dispatch_loop(scheduler, rx_ingest, cfg2, in_flight, tokenizer);
         });
 
         Ok(engine)
@@ -234,7 +236,7 @@ pub fn cancel_guard(engine: &BatchedEngine, req_id: u64) -> CancelGuard {
 // Dispatch loop — единственный владелец scheduler'а/модели.
 // ────────────────────────────────────────────────────────────────────────────
 
-async fn dispatch_loop(
+fn dispatch_loop(
     mut sched: BatchScheduler<Qwen35BatchAdapter>,
     mut rx: mpsc::Receiver<IngestMsg>,
     cfg: Arc<BatchConfig>,
@@ -293,8 +295,7 @@ async fn dispatch_loop(
         });
         sched.set_sampler(sampler_box);
 
-        // tok_guard — std::sync::MutexGuard (НЕ Send): живёт только в этом
-        // блоке, до любого await. step_with — синхронный, drain — тоже.
+        // tok_guard — std::sync::MutexGuard: step_with и drain синхронные.
         let did_work = {
             let tok_guard = tokenizer.lock().expect("tokenizer mutex");
             let outcome = sched.step_with(&mut |sidx, _generated| {
@@ -349,7 +350,7 @@ async fn dispatch_loop(
 
         // 5. Нет работы — ждём; есть — yield.
         if !did_work && pending.is_empty() && bindings.iter().all(|b| b.is_none()) {
-            match rx.recv().await {
+            match rx.blocking_recv() {
                 Some(msg) => match msg {
                     IngestMsg::Admit(req) => {
                         if cancelled.remove(&req.req_id) {
@@ -365,7 +366,7 @@ async fn dispatch_loop(
                 None => break,
             }
         } else {
-            tokio::task::yield_now().await;
+            std::thread::yield_now();
         }
     }
 }
