@@ -66,6 +66,10 @@ fn input_to_messages(input: &Value) -> Result<Vec<ChatMessage>, Response> {
 }
 
 fn response_object(id: &str, model: &str, text: &str, usage: (usize, usize), status: &str) -> Value {
+    response_object_ext(id, model, text, usage, status, false)
+}
+
+fn response_object_ext(id: &str, model: &str, text: &str, usage: (usize, usize), status: &str, truncated: bool) -> Value {
     json!({
         "id": id,
         "object": "response",
@@ -83,6 +87,7 @@ fn response_object(id: &str, model: &str, text: &str, usage: (usize, usize), sta
             "input_tokens": usage.0,
             "output_tokens": usage.1,
             "total_tokens": usage.0 + usage.1,
+            "truncated": truncated,
         },
     })
 }
@@ -111,12 +116,13 @@ pub async fn responses(State(state): State<AppState>, Json(req): Json<ResponsesR
             Ok(o) => o,
             Err(r) => return r,
         };
-        return Json(response_object(
+        return Json(response_object_ext(
             &id,
             &model,
             &out.text,
             (out.prompt_tokens, out.completion_tokens),
             "completed",
+            out.truncated,
         ))
         .into_response();
     }
@@ -151,13 +157,14 @@ pub async fn responses(State(state): State<AppState>, Json(req): Json<ResponsesR
         StreamEvent::Done {
             prompt_tokens,
             completion_tokens,
+            truncated,
             ..
         } => {
             if !created_sent {
                 created_sent = true;
                 out.push(Event::default().event("response.created").data(created.clone()));
             }
-            let obj = response_object(&id, &model, &acc, (prompt_tokens, completion_tokens), "completed");
+            let obj = response_object_ext(&id, &model, &acc, (prompt_tokens, completion_tokens), "completed", truncated);
             out.push(
                 Event::default()
                     .event("response.completed")

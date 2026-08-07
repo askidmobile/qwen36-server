@@ -201,6 +201,7 @@ pub async fn messages(State(state): State<AppState>, Json(req): Json<MessagesReq
             "usage": {
                 "input_tokens": out.prompt_tokens,
                 "output_tokens": out.completion_tokens,
+                "truncated": out.truncated,
             },
         }))
         .into_response();
@@ -246,7 +247,7 @@ pub async fn messages(State(state): State<AppState>, Json(req): Json<MessagesReq
             finish_reason,
             prompt_tokens,
             completion_tokens,
-            ..
+            truncated,
         } => {
             if !started {
                 started = true;
@@ -285,7 +286,8 @@ pub async fn messages(State(state): State<AppState>, Json(req): Json<MessagesReq
                 json!({"type": "message_delta",
                        "delta": {"stop_reason": map_stop_reason(&finish_reason, !calls.is_empty()),
                                   "stop_sequence": null},
-                       "usage": {"input_tokens": prompt_tokens, "output_tokens": completion_tokens}})
+                       "usage": {"input_tokens": prompt_tokens, "output_tokens": completion_tokens,
+                                  "truncated": truncated}})
                 .to_string(),
             ));
             out.push(Event::default().event("message_stop").data(

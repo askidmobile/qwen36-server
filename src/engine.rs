@@ -84,6 +84,7 @@ pub enum StreamEvent {
     Error(String),
 }
 
+#[derive(Debug, Clone)]
 pub struct ModelInfo {
     pub id: String,            // "qwen3.6-27b"
     pub context_length: usize, // 81920

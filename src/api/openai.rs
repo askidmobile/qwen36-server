@@ -164,6 +164,7 @@ pub async fn chat_completions(
             "prompt_tokens": out.prompt_tokens,
             "completion_tokens": out.completion_tokens,
             "total_tokens": out.prompt_tokens + out.completion_tokens,
+            "truncated": out.truncated,
         },
     }))
     .into_response()
@@ -216,7 +217,7 @@ async fn stream_chat(
             finish_reason,
             prompt_tokens,
             completion_tokens,
-            truncated: _,
+            truncated,
         } => {
             if first {
                 first = false;
@@ -251,6 +252,7 @@ async fn stream_chat(
                             "prompt_tokens": prompt_tokens,
                             "completion_tokens": completion_tokens,
                             "total_tokens": prompt_tokens + completion_tokens,
+                            "truncated": truncated,
                         },
                     })
                     .to_string(),

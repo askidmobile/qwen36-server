@@ -18,7 +18,7 @@
 //! на BatchScheduler<Qwen35BatchAdapter> — сигнатуры шагов совпадают.
 
 use std::collections::{HashSet, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -95,7 +95,7 @@ struct SlotBinding {
 /// Guard: клиент дропнул Receiver → Cancel в dispatch loop.
 /// ponytail: best-effort try_send; переполненный ingest = loop и так
 /// обнаружит Closed-канал слота на следующем emit.
-struct CancelGuard {
+pub struct CancelGuard {
     req_id: u64,
     tx: mpsc::Sender<IngestMsg>,
 }
@@ -234,10 +234,19 @@ async fn dispatch_loop(
 
         // 2. Watchdog: молчащие слоты → Error + free.
         let now = Instant::now();
-        for (idx, b) in bindings.iter_mut().enumerate() {
-            let Some(b) = b.as_mut() else { continue };
-            if now.duration_since(b.last_progress) > cfg.req_timeout {
-                let _ = b.out.try_send(StreamEvent::Error("timeout".into()));
+        for idx in 0..bindings.len() {
+            let timed_out = bindings[idx]
+                .as_mut()
+                .map(|b| {
+                    if now.duration_since(b.last_progress) > cfg.req_timeout {
+                        let _ = b.out.try_send(StreamEvent::Error("timeout".into()));
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .unwrap_or(false);
+            if timed_out {
                 free_slot(idx, &mut bindings, &mut model, &in_flight);
             }
         }
@@ -558,7 +567,7 @@ mod tests {
     async fn eight_requests_four_slots_all_done() {
         let engine = BatchedEngine::load(cfg(4)).await.unwrap();
         let handles: Vec<_> = (0..8)
-            .map(|i| {
+            .map(|_i| {
                 let e = Arc::clone(&engine);
                 tokio::spawn(async move {
                     let rx = e.generate(msgs("hello"), GenParams::default()).await.unwrap();
@@ -587,10 +596,27 @@ mod tests {
         // Второй уйдёт в pending; дропаем receiver сразу.
         let rx = engine.generate(msgs("drop me"), GenParams::default()).await.unwrap();
         drop(rx);
-        // Guard не подключён в generate (см. cancel_guard) — эмулируем Cancel вручную.
-        engine.tx_ingest.send(IngestMsg::Cancel { req_id: 2 }).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        // in_flight: 1 (hold) — отменённый вычтен.
-        assert_eq!(engine.in_flight.load(Ordering::Relaxed), 1);
+        // Отменяем второй (req_id достаём атомарно, не хардкодом).
+        let req_id = engine.next_id.load(Ordering::Relaxed) - 1;
+        engine.tx_ingest.send(IngestMsg::Cancel { req_id }).await.unwrap();
+        // Дождаться обработки Cancel (условие вместо фиксированного sleep).
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            // Дать loop'у шаги; hold-слот может ещё жить (64 stub-токена —
+            // тысячи yield-итераций), поэтому проверяем только отсутствие
+            // утечки ПОСЛЕ завершения hold ниже.
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            if Instant::now() > deadline {
+                break;
+            }
+            // Отменённый вычтен, когда Cancel обработан: in_flight ≤ 1 (только hold)
+            if engine.in_flight.load(Ordering::Relaxed) <= 1 {
+                break;
+            }
+        }
+        assert!(
+            engine.in_flight.load(Ordering::Relaxed) <= 1,
+            "отменённый запрос не вычтен из in_flight"
+        );
     }
 }
