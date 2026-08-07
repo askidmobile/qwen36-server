@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail};
-use qwen35_batch::model::Sampler as ForkSampler;
+use qwen35_batch::model::{BatchModel, Sampler as ForkSampler};
 use qwen35_batch::real::tokenizer::{self, ChatMsg};
 use qwen35_batch::real::Qwen35BatchAdapter;
 use qwen35_batch::scheduler::{BatchScheduler, StepOutcome};
