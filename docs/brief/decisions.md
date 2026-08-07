@@ -1,0 +1,26 @@
+# Decision log — Qwen3.6 27B server
+
+Формат: BD-NNN. Решения обязательны; отмена — только новой строкой «overrides BD-XXX».
+
+| ID | Дата | Решение | Контекст / обоснование |
+|---|---|---|---|
+| BD-001 | 2026-08-07 | Сервер строится на собственном candle-форке, не на llama.cpp | Позиция владельца: наши candle-наработки лучше llama.cpp; llama.cpp — только эталон для parity/бенчей |
+| BD-002 | 2026-08-07 | Стек: Rust; инференс на базе candle-fork-qwen35-batch (qwen35-batch крейт) | Там уже есть Qwen3.5 GGUF + DeltaNet + batch-планировщик; qwen3_5/qwen3_6 — один семейный архтип (qwen35) |
+| BD-003 | 2026-08-07 | Стартовый квант — Q2_K_XL (11.8 GB), затем IQ2 (XXS/M) как фаза 2 | Q2_K ядра уже в candle-core; IQ2-блоков нет — нужны новые dequant/matmul ядра (CPU+CUDA) |
+| BD-004 | 2026-08-07 | Vision вне v1: text-only; image/video в запросах → HTTP 400 | GGUF unsloth text-only; vision tower — отдельный большой объём |
+| BD-005 | 2026-08-07 | Аутентификация: один мастер-ключ из конфига/env; чат хранит его в localStorage | LAN-only применение; нет требований multi-user |
+| BD-006 | 2026-08-07 | Сеть: 0.0.0.0 в домашней LAN, HTTP без TLS | Пользователи: владелец + yttri-win (192.168.2.89) |
+| BD-007 | 2026-08-07 | 4 одновременных клиента — ключевая фича; через batch-планировщик qwen35-batch (4 слота) | Уже реализовано и валидировано на Qwen3.5-4B (Metal+CUDA, RTX 3060) |
+| BD-008 | 2026-08-07 | Критерий успеха v1 — только стабильность: 4 слота × генерации 8-16K токенов без падений и утечек VRAM | Скорость и API-совместимость — вехи, не критерии |
+| BD-009 | 2026-08-07 | Контекстное окно на старте: 81 920 токенов (80K) | Рекомендация Qwen; нативный контекст модели 262 144 |
+| BD-010 | 2026-08-07 | Код сервера — standalone крейт в `/Volumes/Askid Dev/Projects/Qwen3.6 27B` с path-зависимостью на candle-fork-qwen35-batch | Выбор владельца против вариантов «в воркспейсе форка» и «отдельный репо» |
+| BD-011 | 2026-08-07 | Платформы v1: Windows+CUDA (yttri-win) первично; macOS+Metal для разработки; CPU fallback | Тестовая машина — RTX 3060 12 GB, работа на диске D: |
+| BD-012 | 2026-08-07 | API v1: Chat Completions (OpenAI) + Messages (Anthropic) с tools; Responses API — базовый (input→output, SSE, store=false) | Полный Responses (встроенные tools, store) — за рамками v1 |
+| BD-013 | 2026-08-07 | Function calling: tools + tool_choice в Chat Completions и Messages API; парсинг tool_calls из вывода | Qwen3.6 заявляет tool calling; в Qwen3.5 4B уже тестировался через OpenAI tools API |
+| BD-014 | 2026-08-07 | Хранение: ничего на диске кроме модели; логи в stdout; чаты — localStorage браузера | PII/комплаенс неприменимы (локальное применение) |
+| BD-015 | 2026-08-07 | GET /v1/models: OpenAI-минимум (id, object, created, owned_by) + расширения (контекст, квант, слоты, режимы) | Явное требование из исходного брифа |
+| BD-016 | 2026-08-07 | Сэмплинг-пресеты по model card: thinking general (t=1.0, top_p=0.95, top_k=20), thinking coding (t=0.6), instruct (t=0.7, top_p=0.80, presence_penalty=1.5); в UI полный набор параметров | Источник: HF model card Qwen3.6-27B |
+| BD-017 | 2026-08-07 | Переполнение контекста: sliding window — system-промпт сохраняется, режутся старые user/assistant пары, ответ помечается `truncated: true` | Выбор владельца против жёсткой 400 |
+| BD-018 | 2026-08-07 | Сборка на Windows: cargo build из исходников на yttri-win; модели на D: | Тулчейн candle там уже есть; на C: нет места |
+| BD-019 | 2026-08-07 | Порядок работ v1: Q2_K_XL text-only single-slot → API + веб-чат → 4 слота → IQ2 ядра | Быстрая валидация на готовых ядрах, риск IQ2 отложен |
+| BD-020 | 2026-08-07 | Главный риск: качество 2-bit неприемлемо → план отступления 3-bit (UD-IQ3_XXS 12 GB) / 4-bit | Остальные риски (сложность IQ2, VRAM, API-стоимость) — вторичны |
