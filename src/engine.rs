@@ -335,7 +335,7 @@ fn last_logits(t: &candle_core::Tensor) -> Result<Vec<f32>> {
     Ok(t.to_dtype(DType::F32)?.to_vec1()?)
 }
 
-fn floor_char_boundary(s: &str, mut i: usize) -> usize {
+pub fn floor_char_boundary(s: &str, mut i: usize) -> usize {
     while i > 0 && !s.is_char_boundary(i) {
         i -= 1;
     }
@@ -391,7 +391,7 @@ pub fn select_device() -> Result<candle_core::Device> {
 }
 
 /// Квант из имени файла: `qwen36-27b-q2_k_xl.gguf` → "Q2_K_XL".
-fn quant_from_filename(path: &Path) -> String {
+pub fn quant_from_filename(path: &Path) -> String {
     path.file_stem()
         .and_then(|s| s.to_str())
         .and_then(|s| s.rsplit('-').next())
@@ -435,7 +435,7 @@ pub fn trim_messages(
 }
 
 /// Найти первую из stop-строк (минимальная позиция).
-trait FindAny {
+pub trait FindAny {
     fn find_any(&self, needles: &[String]) -> Option<usize>;
 }
 impl FindAny for str {

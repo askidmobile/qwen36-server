@@ -25,6 +25,7 @@ impl SamplingPreset {
 }
 
 /// xorshift64* PRNG (детерминированный при заданном seed).
+#[derive(Clone)]
 pub struct Rng(u64);
 
 impl Rng {
