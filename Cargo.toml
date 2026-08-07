@@ -1,0 +1,21 @@
+[package]
+name = "qwen36-server"
+version = "0.1.0"
+edition = "2021"
+description = "Qwen3.6-27B GGUF inference server on candle-fork (OpenAI/Anthropic APIs, 4-slot batching)"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+axum = "0.8"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+
+# ponytail: path-dep на qwen35-batch (feature real-model + cuda/metal)
+# добавляется на фазе интеграции (TODO-F1 в src/engine_batched.rs); скелет
+# компилируется без неё на StubModel.
