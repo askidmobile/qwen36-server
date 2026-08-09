@@ -416,6 +416,7 @@ async function send() {
   c.messages.push(asst);
   saveChat(c);
   renderChatList();
+  renderMessages(); // показать сообщение пользователя сразу
 
   abortCtrl = new AbortController();
   $("stopbtn").disabled = false;
