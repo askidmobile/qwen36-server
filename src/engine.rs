@@ -257,7 +257,9 @@ fn run_generation(
         let mut rng = Rng::new(seed);
         let mut generated: Vec<u32> = Vec::new();
         let mut full_text;
-        let mut emitted_up_to = 0usize; // байтовый индекс в full_text
+        // Эмитнутый префикс (строка, не индекс): decode_text может ретроактивно
+        // менять ранние байты (многотокенные UTF-8) — индекс небезопасен.
+        let mut emitted_text = String::new();
         let max_stop_len = params.stop.iter().map(|s| s.len()).max().unwrap_or(0);
 
         for _ in 0..params.max_tokens {
@@ -286,20 +288,23 @@ fn run_generation(
             let mut cut_at: Option<usize> = None;
             if !params.stop.is_empty() {
                 let scan_from = full_text.len().saturating_sub(max_stop_len + 64);
-                let scan_from = floor_char_boundary(&full_text, scan_from).max(emitted_up_to.min(full_text.len()));
+                let scan_from = floor_char_boundary(&full_text, scan_from)
+                .max(emitted_text.len().min(full_text.len()));
                 if let Some(rel) = full_text[scan_from..].find_any(&params.stop) {
                     cut_at = Some(scan_from + rel);
                 }
             }
 
             let end = cut_at.unwrap_or(full_text.len());
-            if end > emitted_up_to {
-                let chunk = full_text[emitted_up_to..end].to_string();
-                emitted_up_to = end;
-                if !chunk.is_empty() && tx.blocking_send(StreamEvent::Delta(chunk)).is_err() {
+            if full_text.starts_with(&emitted_text) && end >= emitted_text.len() {
+                let chunk = &full_text[emitted_text.len()..end];
+                if !chunk.is_empty()
+                    && tx.blocking_send(StreamEvent::Delta(chunk.to_string())).is_err()
+                {
                     return Ok(()); // клиент отключился
                 }
             }
+            emitted_text = full_text[..end].to_string();
             if cut_at.is_some() {
                 finish("stop", generated.len(), &tx);
                 return Ok(());

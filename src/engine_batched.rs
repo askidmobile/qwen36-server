@@ -84,8 +84,10 @@ struct SlotBinding {
     params: GenParams,
     prompt_tokens: usize,
     completion_tokens: usize,
-    text_buf: String,
-    emitted_chars: usize,
+    /// Уже эмитнутый префикс (строка, не индекс): decode_text может
+    /// ретроактивно менять ранние байты (многотокенные UTF-8), поэтому
+    /// индекс небезопасен — сравниваем префиксы.
+    emitted_text: String,
     stop_hit: bool,
     cancelled: bool,
     last_progress: Instant,
@@ -176,7 +178,7 @@ impl Engine for BatchedEngine {
 
         // TODO-F2: sliding window (BD-017) + build_chatml_text + encode_no_think.
         let (prompt, prompt_tokens, truncated) = {
-            let tok = self.tokenizer.lock().expect("tokenizer mutex");
+            let tok = self.tokenizer.lock().unwrap_or_else(|e| e.into_inner());
             let budget = self
                 .info
                 .context_length
@@ -303,7 +305,7 @@ fn dispatch_loop(
         }
         // tok_guard — std::sync::MutexGuard: step_with и drain синхронные.
         let did_work = {
-            let tok_guard = tokenizer.lock().expect("tokenizer mutex");
+            let tok_guard = tokenizer.lock().unwrap_or_else(|e| e.into_inner());
             if trace {
                 eprintln!("[dl] got tokenizer.lock");
             }
@@ -440,18 +442,20 @@ fn drain_after_step(
         let mut cut_at: Option<usize> = None;
         if !b.params.stop.is_empty() {
             let scan_from = new_text.len().saturating_sub(max_stop_len + 64);
-            let scan_from = floor_char_boundary(&new_text, scan_from).max(b.emitted_chars.min(new_text.len()));
+            let scan_from = floor_char_boundary(&new_text, scan_from)
+                .max(b.emitted_text.len().min(new_text.len()));
             if let Some(rel) = new_text[scan_from..].find_any(&b.params.stop) {
                 cut_at = Some(scan_from + rel);
             }
         }
 
         let end = cut_at.unwrap_or(new_text.len());
-        if end > b.emitted_chars {
-            let delta = new_text[b.emitted_chars..end].to_string();
-            b.emitted_chars = end;
+        // Префиксное сравнение: если decode ретроактивно изменил ранние байты —
+        // ресинхронизируемся (не эмитим на этом шаге), индексной арифметики нет.
+        if new_text.starts_with(&b.emitted_text) && end >= b.emitted_text.len() {
+            let delta = &new_text[b.emitted_text.len()..end];
             if !delta.is_empty() {
-                match b.out.try_send(StreamEvent::Delta(delta)) {
+                match b.out.try_send(StreamEvent::Delta(delta.to_string())) {
                     Ok(()) => {}
                     Err(mpsc::error::TrySendError::Full(_))
                     | Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -459,6 +463,9 @@ fn drain_after_step(
                     }
                 }
             }
+            b.emitted_text = new_text[..end].to_string();
+        } else if !new_text.starts_with(&b.emitted_text) {
+            b.emitted_text = new_text[..end].to_string();
         }
         if cut_at.is_some() {
             b.stop_hit = true;
@@ -522,8 +529,7 @@ fn seed_slot(
         params,
         prompt_tokens,
         completion_tokens: 0,
-        text_buf: String::new(),
-        emitted_chars: 0,
+        emitted_text: String::new(),
         stop_hit: false,
         cancelled: false,
         last_progress: Instant::now(),
