@@ -29,6 +29,14 @@ pub struct GenParams {
     pub stop: Vec<String>,
     #[serde(default)]
     pub seed: Option<u64>,
+    /// thinking-режим: false → prompt получает пустой <think></think> суффикс
+    /// (encode_no_think). default true (BD-016, model card).
+    #[serde(default = "default_thinking")]
+    pub thinking: bool,
+}
+
+fn default_thinking() -> bool {
+    true
 }
 
 impl Default for GenParams {
@@ -43,6 +51,7 @@ impl Default for GenParams {
             max_tokens: 4096,
             stop: vec![],
             seed: None,
+            thinking: true,
         }
     }
 }
@@ -186,7 +195,14 @@ impl Engine for CandleEngine {
                 })
                 .collect();
             let text = tokenizer::build_chatml_text(&msgs);
-            prompt_ids = tokenizer::encode_no_think(&st.tokenizer, &text)?;
+            prompt_ids = if params.thinking {
+                st.tokenizer
+                    .encode(text, false)
+                    .map(|e| e.get_ids().to_vec())
+                    .map_err(|e| anyhow::anyhow!("encode prompt: {e}"))?
+            } else {
+                tokenizer::encode_no_think(&st.tokenizer, &text)?
+            };
         }
         let prompt_tokens = prompt_ids.len();
 

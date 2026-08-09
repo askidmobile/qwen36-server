@@ -25,6 +25,10 @@ pub struct ChatCompletionRequest {
     #[allow(dead_code)]
     tool_choice: Option<Value>,
     stream_options: Option<Value>,
+    /// Qwen-конвенция: chat_template_kwargs.enable_thinking (bool).
+    chat_template_kwargs: Option<Value>,
+    /// Прямой флаг thinking (альтернатива chat_template_kwargs).
+    thinking: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -84,6 +88,13 @@ fn to_gen_params(req: &ChatCompletionRequest) -> GenParams {
             _ => {}
         }
     }
+    // thinking: прямой флаг приоритетнее chat_template_kwargs; default true.
+    let ctk = req
+        .chat_template_kwargs
+        .as_ref()
+        .and_then(|k| k.get("enable_thinking"))
+        .and_then(|v| v.as_bool());
+    p.thinking = req.thinking.or(ctk).unwrap_or(true);
     p
 }
 

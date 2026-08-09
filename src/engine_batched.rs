@@ -199,7 +199,13 @@ impl Engine for BatchedEngine {
                 })
                 .collect();
             let text = tokenizer::build_chatml_text(&msgs);
-            let ids = tokenizer::encode_no_think(&tok, &text)?;
+            let ids = if params.thinking {
+                tok.encode(text, false)
+                    .map(|e| e.get_ids().to_vec())
+                    .map_err(|e| anyhow!("encode prompt: {e}"))?
+            } else {
+                tokenizer::encode_no_think(&tok, &text)?
+            };
             let n = ids.len();
             (ids, n, was_trimmed)
         };
