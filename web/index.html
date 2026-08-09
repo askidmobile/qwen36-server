@@ -365,10 +365,11 @@ function fillBubble(bubble, msg, streaming) {
         sum.textContent = "Рассуждения" + (words ? " · " + words + " слов" : "");
         const tc = document.createElement("div");
         tc.className = "tc"; tc.innerHTML = renderMarkdown(part.text);
-        // Автоскролл рассуждений при стриме: новый текст всегда виден.
-        if (streaming) tc.scrollTop = tc.scrollHeight;
         det.append(sum, tc);
         bubble.append(det);
+        // Автоскролл рассуждений при стриме — ПОСЛЕ attach к DOM
+        // (у отсоединённого элемента scrollHeight = 0).
+        if (streaming) tc.scrollTop = tc.scrollHeight;
       } else {
         const span = document.createElement("div");
         span.innerHTML = renderMarkdown(part.text);
