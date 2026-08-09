@@ -22,7 +22,7 @@ use qwen35_batch::scheduler::{BatchScheduler, StepOutcome};
 use qwen35_batch::slot::SlotStatus;
 use tokio::sync::mpsc;
 
-use crate::engine::{quant_from_filename, select_device, trim_messages, FindAny, floor_char_boundary};
+use crate::engine::{model_id_from_filename, quant_from_filename, select_device, trim_messages, FindAny, floor_char_boundary};
 use crate::engine_types::{ChatMessage, Engine, GenParams, ModelInfo, StreamEvent};
 use crate::sampler::{self, Rng};
 
@@ -136,7 +136,7 @@ impl BatchedEngine {
         let scheduler = BatchScheduler::new(adapter, cfg.slots, eos, vocab);
 
         let info = ModelInfo {
-            id: "qwen3.6-27b".into(),
+            id: model_id_from_filename(std::path::Path::new(&cfg.model_path)),
             context_length: cfg.context_length,
             quant: quant_from_filename(std::path::Path::new(&cfg.model_path)),
             slots: cfg.slots,

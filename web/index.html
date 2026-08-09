@@ -62,7 +62,7 @@ details.think .tc { white-space: pre-wrap; word-break: break-word; color: var(--
 </head>
 <body>
 <header>
-  <span class="brand">Qwen3.6&nbsp;27B</span>
+  <span class="brand" id="brand">Qwen3.6</span>
   <span id="modelinfo" class="badge">…</span>
   <input type="password" id="apikey" placeholder="API key" autocomplete="off">
   <select id="mode" title="Режим / пресет сэмплинга">
@@ -154,6 +154,7 @@ async function loadModels() {
       if (m.context_length) ctxLen = m.context_length;
       $("modelinfo").textContent =
         [m.id, m.quant, "ctx " + (m.context_length || "?"), "slots " + (m.slots ?? "?")].filter(Boolean).join(" · ");
+      if (m.id) { $("brand").textContent = m.id; document.title = m.id + " — чат"; }
     }
   } catch (e) {
     if (String(e.message).startsWith("401")) return; // форма ключа уже показана

@@ -140,7 +140,7 @@ impl CandleEngine {
             eos,
             ctx: cfg.ctx,
             info: ModelInfo {
-                id: "qwen3.6-27b".into(),
+                id: model_id_from_filename(&cfg.model),
                 context_length: cfg.ctx,
                 quant: quant_from_filename(&cfg.model),
                 slots: cfg.slots,
@@ -414,6 +414,26 @@ pub fn select_device() -> Result<candle_core::Device> {
     Ok(candle_core::Device::Cpu)
 }
 
+/// Id модели из имени файла: `Qwen3.6-35B-A3B-UD-IQ2_XXS.gguf` → "qwen3.6-35b-a3b".
+/// Срезаем суффикс кванта (`-UD-*` / `-IQ*`/`-Q*` последний сегмент — его
+/// отдельно показывает quant).
+pub fn model_id_from_filename(path: &Path) -> String {
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown");
+    // unsloth: <name>-UD-<QUANT>; lmstudio: <name>-<QUANT>.
+    let base = stem
+        .rsplit_once("-UD-")
+        .map(|(b, _)| b)
+        .unwrap_or_else(|| {
+            stem.rsplit_once('-')
+                .map(|(b, _)| b)
+                .unwrap_or(stem)
+        });
+    base.to_lowercase()
+}
+
 /// Квант из имени файла: `qwen36-27b-q2_k_xl.gguf` → "Q2_K_XL".
 pub fn quant_from_filename(path: &Path) -> String {
     path.file_stem()
@@ -539,6 +559,18 @@ mod tests {
         let (out, truncated) = trim_messages(&m, 10, |m| m.content.len());
         assert!(truncated);
         assert_eq!(out.len(), 2); // system + последний user
+    }
+
+    #[test]
+    fn model_id_from_filenames() {
+        assert_eq!(
+            model_id_from_filename(Path::new("D:/models/Qwen3.6-35B-A3B-UD-IQ2_XXS.gguf")),
+            "qwen3.6-35b-a3b"
+        );
+        assert_eq!(
+            model_id_from_filename(Path::new("models/qwen36-27b-q2_k_xl.gguf")),
+            "qwen36-27b"
+        );
     }
 
     #[test]
