@@ -5,7 +5,9 @@ edition = "2021"
 description = "Qwen3.6-27B GGUF inference server на candle-fork-qwen35-batch (BD-002)"
 
 [dependencies]
-qwen35-batch = { path = "/Volumes/Askid Dev/Projects/candle-fork-qwen35-batch/qwen35-batch", features = ["real-model"] }
+# Форк лежит соседней директорией (macOS/Windows/Linux одинаково):
+# <parent>/Qwen3.6 27B + <parent>/candle-fork-qwen35-batch
+qwen35-batch = { path = "../candle-fork-qwen35-batch/qwen35-batch", features = ["real-model"] }
 anyhow = "1"
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
@@ -18,7 +20,7 @@ clap = { version = "4", features = ["derive"] }
 uuid = { version = "1", features = ["v4"] }
 
 # Прямые зависимости от candle-форка: для типов Device/Tokenizer в engine.
-candle-core = { path = "/Volumes/Askid Dev/Projects/candle-fork-qwen35-batch/candle-core" }
+candle-core = { path = "../candle-fork-qwen35-batch/candle-core" }
 tokenizers = { version = "0.22.0", default-features = false, features = ["onig"] }
 memmap2 = "0.9.3"
 

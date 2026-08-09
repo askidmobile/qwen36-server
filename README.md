@@ -31,11 +31,27 @@ finish=stop, VRAM 9.9 GB стабильно, decode step B=4 = 2.08s).
 # macOS (разработка, Metal)
 cargo build --release --features metal
 # Windows (yttri-win, CUDA): cargo build --release --features cuda
+# Linux (CUDA, напр. RTX 4090): scripts/build_linux.sh
 
 export QWEN36_API_KEY=<ключ>
 export QWEN36_MODEL=<путь к GGUF>   # напр. D:\models\Qwen3.6-27B-UD-Q2_K_XL.gguf
 ./target/release/qwen36-server     # слушает 0.0.0.0:8080
 ```
+
+## Linux + CUDA (арендованный GPU-сервер)
+
+`scripts/build_linux.sh` — полный цикл: клонирует форк соседней директорией
+(если нет), проверяет nvcc/cargo, собирает с `--features cuda`.
+Path-зависимости относительные (`../candle-fork-qwen35-batch`), раскладка:
+
+```
+<workdir>/candle-fork-qwen35-batch   # ветка feat/qwen35-batching
+<workdir>/Qwen3.6 27B                # этот репо
+```
+
+`CUDA_COMPUTE_CAP`: 89 = RTX 4090 (default в скрипте), 86 = 3060, 90 = H100.
+На Linux нет WDDM paging — Q2_K_XL 27B (11.8 GB) и Q4_K_M (15.4 GB) спокойно
+живут на 24 GB, деградации как на Windows не будет.
 
 Опционально: `QWEN36_HOST`, `QWEN36_PORT` (8080), `QWEN36_CTX` (81920), `QWEN36_SLOTS` (4).
 Веб-чат: `http://<host>:8080/`.
