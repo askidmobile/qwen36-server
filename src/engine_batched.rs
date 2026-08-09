@@ -364,7 +364,7 @@ fn dispatch_loop(
             eprintln!("[dl] finishing slots {finished_idxs:?}");
         }
         for idx in finished_idxs {
-            finish_slot(idx, &mut bindings, &mut sched, &in_flight, &mut slot_samplers, &mut slot_emitted_toks, &mut slot_truncated);
+            finish_slot(idx, &mut bindings, &mut sched, &in_flight, &mut slot_samplers, &mut slot_emitted_toks, &mut slot_truncated, &tokenizer);
             if trace {
                 eprintln!("[dl] finished slot {idx}");
             }
@@ -449,7 +449,14 @@ fn drain_after_step(
             }
         }
 
-        let end = cut_at.unwrap_or(new_text.len());
+        let mut end = cut_at.unwrap_or(new_text.len());
+        // Holdback: не эмитим хвост, заканчивающийся на U+FFFD — это может быть
+        // недо-собранная UTF-8 последовательность (emoji/CJK разрезаны на
+        // несколько токенов); следующий токен достроит. Иначе устаревший '�'
+        // уходит клиенту и префикс расходится навсегда. Флаш — в finish_slot.
+        while end > b.emitted_text.len() && new_text[..end].ends_with('\u{FFFD}') {
+            end -= '\u{FFFD}'.len_utf8();
+        }
         // Префиксное сравнение: если decode ретроактивно изменил ранние байты —
         // ресинхронизируемся (не эмитим на этом шаге), индексной арифметики нет.
         if new_text.starts_with(&b.emitted_text) && end >= b.emitted_text.len() {
@@ -567,8 +574,21 @@ fn finish_slot(
     slot_samplers: &mut HashMap<usize, (GenParams, Rng)>,
     slot_emitted_toks: &mut HashMap<usize, usize>,
     slot_truncated: &mut HashMap<usize, bool>,
+    tokenizer: &Arc<Mutex<tokenizers::Tokenizer>>,
 ) {
-    let Some(b) = bindings[idx].take() else { return };
+    let Some(mut b) = bindings[idx].take() else { return };
+    // Flush holdback-хвоста (U+FFFD) перед Done: полный decode generated.
+    if !b.cancelled {
+        let generated = sched.slots_mut()[idx].generated_tokens().to_vec();
+        let text = {
+            let tok = tokenizer.lock().unwrap_or_else(|e| e.into_inner());
+            tokenizer::decode_text(&tok, &generated).unwrap_or_default()
+        };
+        if text.starts_with(&b.emitted_text) && text.len() > b.emitted_text.len() {
+            let tail = text[b.emitted_text.len()..].to_string();
+            let _ = b.out.try_send(StreamEvent::Delta(tail));
+        }
+    }
     if !b.cancelled {
         let finish_reason = if b.stop_hit {
             "stop"

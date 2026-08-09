@@ -256,11 +256,21 @@ fn run_generation(
         });
         let mut rng = Rng::new(seed);
         let mut generated: Vec<u32> = Vec::new();
-        let mut full_text;
+        let mut full_text = String::new();
         // Эмитнутый префикс (строка, не индекс): decode_text может ретроактивно
         // менять ранние байты (многотокенные UTF-8) — индекс небезопасен.
         let mut emitted_text = String::new();
         let max_stop_len = params.stop.iter().map(|s| s.len()).max().unwrap_or(0);
+
+        // Flush holdback-хвоста перед Done.
+        macro_rules! flush_tail {
+            () => {
+                if full_text.starts_with(&emitted_text) && full_text.len() > emitted_text.len() {
+                    let tail = full_text[emitted_text.len()..].to_string();
+                    let _ = tx.blocking_send(StreamEvent::Delta(tail));
+                }
+            };
+        }
 
         for _ in 0..params.max_tokens {
             let tok = sampler::sample(
@@ -275,6 +285,7 @@ fn run_generation(
                 &mut rng,
             );
             if tok == eos {
+                flush_tail!();
                 finish("stop", generated.len(), &tx);
                 return Ok(());
             }
@@ -295,7 +306,13 @@ fn run_generation(
                 }
             }
 
-            let end = cut_at.unwrap_or(full_text.len());
+            let mut end = cut_at.unwrap_or(full_text.len());
+            // Holdback U+FFFD-хвоста: недостроенная UTF-8 последовательность
+            // (emoji/CJK на границе токенов) достроится следующим токеном.
+            // Flush — при завершении (finish).
+            while end > emitted_text.len() && full_text[..end].ends_with('\u{FFFD}') {
+                end -= '\u{FFFD}'.len_utf8();
+            }
             if full_text.starts_with(&emitted_text) && end >= emitted_text.len() {
                 let chunk = &full_text[emitted_text.len()..end];
                 if !chunk.is_empty()
@@ -303,9 +320,10 @@ fn run_generation(
                 {
                     return Ok(()); // клиент отключился
                 }
+                emitted_text = full_text[..end].to_string();
             }
-            emitted_text = full_text[..end].to_string();
             if cut_at.is_some() {
+                flush_tail!();
                 finish("stop", generated.len(), &tx);
                 return Ok(());
             }
@@ -316,6 +334,7 @@ fn run_generation(
             logits = last_logits(&logits_t)?;
             pos += 1;
         }
+        flush_tail!();
         finish("length", generated.len(), &tx);
         Ok(())
     })();
