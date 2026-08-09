@@ -17,6 +17,14 @@ batch-планировщик. Целевая площадка: Windows + CUDA (y
 (видение, scope, риски, дорожная карта) и [docs/brief/decisions.md](docs/brief/decisions.md)
 (обязательные решения BD-001…BD-020).
 
+**2026-08-09 — BatchedEngine на yttri-win:** 4 слота × Qwen3.6-27B
+**IQ2_XXS** — 4 конкурентных запроса завершились корректно (70 tok каждый,
+finish=stop, VRAM 9.9 GB стабильно, decode step B=4 = 2.08s).
+Важно: на **Q2_K_XL** (11.8 GB, VRAM 12022/12288 MiB) decode деградирует до
+13.4s/step из-за WDDM paging — 4-слотовый режим требует VRAM-запаса,
+на 12 GB карте это IQ2_XXS. Включённый раньше срок — фаза 5 по BD-019
+(IQ2-загрузка уже работает через dequant+cuBLAS fallback).
+
 ## Запуск
 
 ```bash
@@ -38,6 +46,25 @@ export QWEN36_MODEL=<путь к GGUF>   # напр. D:\models\Qwen3.6-27B-UD-Q2
 cargo test --features metal        # 15 lib + 10 API integration
 scripts/stability_smoke.sh         # критерий BD-008 (на yttri-win)
 ```
+
+## Производительность
+
+Бенчмарк на yttri-win (RTX 3060 12 GB, CUDA 12.4, driver 591.86).
+Модель: Qwen3.6-27B Q4_K_M (15.4 GB GGUF), ctx 8192, 4 слота.
+Скрипт: `scripts/bench.ps1` (HttpWebRequest для real-streaming TTFT, runspaces для
+конкурентности).
+
+Примечание: модель превышает VRAM 12 GB — работает через системный RAM swap
+(working set ~20 GB), поэтому скорости низкие. Ожидаемый режим после фазы 5
+(IQ2-ядра) — Q2_K_XL/IQ2_XXS полностью в VRAM, скорости вырастут на порядок.
+
+- **TTFT** (time to first token, single-slot stream): 2595 ms
+- **Decode** (single-slot, 128 tok): 1.1 tok/s
+- **Prefill** (2013 tok prompt): 8.2 tok/s
+- **4-slot concurrent** (64 tok each): aggregate 1.5 tok/s (per-slot 0.4 tok/s)
+- **VRAM**: 12032 / 12288 MiB (99% — swap-bound), GPU util 100% под нагрузкой
+
+Прогон:`scripts/bench.ps1 -BaseUrl http://localhost:18099 -ApiKey <key>`
 
 ## Стек
 
