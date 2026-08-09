@@ -247,8 +247,32 @@ function renderMarkdown(src) {
     return "\u0000" + (fences.length - 1) + "\u0000";
   });
   s = escapeHtml(s);
+  // Pipe-таблицы: header | ... + сепаратор |---| + строки тела → placeholder.
+  const rawLines = s.split("\n");
+  const lines = [];
+  for (let i = 0; i < rawLines.length; i++) {
+    const isRow = l => l.trim().includes("|") && l.trim().length > 1;
+    const isSep = l => /^\|?\s*:?-{2,}[\s:|-]*\|?\s*$/.test(l.trim());
+    if (isRow(rawLines[i]) && i + 1 < rawLines.length && isSep(rawLines[i + 1])) {
+      const splitRow = l => l.trim().replace(/^\||\|$/g, "").split("|").map(c => c.trim());
+      const head = splitRow(rawLines[i]);
+      let j = i + 2;
+      const bodyRows = [];
+      while (j < rawLines.length && isRow(rawLines[j]) && !isSep(rawLines[j])) {
+        bodyRows.push(splitRow(rawLines[j]));
+        j++;
+      }
+      let t = "<table><thead><tr>" + head.map(c => "<th>" + inlineMd(c) + "</th>").join("") + "</tr></thead><tbody>";
+      for (const r of bodyRows) t += "<tr>" + r.map(c => "<td>" + inlineMd(c) + "</td>").join("") + "</tr>";
+      t += "</tbody></table>";
+      fences.push(t);
+      lines.push("\u0000" + (fences.length - 1) + "\u0000");
+      i = j - 1;
+      continue;
+    }
+    lines.push(rawLines[i]);
+  }
   // Блочные конструкции по строкам.
-  const lines = s.split("\n");
   let html = "", inList = null, para = [];
   const flushPara = () => {
     if (para.length) { html += "<p>" + para.join("<br>") + "</p>"; para = []; }
@@ -416,15 +440,16 @@ async function send() {
   c.messages.push(asst);
   saveChat(c);
   renderChatList();
-  renderMessages(); // показать сообщение пользователя сразу
+  renderMessages(); // показать сообщение пользователя сразу (asst уже отрисован тут)
 
   abortCtrl = new AbortController();
   $("stopbtn").disabled = false;
   $("send").disabled = true;
 
   const el = $("messages");
-  let msgEl = renderMsg(asst, true);
-  el.append(msgEl);
+  // Берём уже отрисованную ноду asst (последнюю), не создаём вторую.
+  let msgEl = el.lastElementChild;
+  msgEl.classList.add("streaming");
   userPinned = true;
   el.scrollTop = el.scrollHeight;
   const bubble = msgEl.querySelector(".bubble");
