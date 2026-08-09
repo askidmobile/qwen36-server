@@ -252,6 +252,8 @@ fn dispatch_loop(
     let mut slot_emitted_toks: HashMap<usize, usize> = HashMap::new();
     /// Per-slot truncated flag (для Done).
     let mut slot_truncated: HashMap<usize, bool> = HashMap::new();
+    // Диагностика: heartbeat раз в 5s пока есть активные слоты.
+    let mut last_hb = Instant::now();
 
     loop {
         // 1. Слить накопленные ingest-сообщения.
@@ -295,9 +297,16 @@ fn dispatch_loop(
         });
         sched.set_sampler(sampler_box);
 
+        let trace = std::env::var_os("QWEN36_TRACE").is_some();
+        if trace {
+            eprintln!("[dl] before tokenizer.lock");
+        }
         // tok_guard — std::sync::MutexGuard: step_with и drain синхронные.
         let did_work = {
             let tok_guard = tokenizer.lock().expect("tokenizer mutex");
+            if trace {
+                eprintln!("[dl] got tokenizer.lock");
+            }
             let outcome = sched.step_with(&mut |sidx, _generated| {
                 bindings
                     .get(sidx)
@@ -313,7 +322,13 @@ fn dispatch_loop(
                     true
                 }
                 Ok(StepOutcome::DidDecode(_)) => {
+                    if trace {
+                        eprintln!("[dl] before drain");
+                    }
                     drain_after_step(&mut sched, &mut bindings, &mut slot_emitted_toks, &tok_guard);
+                    if trace {
+                        eprintln!("[dl] after drain");
+                    }
                     true
                 }
                 Ok(StepOutcome::Idle) => false,
@@ -343,9 +358,34 @@ fn dispatch_loop(
                     .unwrap_or(false)
             })
             .collect();
+        if trace && !finished_idxs.is_empty() {
+            eprintln!("[dl] finishing slots {finished_idxs:?}");
+        }
         for idx in finished_idxs {
             finish_slot(idx, &mut bindings, &mut sched, &in_flight, &mut slot_samplers, &mut slot_emitted_toks, &mut slot_truncated);
+            if trace {
+                eprintln!("[dl] finished slot {idx}");
+            }
             admit_from_pending(&mut pending, &mut sched, &mut bindings, &mut slot_samplers, &mut slot_truncated);
+        }
+
+        // Heartbeat: статусы слотов каждые 5s при активности.
+        if last_hb.elapsed() > Duration::from_secs(5)
+            && bindings.iter().any(|b| b.is_some())
+        {
+            let st: Vec<String> = (0..cfg.slots)
+                .map(|i| {
+                    let s = &sched.slots_mut()[i];
+                    format!(
+                        "{}:{:?}:gen={}",
+                        i,
+                        s.status,
+                        s.generated_tokens().len()
+                    )
+                })
+                .collect();
+            eprintln!("[hb] pending={} slots={}", pending.len(), st.join(" "));
+            last_hb = Instant::now();
         }
 
         // 5. Нет работы — ждём; есть — yield.
