@@ -80,7 +80,9 @@ details.think { margin-bottom: 10px; border: 1px solid var(--border); border-rad
 details.think summary { cursor: pointer; color: var(--dim); font-size: 12px; font-weight: 500; padding: 8px 14px; user-select: none; }
 details.think summary::before { content: "🧠 "; }
 details.think[open] summary { border-bottom: 1px solid var(--border-soft); }
-details.think .tc { white-space: pre-wrap; word-break: break-word; color: var(--dim); font-size: 13px; padding: 10px 14px; max-height: 320px; overflow-y: auto; }
+details.think .tc { word-break: break-word; color: var(--dim); font-size: 13px; padding: 10px 14px; max-height: 320px; overflow-y: auto; }
+details.think .tc code { background: var(--bg3); }
+details.think .tc pre { opacity: .9; }
 
 #composer { display: flex; gap: 10px; padding: 14px 24px; border-top: 1px solid var(--border-soft); background: var(--bg); }
 #input { flex: 1; resize: none; background: var(--bg); border: 1px solid var(--border); color: var(--fg); border-radius: var(--radius); padding: 11px 16px; font: inherit; min-height: 48px; max-height: 200px; }
@@ -338,7 +340,9 @@ function fillBubble(bubble, msg, streaming) {
         const words = part.text.trim().split(/\s+/).filter(Boolean).length;
         sum.textContent = "Рассуждения" + (words ? " · " + words + " слов" : "");
         const tc = document.createElement("div");
-        tc.className = "tc"; tc.textContent = part.text;
+        tc.className = "tc"; tc.innerHTML = renderMarkdown(part.text);
+        // Автоскролл рассуждений при стриме: новый текст всегда виден.
+        if (streaming) tc.scrollTop = tc.scrollHeight;
         det.append(sum, tc);
         bubble.append(det);
       } else {
@@ -380,6 +384,12 @@ function readParams() {
 
 // --- Отправка + SSE-стрим ---
 let abortCtrl = null;
+// Пользователь у низа ленты → автoскролл; проскроллил вверх → не дёргаем.
+let userPinned = true;
+$("messages").addEventListener("scroll", () => {
+  const el = $("messages");
+  userPinned = el.scrollTop + el.clientHeight >= el.scrollHeight - 60;
+});
 
 async function send() {
   const text = $("input").value.trim();
@@ -414,6 +424,7 @@ async function send() {
   const el = $("messages");
   let msgEl = renderMsg(asst, true);
   el.append(msgEl);
+  userPinned = true;
   el.scrollTop = el.scrollHeight;
   const bubble = msgEl.querySelector(".bubble");
 
@@ -428,7 +439,8 @@ async function send() {
       if (!dirty) return;
       dirty = false;
       fillBubble(bubble, asst, true);
-      el.scrollTop = el.scrollHeight;
+      // Скроллим основную ленту только если пользователь у низа.
+      if (userPinned) el.scrollTop = el.scrollHeight;
     });
   };
 
