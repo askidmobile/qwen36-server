@@ -198,10 +198,22 @@ impl Engine for CandleEngine {
                 .collect();
             let text = tokenizer::build_chatml_text(&msgs);
             prompt_ids = if params.thinking {
-                st.tokenizer
+                // Каноничный Qwen-шаблон: "assistant\n<think>\n" — модель
+                // продолжает уже ОТКРЫТЫЙ think-блок (иначе она может не
+                // эмитить opener и </think> окажется в середине ответа).
+                let mut ids = st
+                    .tokenizer
                     .encode(text, false)
                     .map(|e| e.get_ids().to_vec())
-                    .map_err(|e| anyhow::anyhow!("encode prompt: {e}"))?
+                    .map_err(|e| anyhow::anyhow!("encode prompt: {e}"))?;
+                ids.push(qwen35_batch::real::tokenizer::THINK_OPEN_TOKEN_ID);
+                let nl = st
+                    .tokenizer
+                    .encode("\n", false)
+                    .map(|e| e.get_ids().to_vec())
+                    .map_err(|e| anyhow::anyhow!("encode nl: {e}"))?;
+                ids.extend_from_slice(&nl);
+                ids
             } else {
                 tokenizer::encode_no_think(&st.tokenizer, &text)?
             };

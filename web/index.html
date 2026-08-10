@@ -424,6 +424,18 @@ function inlineMd(s) {
 
 // --- Thinking-парсер ---
 function parseThinking(text) {
+  // Кейс 0: потерянный opener — есть </think>, но нет <think> в начале
+  // (старые сессии/модели, стартовавшие «внутри» блока).
+  const close = text.search(/<\/(think|thinking)>/i);
+  const open = text.search(/<(think|thinking)>/i);
+  if (close >= 0 && (open < 0 || open > close)) {
+    const before = text.slice(0, close);
+    const after = text.slice(close).replace(/^<\/(?:think|thinking)>/i, "");
+    const parts = [];
+    if (before.trim()) parts.push({ kind: "think", text: before.replace(/^\n+/, "") });
+    if (after.trim()) parts.push({ kind: "text", text: after.replace(/^\n+/, "") });
+    if (parts.length) return parts;
+  }
   const re = /<(think|thinking)>([\s\S]*?)(?:<\/\1>|$)/i;
   const m = text.match(re);
   if (m) {
