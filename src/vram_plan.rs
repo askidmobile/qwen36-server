@@ -133,48 +133,54 @@ fn state_mib_per_slot(fp: &ModelFootprint) -> f64 {
     fp.delta_blocks as f64 * fp.ssm_state_mib_per_block
 }
 
-/// Подбор (ctx, slots): сначала режем ctx по лесенке, потом слоты.
+/// Подбор (ctx, slots): ctx вычисляется аналитически из остатка бюджета
+/// (линейно от KV/токен), slots режутся только если даже ctx=2048 не влезает.
 pub fn compute(total_mib: usize, fp: &ModelFootprint, req_ctx: usize, req_slots: usize) -> Result<Plan> {
     let budget = total_mib as f64 * BUDGET_FRAC;
-    let ctx_ladder: Vec<usize> = [81920, 32768, 16384, 8192, 4096, 2048]
-        .into_iter()
-        .filter(|&c| c <= req_ctx)
-        .collect();
-    let ctx_ladder = if ctx_ladder.is_empty() {
-        vec![req_ctx]
-    } else {
-        ctx_ladder
-    };
+    let state = state_mib_per_slot(fp);
+    // KV на 1 токен контекста на слот (MiB).
+    let kv_per_tok = kv_mib_per_slot(fp, 1);
 
     for slots in (1..=req_slots).rev() {
-        for &ctx in &ctx_ladder {
-            let need = fp.weights_mib as f64
-                + slots as f64 * (kv_mib_per_slot(fp, ctx) + state_mib_per_slot(fp))
-                + WORKSPACE_MIB as f64;
-            if need <= budget {
-                let changed = ctx != req_ctx || slots != req_slots;
-                let report = format!(
-                    "[vram] total={total_mib}MiB weights={}MiB kv={:.0}MiB/slot state={:.0}MiB/slot workspace={WORKSPACE_MIB}MiB\n\
-                     [vram] plan: ctx={ctx} slots={slots}{}",
-                    fp.weights_mib,
-                    kv_mib_per_slot(fp, ctx),
-                    state_mib_per_slot(fp),
-                    if changed {
-                        format!(
-                            " (запрошено {req_ctx}/{req_slots} — снижено: не влезало в {:.0}% карты)",
-                            BUDGET_FRAC * 100.0
-                        )
-                    } else {
-                        " (как запрошено)".to_string()
-                    }
-                );
-                return Ok(Plan { ctx, slots, report });
-            }
+        let base = fp.weights_mib as f64 + WORKSPACE_MIB as f64 + slots as f64 * state;
+        let room = budget - base;
+        if room <= 0.0 {
+            continue;
         }
+        let max_ctx = (room / (slots as f64 * kv_per_tok)) as usize;
+        // Snap вниз до 1024; минимально допустимый — 2048.
+        let max_ctx = max_ctx / 1024 * 1024;
+        if max_ctx < 2048 {
+            continue;
+        }
+        let ctx = req_ctx.min(max_ctx);
+        if ctx < 2048 {
+            continue;
+        }
+        let need = fp.weights_mib as f64
+            + slots as f64 * (kv_mib_per_slot(fp, ctx) + state)
+            + WORKSPACE_MIB as f64;
+        let changed = ctx != req_ctx || slots != req_slots;
+        let report = format!(
+            "[vram] total={total_mib}MiB weights={}MiB kv={:.0}MiB/slot state={:.0}MiB/slot workspace={WORKSPACE_MIB}MiB\n\
+             [vram] plan: ctx={ctx} slots={slots}{}",
+            fp.weights_mib,
+            kv_mib_per_slot(fp, ctx),
+            state,
+            if changed {
+                format!(
+                    " (запрошено {req_ctx}/{req_slots} — снижено под {:.0}% карты, ~{need:.0}MiB)",
+                    BUDGET_FRAC * 100.0
+                )
+            } else {
+                " (как запрошено)".to_string()
+            }
+        );
+        return Ok(Plan { ctx, slots, report });
     }
     let min_need = fp.weights_mib as f64
         + kv_mib_per_slot(fp, 2048)
-        + state_mib_per_slot(fp)
+        + state
         + WORKSPACE_MIB as f64;
     Err(anyhow!(
         "VRAM не хватает даже для 1 слота × ctx 2048: нужно ~{min_need:.0}MiB, бюджет {budget:.0}MiB ({total_mib}MiB total)"
