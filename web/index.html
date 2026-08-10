@@ -202,7 +202,6 @@ async function loadAvailableModels() {
       const o = document.createElement("option");
       o.value = m.path;
       o.textContent = m.name + " (" + m.size_mib + " MiB)";
-      o.dataset.nativeCtx = m.native_ctx || 0;
       if (j.current && m.path === j.current.path) o.selected = true;
       sel.append(o);
     }
@@ -251,14 +250,29 @@ $("applymodel").onclick = async () => {
   else $("modelinfo").textContent = "switch: HTTP " + r.status;
 };
 
-// Слайдер ↔ число, лимиты из native_ctx выбранной модели.
-function syncCtxLimits() {
-  const opt = $("modelsel").selectedOptions[0];
-  const max = opt && +opt.dataset.nativeCtx > 2048 ? +opt.dataset.nativeCtx : 262144;
-  $("ctxslider").max = max;
-  $("ctxset").max = max;
+// Слайдер ↔ число; лимит = native_ctx выбранной модели (ленивый fetch одного
+// файла), иначе 262144. Планер на сервере всё равно снизит под VRAM.
+let nativeCtxCache = {};
+async function syncCtxLimits() {
+  const path = $("modelsel").value;
+  let max = nativeCtxCache[path];
+  if (!max) {
+    $("ctxset").max = 262144;
+    if (path) {
+      try {
+        const r = await api("/v1/model_native_ctx?path=" + encodeURIComponent(path));
+        if (r.ok) {
+          const j = await r.json();
+          if (j.native_ctx > 2048) nativeCtxCache[path] = j.native_ctx;
+        }
+      } catch (e) {}
+      max = nativeCtxCache[path];
+    }
+  }
+  if (max) $("ctxset").max = max;
+  $("ctxslider").max = $("ctxset").max;
   let v = parseInt($("ctxset").value, 10) || 8192;
-  v = Math.max(2048, Math.min(v, max));
+  v = Math.max(2048, Math.min(v, +$("ctxset").max));
   $("ctxset").value = v;
   $("ctxslider").value = v;
 }

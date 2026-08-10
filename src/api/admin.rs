@@ -36,18 +36,33 @@ fn scan_gguf(dir: &Path, depth: usize, out: &mut Vec<Value>) {
             scan_gguf(&p, depth + 1, out);
         } else if p.extension().and_then(|s| s.to_str()) == Some("gguf") {
             let size_mib = e.metadata().map(|m| m.len() / 1024 / 1024).unwrap_or(0);
-            // Нативный контекст из metadata — для UI-ограничений. Быстро (без данных).
-            let native_ctx = crate::vram_plan::footprint_from_gguf(&p)
-                .map(|fp| fp.native_ctx)
-                .unwrap_or(0);
             out.push(json!({
                 "name": p.file_name().and_then(|s| s.to_str()).unwrap_or("?"),
                 "path": p.to_string_lossy(),
                 "size_mib": size_mib,
-                "native_ctx": native_ctx,
             }));
         }
     }
+}
+
+/// Нативный контекст конкретной модели (по пути) — лёгкий metadata-read
+/// одного файла для UI-слайдера. НЕ пакетно: Content::read всех файлов подряд
+/// блокировал tokio-воркер на 20+ секунд («зависание» 2026-08-10).
+pub async fn model_native_ctx(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Json<Value> {
+    let path = q.get("path").cloned().unwrap_or_default();
+    let p = PathBuf::from(&path);
+    if !p.starts_with(&state.models_dir) {
+        return Json(json!({"native_ctx": 0, "error": "outside models_dir"}));
+    }
+    let nc = tokio::task::spawn_blocking(move || {
+        crate::vram_plan::footprint_from_gguf(&p).map(|fp| fp.native_ctx).unwrap_or(0)
+    })
+    .await
+    .unwrap_or(0);
+    Json(json!({"native_ctx": nc}))
 }
 
 pub async fn available_models(State(state): State<AppState>) -> Json<Value> {
