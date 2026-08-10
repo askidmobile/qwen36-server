@@ -26,6 +26,8 @@ pub struct ModelFootprint {
     pub delta_blocks: usize,
     pub kv_heads: usize,
     pub head_dim: usize,
+    /// Нативный контекст модели (metadata context_length).
+    pub native_ctx: usize,
     /// ssm state: n_v_heads × state_size² × 4B на DeltaNet блок на слот.
     pub ssm_state_mib_per_block: f64,
 }
@@ -63,12 +65,15 @@ pub fn footprint_from_gguf(path: &Path) -> Result<ModelFootprint> {
     let ssm_state_mib_per_block =
         (n_v_heads * state_size * state_size * 4) as f64 / 1024.0 / 1024.0;
 
+    let native_ctx = g("context_length").unwrap_or(0);
+
     Ok(ModelFootprint {
         weights_mib: (file_size as f64 * 0.95 / 1024.0 / 1024.0) as usize,
         attn_blocks,
         delta_blocks,
         kv_heads,
         head_dim,
+        native_ctx,
         ssm_state_mib_per_block,
     })
 }
@@ -188,6 +193,7 @@ mod tests {
             delta_blocks: 30,
             kv_heads: 2,
             head_dim: 256,
+            native_ctx: 262144,
             ssm_state_mib_per_block: 2.0,
         }
     }

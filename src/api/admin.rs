@@ -36,10 +36,15 @@ fn scan_gguf(dir: &Path, depth: usize, out: &mut Vec<Value>) {
             scan_gguf(&p, depth + 1, out);
         } else if p.extension().and_then(|s| s.to_str()) == Some("gguf") {
             let size_mib = e.metadata().map(|m| m.len() / 1024 / 1024).unwrap_or(0);
+            // Нативный контекст из metadata — для UI-ограничений. Быстро (без данных).
+            let native_ctx = crate::vram_plan::footprint_from_gguf(&p)
+                .map(|fp| fp.native_ctx)
+                .unwrap_or(0);
             out.push(json!({
                 "name": p.file_name().and_then(|s| s.to_str()).unwrap_or("?"),
                 "path": p.to_string_lossy(),
                 "size_mib": size_mib,
+                "native_ctx": native_ctx,
             }));
         }
     }
@@ -139,10 +144,12 @@ async fn do_switch(
     let old = state.switcher.take();
     drop(old);
     if vram_plan::total_vram_mib().is_some() {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         loop {
             let free = vram_plan::free_vram_mib().unwrap_or(0);
-            if free as usize >= fp.weights_mib + 512 {
+            // Порог = веса новой модели (без +512: driver pool/nvidia-smi
+            // занижают free, сверхзапрос таймаутит — уже ловили 180s «зависание»).
+            if free as usize >= fp.weights_mib {
                 break;
             }
             if std::time::Instant::now() > deadline {

@@ -110,7 +110,10 @@ details.think .tc pre { opacity: .9; }
     <option value="instruct">instruct</option>
   </select>
   <select id="modelsel" title="Модель (GGUF с диска сервера)"></select>
-  <input type="number" id="ctxset" title="Контекст (токены)" min="2048" step="1024" style="width:92px">
+  <span class="ctxui" title="Контекст (токены). Планер может снизить под VRAM.">
+    <input type="range" id="ctxslider" min="2048" max="262144" step="1024" style="width:110px">
+    <input type="number" id="ctxset" min="2048" step="1024" style="width:88px">
+  </span>
   <button id="applymodel" title="Переключить модель/контекст (перезагрузка ~1-3 мин)">Применить</button>
   <div class="ctxwrap">
     <div class="ctxlabel" id="ctxlabel">контекст: 0 / 81920</div>
@@ -199,10 +202,12 @@ async function loadAvailableModels() {
       const o = document.createElement("option");
       o.value = m.path;
       o.textContent = m.name + " (" + m.size_mib + " MiB)";
+      o.dataset.nativeCtx = m.native_ctx || 0;
       if (j.current && m.path === j.current.path) o.selected = true;
       sel.append(o);
     }
-    if (j.current && j.current.ctx) $("ctxset").value = j.current.ctx;
+    if (j.current && j.current.ctx) { $("ctxset").value = j.current.ctx; $("ctxslider").value = Math.min(j.current.ctx, +$("ctxslider").max); }
+    syncCtxLimits();
     if (j.loading) watchModelSwitch();
   } catch (e) { /* ключ ещё не введён — loadModels покажет форму */ }
 }
@@ -245,6 +250,21 @@ $("applymodel").onclick = async () => {
   if (r.ok) watchModelSwitch();
   else $("modelinfo").textContent = "switch: HTTP " + r.status;
 };
+
+// Слайдер ↔ число, лимиты из native_ctx выбранной модели.
+function syncCtxLimits() {
+  const opt = $("modelsel").selectedOptions[0];
+  const max = opt && +opt.dataset.nativeCtx > 2048 ? +opt.dataset.nativeCtx : 262144;
+  $("ctxslider").max = max;
+  $("ctxset").max = max;
+  let v = parseInt($("ctxset").value, 10) || 8192;
+  v = Math.max(2048, Math.min(v, max));
+  $("ctxset").value = v;
+  $("ctxslider").value = v;
+}
+$("ctxslider").oninput = () => { $("ctxset").value = $("ctxslider").value; };
+$("ctxset").onchange = () => { syncCtxLimits(); };
+$("modelsel").onchange = () => { syncCtxLimits(); };
 
 async function loadModels() {
   try {
