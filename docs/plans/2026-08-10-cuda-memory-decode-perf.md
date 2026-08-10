@@ -101,18 +101,21 @@ fn compute(total_mib, model: &ModelProfile, req: (ctx, slots)) -> Plan:
 ## Implementation phases
 
 ### Phase 1: Наблюдаемость + планер + sampler (estimate: 3 h)
-- [ ] `src/vram_plan.rs` — планер + unit-тесты формул (KV/state bytes) → `Qwen3.6 27B/src/vram_plan.rs`
-- [ ] `src/config.rs` — интеграция clamp + раскладка в stdout → `Qwen3.6 27B/src/config.rs`
-- [ ] [P] `src/sampler.rs` — partial top-k + property-тест (argmax-parity со старым sampler на random logits) → `Qwen3.6 27B/src/sampler.rs`
-- **Independent check:** старт на yttri-win: строка `[vram] plan:` в логе; nvidia-smi ≤ 90% после 4×256 токенов; `cargo test --features metal` зелёные.
+- [x] `src/vram_plan.rs` — планер + unit-тесты формул (KV/state bytes) → `Qwen3.6 27B/src/vram_plan.rs`
+- [x] `src/config.rs` — интеграция clamp + раскладка в stdout → `Qwen3.6 27B/src/config.rs`
+- [x] [P] `src/sampler.rs` — partial top-k + property-тест (argmax-parity со старым sampler на random logits) → `Qwen3.6 27B/src/sampler.rs`
+- **Independent check:** старт на yttri-win: строка `[vram] plan:` в логе; nvidia-smi ≤ 90% после 4×256 токенов; `cargo test --features metal` зелёные. ✅ DONE 2026-08-10 (VRAM 88.8% под нагрузкой; 22 lib + 10 API тестов зелёные)
+- deviated: BUDGET_FRAC 0.93 вместо 0.90 и WORKSPACE 384MiB — при 0.90/512 планер честно не пускал 35B-A3B на 12 GB даже в минимальной конфигурации, хотя она работает впритык
 
 ### Phase 2: CUDA memory pool (estimate: 6 h)
-- [ ] `mem_pool.rs` + перехват alloc/free → `candle-core/src/cuda_backend/`
+- [x] `mem_pool.rs` + перехват alloc/free → `candle-core/src/cuda_backend/`
 - [ ] `cuda_pool_stats()` + печать в `[hb]` trace → `engine_batched.rs`
 - [ ] Тест: unit (alloc/release/reuse), интеграция: 4×256 decode на yttri-win с `QWEN36_TRACE=1` — misses стабилизируются после прогрева, hits/шаг > 95%.
-- **Independent check:** `run_iq_tests.bat` 12/12 + bench: B=4 короткий контекст ≤ 115 ms/step (baseline 175).
+- **Independent check:** `run_iq_tests.bat` 12/12 + bench: B=4 короткий контекст ≤ 115 ms/step (baseline 175). ⚠️ НЕ ДОСТИГНУТО — см. deviation
+- deviated: **гипотеза опровергнута** — cudarc 0.19 уже использует `cuMemAllocAsync` (драйверный stream-ordered pool). Вместо своего allocator сделан `retain_default_mempool` (RELEASE_THRESHOLD=u64::MAX) + `free_mib`/`default_mempool_usage`. Измерено: retain на 98%-полной 12GB карте → 7x РЕГРЕСС (reserved добивает до WDDM paging). Решение: условный retain (только free ≥ 2048 MiB после загрузки модели). На 12GB — OFF, на 4090 — ON. Целевая метрика Phase 2 не подтверждена на 3060; переносится на замеры 4090 (Phase 4).
 
-### Phase 3: KV prealloc + GQA + embedding (estimate: 4 h)
+### Phase 3: KV prealloc + GQA + embedding (estimate: 4 h) — ⏸ DEFERRED до 4090
+- deferred: анализ показал малую ценность на 3060 (GQA copies ~5ms/step, не bottleneck; KV prealloc 640MiB при 895MiB свободных — риск paging). Переоценка после Phase 4 на 24GB карте.
 - [ ] KV преаллокация на seed_slot → `model_weights.rs`
 - [ ] GQA expand без per-step contiguous → `model_weights.rs`
 - [ ] Embedding на device → `model_weights.rs`
@@ -181,6 +184,8 @@ fn compute(total_mib, model: &ModelProfile, req: (ctx, slots)) -> Plan:
 | PD-001 | Где жить пулу: сервер vs candle-core | candle-core (перехват в CudaStorage — единая точка, все тензоры покрыты) | 2026-08-10 |
 | PD-002 | Чтение total VRAM: CUDA API vs nvidia-smi | nvidia-smi subprocess (0 новых зависимостей; обе целевые ОС имеют утилиту) | 2026-08-10 |
 | PD-003 | Порядок фаз | Наблюдаемость первой — иначе эффект пула не измерить | 2026-08-10 |
+| PD-004 | Свой CUDA allocator vs драйверный pool | Драйверный (уже есть в cudarc 0.19); свой отменён. Retain threshold — условно по free VRAM | 2026-08-10 |
+| PD-005 | Phase 3 сейчас vs после 4090 | После 4090: на 12GB ценность малая, риск paging реальный | 2026-08-10 |
 
 ## Tech Debt
 

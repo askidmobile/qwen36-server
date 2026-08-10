@@ -123,12 +123,15 @@ impl BatchedEngine {
 
         // TODO-F1: загрузка адаптера (блокирующе) + токенизатора.
         let device = select_device()?;
+        let adapter_device = device.clone();
         let adapter = tokio::task::spawn_blocking({
             let p = cfg.model_path.clone();
             let slots = cfg.slots;
-            move || Qwen35BatchAdapter::load(std::path::Path::new(&p), device, slots)
+            move || Qwen35BatchAdapter::load(std::path::Path::new(&p), adapter_device, slots)
         })
         .await??;
+        #[cfg(feature = "cuda")]
+        crate::engine::maybe_retain_mempool(&device);
         let eos = adapter.eos();
         let vocab = adapter.vocab_size();
         let tokenizer = tokenizer::load_from_gguf_path(std::path::Path::new(&cfg.model_path))?;

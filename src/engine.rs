@@ -139,6 +139,8 @@ impl CandleEngine {
     pub fn load(cfg: &Config) -> Result<Self> {
         let device = select_device()?;
         let (model, eos) = load_model(&cfg.model, &device)?;
+        #[cfg(feature = "cuda")]
+        maybe_retain_mempool(&device);
         let tokenizer = tokenizer::load_from_gguf_path(&cfg.model)?;
         Ok(Self {
             state: Arc::new(Mutex::new(ModelState {
@@ -448,6 +450,25 @@ pub fn model_id_from_filename(path: &Path) -> String {
                 .unwrap_or(stem)
         });
     base.to_lowercase()
+}
+
+/// Условный retain CUDA memory pool (после загрузки модели):
+/// retain только если свободно ≥ RETAIN_MIN_FREE_MIB — иначе reserved-память
+/// пула добивает карту до WDDM paging (измеренная регрессия 7x на 12 GB).
+#[cfg(feature = "cuda")]
+pub fn maybe_retain_mempool(dev: &candle_core::Device) {
+    use candle_core::cuda_backend::mem_pool;
+    const RETAIN_MIN_FREE_MIB: u64 = 2048;
+    let Ok(cuda_dev) = dev.as_cuda_device() else { return };
+    let free = mem_pool::free_mib(cuda_dev).unwrap_or(0);
+    if free >= RETAIN_MIN_FREE_MIB {
+        match mem_pool::retain_default_mempool(cuda_dev) {
+            Ok(()) => eprintln!("[cuda] mempool retain: ON (free={free}MiB)"),
+            Err(e) => eprintln!("[cuda] mempool retain не установлен: {e:#}"),
+        }
+    } else {
+        eprintln!("[cuda] mempool retain: OFF (free={free}MiB < {RETAIN_MIN_FREE_MIB}MiB — риск paging)");
+    }
 }
 
 /// Квант из имени файла: `qwen36-27b-q2_k_xl.gguf` → "Q2_K_XL".
