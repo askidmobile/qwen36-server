@@ -87,15 +87,28 @@ pub fn sample(
         *l /= temperature;
     }
 
-    // Сортируем (logit, id) по убыванию — далее фильтры работают по top-массиву.
-    let mut idx: Vec<u32> = (0..logits.len() as u32).collect();
-    idx.sort_unstable_by(|&a, &b| {
-        logits[b as usize]
-            .partial_cmp(&logits[a as usize])
+    // Отбор кандидатов по убыванию логита. Полная сортировка 248K логитов —
+    // 10-30ms/токен/слот; при top_k>0 достаточно quickselect (O(vocab)) +
+    // сортировка k кандидатов. top_k==0 + top_p<1 → редкий путь полной
+    // сортировки (нужна кумулятивная вероятность по всему vocab).
+    let by_desc = |a: &u32, b: &u32| {
+        logits[*b as usize]
+            .partial_cmp(&logits[*a as usize])
             .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    };
+    let mut idx: Vec<u32> = if top_k > 0 && top_k < logits.len() {
+        let mut all: Vec<u32> = (0..logits.len() as u32).collect();
+        all.select_nth_unstable_by(top_k - 1, by_desc);
+        all.truncate(top_k);
+        all.sort_unstable_by(by_desc);
+        all
+    } else {
+        let mut all: Vec<u32> = (0..logits.len() as u32).collect();
+        all.sort_unstable_by(by_desc);
+        all
+    };
 
-    // top_k
+    // top_k (уже применён в fast path; оставляем для полного пути)
     if top_k > 0 && idx.len() > top_k {
         idx.truncate(top_k);
     }
@@ -218,6 +231,27 @@ mod tests {
         let mut rng = Rng::new(3);
         let t = sample(&logits, 0.01, 0, 1.0, 0.0, 0.0, 8.0, &[0], &mut rng);
         assert_eq!(t, 1);
+    }
+
+    #[test]
+    fn partial_topk_argmax_parity() {
+        // FR-003: top_k fast path обязан находить тот же argmax и тот же набор
+        // top-k кандидатов, что полная сортировка (до ties).
+        let mut rng = Rng::new(99);
+        for _ in 0..50 {
+            let logits: Vec<f32> = (0..10_000)
+                .map(|_| rng.next_f32() * 20.0 - 10.0)
+                .collect();
+            let mut r1 = Rng::new(7);
+            let t = sample(&logits, 0.0, 20, 1.0, 0.0, 0.0, 1.0, &[], &mut r1);
+            let want = logits
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .map(|(i, _)| i as u32)
+                .unwrap();
+            assert_eq!(t, want, "argmax расходится");
+        }
     }
 
     #[test]

@@ -3,6 +3,8 @@
 use anyhow::{anyhow, Result};
 use std::path::PathBuf;
 
+use crate::vram_plan;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Путь к GGUF (`QWEN36_MODEL`).
@@ -25,7 +27,7 @@ impl Config {
             .ok()
             .filter(|k| !k.is_empty())
             .ok_or_else(|| anyhow!("QWEN36_API_KEY обязателен (без него сервер не стартует)"))?;
-        Ok(Self {
+        let mut cfg = Self {
             model: std::env::var("QWEN36_MODEL")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from("models/qwen36-27b-q2_k_xl.gguf")),
@@ -34,7 +36,27 @@ impl Config {
             api_key,
             ctx: parse_env("QWEN36_CTX", 81920usize)?,
             slots: parse_env("QWEN36_SLOTS", 4usize)?,
-        })
+        };
+        cfg.apply_vram_plan()?;
+        Ok(cfg)
+    }
+
+    /// FR-002: подгонка ctx/slots под VRAM карты (только CUDA-машины;
+    /// на macOS/CPU total_vram_mib = None → планер не применяется).
+    /// Отключается QWEN36_NO_VRAM_PLAN=1.
+    fn apply_vram_plan(&mut self) -> Result<()> {
+        if std::env::var_os("QWEN36_NO_VRAM_PLAN").is_some() {
+            return Ok(());
+        }
+        let Some(total) = vram_plan::total_vram_mib() else {
+            return Ok(());
+        };
+        let fp = vram_plan::footprint_from_gguf(&self.model)?;
+        let plan = vram_plan::compute(total, &fp, self.ctx, self.slots)?;
+        eprintln!("{}", plan.report);
+        self.ctx = plan.ctx;
+        self.slots = plan.slots;
+        Ok(())
     }
 }
 

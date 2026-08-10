@@ -4,6 +4,7 @@
 pub mod config;
 pub mod engine;
 pub mod sampler;
+pub mod vram_plan;
 
 // Result<T, Response> намеренно: Response — готовый early-return для axum
 #[allow(clippy::result_large_err)]
