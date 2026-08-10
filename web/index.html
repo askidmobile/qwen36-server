@@ -208,28 +208,25 @@ async function loadCtxMatrix() {
 }
 
 function rebuildCtxOptions() {
-  const slots = $("slotssel").value;
+  const slots = parseInt($("slotssel").value, 10) || 4;
   const sel = $("ctxsel");
   sel.innerHTML = "";
-  let maxCtx = 262144;
-  if (ctxMatrix && ctxMatrix.max_ctx_by_slots && ctxMatrix.max_ctx_by_slots[slots] > 0) {
-    maxCtx = Math.min(ctxMatrix.max_ctx_by_slots[slots], ctxMatrix.native_ctx || maxCtx);
-  } else if (ctxMatrix && ctxMatrix.max_ctx_by_slots) {
-    maxCtx = 0; // не влезает при таких слотах
-  }
   const cur = parseInt(sel.dataset.current || "0", 10);
+  const native = (ctxMatrix && ctxMatrix.native_ctx) || 262144;
+  const budget = ctxMatrix && ctxMatrix.kv_budget_mib || 0;
+  const perTok = ctxMatrix && ctxMatrix.kv_per_tok_mib || 0;
   for (const c of CTX_RUNGS) {
-    if (c > maxCtx) break;
+    if (c > native) break;
     const o = document.createElement("option");
     o.value = c;
-    o.textContent = (c / 1024) + "K контекст";
+    let label = (c / 1024) + "K контекст";
+    if (budget > 0 && perTok > 0) {
+      // сколько слотов могут быть одновременно полностью заполнены этим ctx
+      const full = Math.min(slots, Math.floor(budget / (perTok * c)));
+      label += full >= slots ? " · все слоты" : full > 0 ? " · ~" + full + " полных, остальные в очереди" : " · только очередь";
+    }
+    o.textContent = label;
     if (c === cur || (!cur && c === 8192)) o.selected = true;
-    sel.append(o);
-  }
-  if (!sel.options.length) {
-    const o = document.createElement("option");
-    o.textContent = "не влезает — уменьшите слоты";
-    o.disabled = true;
     sel.append(o);
   }
 }

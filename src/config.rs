@@ -19,6 +19,10 @@ pub struct Config {
     pub ctx: usize,
     /// Слоты (`QWEN36_SLOTS`, default 4).
     pub slots: usize,
+    /// Общий KV-бюджет всех слотов (MiB). 0 = без лимита (macOS/CPU).
+    pub kv_budget_mib: f64,
+    /// MiB KV на токен на слот (для admission).
+    pub kv_per_tok_mib: f64,
 }
 
 impl Config {
@@ -36,14 +40,17 @@ impl Config {
             api_key,
             ctx: parse_env("QWEN36_CTX", 81920usize)?,
             slots: parse_env("QWEN36_SLOTS", 4usize)?,
+            kv_budget_mib: 0.0,
+            kv_per_tok_mib: 0.0,
         };
         cfg.apply_vram_plan()?;
         Ok(cfg)
     }
 
-    /// FR-002: подгонка ctx/slots под VRAM карты (только CUDA-машины;
-    /// на macOS/CPU total_vram_mib = None → планер не применяется).
-    /// Отключается QWEN36_NO_VRAM_PLAN=1.
+    /// FR-002 + dynamic KV (vLLM-style): ctx НЕ режется под worst-case
+    /// (только до native модели); общий KV-бюджет enforce'ится движком
+    /// (admission + очередь + force-finish самого длинного слота).
+    /// Отключается QWEN36_NO_VRAM_PLAN=1. На macOS/CPU — без лимита.
     fn apply_vram_plan(&mut self) -> Result<()> {
         if std::env::var_os("QWEN36_NO_VRAM_PLAN").is_some() {
             return Ok(());
@@ -52,10 +59,12 @@ impl Config {
             return Ok(());
         };
         let fp = vram_plan::footprint_from_gguf(&self.model)?;
-        let plan = vram_plan::compute(total, &fp, self.ctx, self.slots)?;
+        let plan = vram_plan::compute_dynamic(total, &fp, self.ctx, self.slots)?;
         eprintln!("{}", plan.report);
         self.ctx = plan.ctx;
         self.slots = plan.slots;
+        self.kv_budget_mib = plan.kv_budget_mib;
+        self.kv_per_tok_mib = plan.kv_per_tok_mib;
         Ok(())
     }
 }

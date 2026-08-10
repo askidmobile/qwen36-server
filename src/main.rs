@@ -32,6 +32,8 @@ async fn main() -> Result<()> {
             max_queue: 64,
             req_timeout: std::time::Duration::from_secs(600),
             context_length: cfg.ctx,
+            kv_budget_mib: cfg.kv_budget_mib,
+            kv_per_tok_mib: cfg.kv_per_tok_mib,
         };
         BatchedEngine::load(bcfg).await?
     } else {

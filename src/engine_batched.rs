@@ -40,6 +40,10 @@ pub struct BatchConfig {
     pub max_queue: usize,
     pub req_timeout: Duration,
     pub context_length: usize,
+    /// Общий KV-бюджет всех слотов (MiB). 0 = без лимита.
+    pub kv_budget_mib: f64,
+    /// MiB KV на токен на слот.
+    pub kv_per_tok_mib: f64,
 }
 
 impl BatchConfig {
@@ -60,6 +64,8 @@ impl BatchConfig {
             max_queue: num("QWEN36_MAX_QUEUE", 64),
             req_timeout: Duration::from_secs(num("QWEN36_REQ_TIMEOUT", 600) as u64),
             context_length: num("QWEN36_CTX", 81920),
+            kv_budget_mib: 0.0,
+            kv_per_tok_mib: 0.0,
         }
     }
 }
@@ -89,6 +95,8 @@ struct SlotBinding {
     /// индекс небезопасен — сравниваем префиксы.
     emitted_text: String,
     stop_hit: bool,
+    /// Принудительное завершение по KV-бюджету → finish_reason "length".
+    forced: bool,
     cancelled: bool,
     last_progress: Instant,
 }
@@ -275,7 +283,7 @@ fn dispatch_loop(
                         in_flight.fetch_sub(1, Ordering::Relaxed);
                         continue;
                     }
-                    admit(req, &mut sched, &mut bindings, &mut pending, &mut slot_samplers, &mut slot_truncated);
+                    admit(req, &mut sched, &mut bindings, &mut pending, &mut slot_samplers, &mut slot_truncated, &cfg);
                 }
                 IngestMsg::Cancel { req_id } => {
                     cancel(req_id, &mut bindings, &mut pending, &mut cancelled, &in_flight);
@@ -377,7 +385,7 @@ fn dispatch_loop(
             if trace {
                 eprintln!("[dl] finished slot {idx}");
             }
-            admit_from_pending(&mut pending, &mut sched, &mut bindings, &mut slot_samplers, &mut slot_truncated);
+            admit_from_pending(&mut pending, &mut sched, &mut bindings, &mut slot_samplers, &mut slot_truncated, &cfg);
         }
 
         // Heartbeat: статусы слотов каждые 5s при активности.
@@ -407,7 +415,7 @@ fn dispatch_loop(
                         if cancelled.remove(&req.req_id) {
                             in_flight.fetch_sub(1, Ordering::Relaxed);
                         } else {
-                            admit(req, &mut sched, &mut bindings, &mut pending, &mut slot_samplers, &mut slot_truncated);
+                            admit(req, &mut sched, &mut bindings, &mut pending, &mut slot_samplers, &mut slot_truncated, &cfg);
                         }
                     }
                     IngestMsg::Cancel { req_id } => {
@@ -490,6 +498,37 @@ fn drain_after_step(
     }
 }
 
+/// Текущее использование KV (MiB) всеми привязанными слотами.
+fn kv_used_mib(
+    sched: &mut BatchScheduler<Qwen35BatchAdapter>,
+    bindings: &[Option<SlotBinding>],
+    kv_per_tok_mib: f64,
+) -> f64 {
+    let toks: usize = (0..bindings.len())
+        .filter_map(|i| {
+            bindings[i]
+                .as_ref()
+                .map(|b| b.prompt_tokens + sched.slots_mut()[i].generated_tokens().len())
+        })
+        .sum();
+    toks as f64 * kv_per_tok_mib
+}
+
+/// Admission control: влезает ли промпт в остаток KV-бюджета.
+fn kv_fits(
+    sched: &mut BatchScheduler<Qwen35BatchAdapter>,
+    bindings: &[Option<SlotBinding>],
+    cfg: &BatchConfig,
+    new_prompt_tokens: usize,
+) -> bool {
+    if cfg.kv_budget_mib <= 0.0 {
+        return true;
+    }
+    let used = kv_used_mib(sched, bindings, cfg.kv_per_tok_mib);
+    let est = new_prompt_tokens as f64 * cfg.kv_per_tok_mib + 8.0; // +margin
+    used + est <= cfg.kv_budget_mib
+}
+
 fn admit(
     req: AdmitReq,
     sched: &mut BatchScheduler<Qwen35BatchAdapter>,
@@ -497,10 +536,13 @@ fn admit(
     pending: &mut VecDeque<AdmitReq>,
     slot_samplers: &mut HashMap<usize, (GenParams, Rng)>,
     slot_truncated: &mut HashMap<usize, bool>,
+    cfg: &BatchConfig,
 ) {
     match bindings.iter().position(|b| b.is_none()) {
-        Some(idx) => seed_slot(idx, req, sched, bindings, slot_samplers, slot_truncated),
-        None => pending.push_back(req),
+        Some(idx) if kv_fits(sched, bindings, cfg, req.prompt_tokens) => {
+            seed_slot(idx, req, sched, bindings, slot_samplers, slot_truncated)
+        }
+        _ => pending.push_back(req),
     }
 }
 
@@ -510,9 +552,17 @@ fn admit_from_pending(
     bindings: &mut [Option<SlotBinding>],
     slot_samplers: &mut HashMap<usize, (GenParams, Rng)>,
     slot_truncated: &mut HashMap<usize, bool>,
+    cfg: &BatchConfig,
 ) {
     while let Some(idx) = bindings.iter().position(|b| b.is_none()) {
-        let Some(req) = pending.pop_front() else { break };
+        let fits = pending
+            .front()
+            .map(|r| kv_fits(sched, bindings, cfg, r.prompt_tokens))
+            .unwrap_or(false);
+        if !fits {
+            break;
+        }
+        let req = pending.pop_front().unwrap();
         seed_slot(idx, req, sched, bindings, slot_samplers, slot_truncated);
     }
 }
@@ -547,6 +597,7 @@ fn seed_slot(
         completion_tokens: 0,
         emitted_text: String::new(),
         stop_hit: false,
+        forced: false,
         cancelled: false,
         last_progress: Instant::now(),
     });

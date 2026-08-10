@@ -133,6 +133,51 @@ fn state_mib_per_slot(fp: &ModelFootprint) -> f64 {
     fp.delta_blocks as f64 * fp.ssm_state_mib_per_block
 }
 
+/// Динамический план (vLLM-style): ctx НЕ режется под worst-case 4×full.
+/// Слоты растут лениво; общий KV-бюджет enforce'ится рантаймом (admission +
+/// очередь + force-finish самого длинного). Возвращает бюджет для движка.
+pub struct DynPlan {
+    pub ctx: usize,
+    pub slots: usize,
+    /// Общий бюджет KV+state для всех слотов (MiB).
+    pub kv_budget_mib: f64,
+    /// MiB на токен KV на слот.
+    pub kv_per_tok_mib: f64,
+    pub report: String,
+}
+
+pub fn compute_dynamic(
+    total_mib: usize,
+    fp: &ModelFootprint,
+    req_ctx: usize,
+    req_slots: usize,
+) -> Result<DynPlan> {
+    let budget = total_mib as f64 * BUDGET_FRAC;
+    let state = state_mib_per_slot(fp);
+    let kv_per_tok = kv_mib_per_slot(fp, 1);
+    let kv_budget = budget - fp.weights_mib as f64 - WORKSPACE_MIB as f64 - req_slots as f64 * state;
+    if kv_budget < kv_per_tok * 2048.0 {
+        return Err(anyhow!(
+            "VRAM не хватает: после весов и workspace на KV остаётся {kv_budget:.0}MiB (<2K токенов на слот)"
+        ));
+    }
+    let ctx = req_ctx.min(if fp.native_ctx > 0 { fp.native_ctx } else { req_ctx });
+    // Сколько слотов могут быть одновременно заполнены ctx полностью.
+    let full_concurrent = (kv_budget / (kv_per_tok * ctx as f64)).floor() as usize;
+    let report = format!(
+        "[vram] total={total_mib}MiB weights={}MiB kv_budget={kv_budget:.0}MiB state={state:.0}MiB/slot\n\
+         [vram] plan(dynamic): ctx={ctx} slots={req_slots} — ~{full_concurrent} слот(а) полного ctx одновременно, очередь FIFO",
+        fp.weights_mib,
+    );
+    Ok(DynPlan {
+        ctx,
+        slots: req_slots,
+        kv_budget_mib: kv_budget,
+        kv_per_tok_mib: kv_per_tok,
+        report,
+    })
+}
+
 /// Подбор (ctx, slots): ctx вычисляется аналитически из остатка бюджета
 /// (линейно от KV/токен), slots режутся только если даже ctx=2048 не влезает.
 pub fn compute(total_mib: usize, fp: &ModelFootprint, req_ctx: usize, req_slots: usize) -> Result<Plan> {

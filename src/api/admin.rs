@@ -79,22 +79,18 @@ pub async fn ctx_matrix(
     let total = vram_plan::total_vram_mib();
     let r = tokio::task::spawn_blocking(move || {
         let fp = vram_plan::footprint_from_gguf(&p)?;
-        let mut per_slots = serde_json::Map::new();
-        if let Some(total) = total {
-            for slots in 1..=4usize {
-                // аналитический max ctx при заданных slots: повторяем compute,
-                // но с req_ctx = native (получим clamp = максимум).
-                if let Ok(plan) = vram_plan::compute(total, &fp, fp.native_ctx.max(262144), slots) {
-                    per_slots.insert(slots.to_string(), json!(plan.ctx));
-                } else {
-                    per_slots.insert(slots.to_string(), json!(0));
-                }
+        let (kv_budget_mib, kv_per_tok_mib) = match total {
+            Some(t) => {
+                let plan = vram_plan::compute_dynamic(t, &fp, 262144, 4)?;
+                (plan.kv_budget_mib, plan.kv_per_tok_mib)
             }
-        }
+            None => (0.0, 0.0),
+        };
         Ok::<_, anyhow::Error>(json!({
             "native_ctx": fp.native_ctx,
             "weights_mib": fp.weights_mib,
-            "max_ctx_by_slots": per_slots,
+            "kv_budget_mib": kv_budget_mib,
+            "kv_per_tok_mib": kv_per_tok_mib,
         }))
     })
     .await;
@@ -184,15 +180,15 @@ async fn do_switch(
     req_ctx: usize,
     req_slots: usize,
 ) -> anyhow::Result<()> {
-    // 1. VRAM-план для новой модели.
+    // 1. VRAM-план для новой модели (dynamic: ctx до native, бюджет в движок).
     let fp = vram_plan::footprint_from_gguf(&path)?;
-    let (ctx, slots) = match vram_plan::total_vram_mib() {
+    let (ctx, slots, kv_budget_mib, kv_per_tok_mib) = match vram_plan::total_vram_mib() {
         Some(total) => {
-            let plan = vram_plan::compute(total, &fp, req_ctx, req_slots)?;
+            let plan = vram_plan::compute_dynamic(total, &fp, req_ctx, req_slots)?;
             eprintln!("[switch] {}", plan.report);
-            (plan.ctx, plan.slots)
+            (plan.ctx, plan.slots, plan.kv_budget_mib, plan.kv_per_tok_mib)
         }
-        None => (req_ctx, req_slots),
+        None => (req_ctx, req_slots, 0.0, 0.0),
     };
 
     // 2. Выгрузить старый движок и дождаться освобождения VRAM.
@@ -227,6 +223,8 @@ async fn do_switch(
             max_queue: 64,
             req_timeout: std::time::Duration::from_secs(3600),
             context_length: ctx,
+            kv_budget_mib,
+            kv_per_tok_mib,
         })
         .await?
     } else {
@@ -239,6 +237,8 @@ async fn do_switch(
             api_key: String::new(),
             ctx,
             slots,
+            kv_budget_mib,
+            kv_per_tok_mib,
         };
         Arc::new(crate::engine::CandleEngine::load(&cfg)?)
     };
