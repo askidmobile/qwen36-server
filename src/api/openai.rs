@@ -282,6 +282,25 @@ async fn stream_chat(
 
 pub async fn list_models(State(state): State<AppState>) -> Response {
     let info = state.engine.model_info();
+    // OpenAI-минимум + расширения (BD-015) для внешних систем: нативный
+    // контекст, веса, возможности, дефолты и пресеты сэмплинга (BD-016).
+    let (path, _, _) = state
+        .switcher
+        .current
+        .read()
+        .map(|c| c.clone())
+        .unwrap_or_default();
+    let (native_ctx, size_mib) = tokio::task::spawn_blocking({
+        let p = path.clone();
+        move || {
+            crate::vram_plan::footprint_from_gguf(&p)
+                .map(|fp| (fp.native_ctx, fp.weights_mib))
+                .unwrap_or((0, 0))
+        }
+    })
+    .await
+    .unwrap_or((0, 0));
+    let d = crate::engine_types::GenParams::default();
     Json(json!({
         "object": "list",
         "data": [{
@@ -289,10 +308,39 @@ pub async fn list_models(State(state): State<AppState>) -> Response {
             "object": "model",
             "created": now_unix(),
             "owned_by": "local",
+            // активные параметры
             "context_length": info.context_length,
             "quant": info.quant,
             "slots": info.slots,
             "modes": info.modes,
+            // паспорт модели
+            "native_context_length": native_ctx,
+            "file_size_mib": size_mib,
+            "path": path.to_string_lossy(),
+            // возможности для агентов
+            "capabilities": {
+                "streaming": true,
+                "tools": true,
+                "vision": false,
+                "thinking": true,
+                "apis": ["chat_completions", "responses", "messages"],
+            },
+            // дефолты сэмплинга (если клиент не задаёт)
+            "sampling_defaults": {
+                "temperature": d.temperature,
+                "top_p": d.top_p,
+                "top_k": d.top_k,
+                "min_p": d.min_p,
+                "presence_penalty": d.presence_penalty,
+                "repetition_penalty": d.repetition_penalty,
+                "max_tokens": d.max_tokens,
+            },
+            // пресеты из model card (BD-016)
+            "sampling_presets": {
+                "thinking":         {"temperature": 1.0, "top_p": 0.95, "top_k": 20},
+                "thinking-coding":  {"temperature": 0.6, "top_p": 0.95, "top_k": 20},
+                "instruct":         {"temperature": 0.7, "top_p": 0.80, "top_k": 20, "presence_penalty": 1.5},
+            },
         }],
     }))
     .into_response()
