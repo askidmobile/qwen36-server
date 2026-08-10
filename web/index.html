@@ -110,10 +110,13 @@ details.think .tc pre { opacity: .9; }
     <option value="instruct">instruct</option>
   </select>
   <select id="modelsel" title="Модель (GGUF с диска сервера)"></select>
-  <span class="ctxui" title="Контекст (токены). Планер может снизить под VRAM.">
-    <input type="range" id="ctxslider" min="2048" max="262144" step="1024" style="width:110px">
-    <input type="number" id="ctxset" min="2048" step="1024" style="width:88px">
-  </span>
+  <select id="slotssel" title="Параллельные слоты (меньше слотов = больше контекст)">
+    <option value="4">4 слота</option>
+    <option value="3">3 слота</option>
+    <option value="2">2 слота</option>
+    <option value="1">1 слот</option>
+  </select>
+  <select id="ctxsel" title="Контекст: только варианты, которые точно влезают в VRAM"></select>
   <button id="applymodel" title="Переключить модель/контекст (перезагрузка ~1-3 мин)">Применить</button>
   <div class="ctxwrap">
     <div class="ctxlabel" id="ctxlabel">контекст: 0 / 81920</div>
@@ -188,8 +191,51 @@ async function api(path, opts = {}) {
 function showKeyForm() { $("keyform").style.display = "flex"; }
 function hideKeyForm() { $("keyform").style.display = "none"; }
 
-// --- Выбор модели / контекста (admin API) ---
+// --- Выбор модели / слотов / контекста (только честные варианты) ---
 let modelSwitching = false;
+let ctxMatrix = null; // {native_ctx, max_ctx_by_slots}
+const CTX_RUNGS = [2048, 4096, 6144, 8192, 12288, 16384, 24576, 32768, 49152, 65536, 81920, 98304, 131072, 196608, 262144];
+
+async function loadCtxMatrix() {
+  ctxMatrix = null;
+  const path = $("modelsel").value;
+  if (!path) return;
+  try {
+    const r = await api("/v1/ctx_matrix?path=" + encodeURIComponent(path));
+    if (r.ok) ctxMatrix = await r.json();
+  } catch (e) {}
+  rebuildCtxOptions();
+}
+
+function rebuildCtxOptions() {
+  const slots = $("slotssel").value;
+  const sel = $("ctxsel");
+  sel.innerHTML = "";
+  let maxCtx = 262144;
+  if (ctxMatrix && ctxMatrix.max_ctx_by_slots && ctxMatrix.max_ctx_by_slots[slots] > 0) {
+    maxCtx = Math.min(ctxMatrix.max_ctx_by_slots[slots], ctxMatrix.native_ctx || maxCtx);
+  } else if (ctxMatrix && ctxMatrix.max_ctx_by_slots) {
+    maxCtx = 0; // не влезает при таких слотах
+  }
+  const cur = parseInt(sel.dataset.current || "0", 10);
+  for (const c of CTX_RUNGS) {
+    if (c > maxCtx) break;
+    const o = document.createElement("option");
+    o.value = c;
+    o.textContent = (c / 1024) + "K контекст";
+    if (c === cur || (!cur && c === 8192)) o.selected = true;
+    sel.append(o);
+  }
+  if (!sel.options.length) {
+    const o = document.createElement("option");
+    o.textContent = "не влезает — уменьшите слоты";
+    o.disabled = true;
+    sel.append(o);
+  }
+}
+
+$("slotssel").onchange = rebuildCtxOptions;
+$("modelsel").onchange = loadCtxMatrix;
 
 async function loadAvailableModels() {
   try {
@@ -205,8 +251,11 @@ async function loadAvailableModels() {
       if (j.current && m.path === j.current.path) o.selected = true;
       sel.append(o);
     }
-    if (j.current && j.current.ctx) { $("ctxset").value = j.current.ctx; $("ctxslider").value = Math.min(j.current.ctx, +$("ctxslider").max); }
-    syncCtxLimits();
+    if (j.current) {
+      if (j.current.ctx) $("ctxsel").dataset.current = j.current.ctx;
+      if (j.current.slots) $("slotssel").value = j.current.slots;
+    }
+    loadCtxMatrix();
     if (j.loading) watchModelSwitch();
   } catch (e) { /* ключ ещё не введён — loadModels покажет форму */ }
 }
@@ -240,45 +289,17 @@ async function watchModelSwitch() {
 
 $("applymodel").onclick = async () => {
   const path = $("modelsel").value;
-  const ctx = parseInt($("ctxset").value, 10);
-  if (!path) return;
+  const ctx = parseInt($("ctxsel").value, 10);
+  const slots = parseInt($("slotssel").value, 10);
+  if (!path || !Number.isFinite(ctx)) return;
+  $("ctxsel").dataset.current = ctx;
   const r = await api("/v1/switch_model", {
     method: "POST",
-    body: JSON.stringify({ path, ctx: Number.isFinite(ctx) ? ctx : undefined }),
+    body: JSON.stringify({ path, ctx, slots }),
   });
   if (r.ok) watchModelSwitch();
   else $("modelinfo").textContent = "switch: HTTP " + r.status;
 };
-
-// Слайдер ↔ число; лимит = native_ctx выбранной модели (ленивый fetch одного
-// файла), иначе 262144. Планер на сервере всё равно снизит под VRAM.
-let nativeCtxCache = {};
-async function syncCtxLimits() {
-  const path = $("modelsel").value;
-  let max = nativeCtxCache[path];
-  if (!max) {
-    $("ctxset").max = 262144;
-    if (path) {
-      try {
-        const r = await api("/v1/model_native_ctx?path=" + encodeURIComponent(path));
-        if (r.ok) {
-          const j = await r.json();
-          if (j.native_ctx > 2048) nativeCtxCache[path] = j.native_ctx;
-        }
-      } catch (e) {}
-      max = nativeCtxCache[path];
-    }
-  }
-  if (max) $("ctxset").max = max;
-  $("ctxslider").max = $("ctxset").max;
-  let v = parseInt($("ctxset").value, 10) || 8192;
-  v = Math.max(2048, Math.min(v, +$("ctxset").max));
-  $("ctxset").value = v;
-  $("ctxslider").value = v;
-}
-$("ctxslider").oninput = () => { $("ctxset").value = $("ctxslider").value; };
-$("ctxset").onchange = () => { syncCtxLimits(); };
-$("modelsel").onchange = () => { syncCtxLimits(); };
 
 async function loadModels() {
   try {
@@ -290,7 +311,6 @@ async function loadModels() {
       hideKeyForm();
       if (m.context_length) {
         ctxLen = m.context_length;
-        if (!$("ctxset").value) $("ctxset").value = m.context_length;
       }
       if (m.id) modelId = m.id;
       $("modelinfo").textContent =

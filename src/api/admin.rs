@@ -65,6 +65,46 @@ pub async fn model_native_ctx(
     Json(json!({"native_ctx": nc}))
 }
 
+/// Матрица «слоты → макс. ctx» для модели: честные варианты для UI-селекта.
+/// worst-case (KV заполнен полностью). GET /v1/ctx_matrix?path=...
+pub async fn ctx_matrix(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Json<Value> {
+    let path = q.get("path").cloned().unwrap_or_default();
+    let p = PathBuf::from(&path);
+    if !p.starts_with(&state.models_dir) {
+        return Json(json!({"error": "outside models_dir"}));
+    }
+    let total = vram_plan::total_vram_mib();
+    let r = tokio::task::spawn_blocking(move || {
+        let fp = vram_plan::footprint_from_gguf(&p)?;
+        let mut per_slots = serde_json::Map::new();
+        if let Some(total) = total {
+            for slots in 1..=4usize {
+                // аналитический max ctx при заданных slots: повторяем compute,
+                // но с req_ctx = native (получим clamp = максимум).
+                if let Ok(plan) = vram_plan::compute(total, &fp, fp.native_ctx.max(262144), slots) {
+                    per_slots.insert(slots.to_string(), json!(plan.ctx));
+                } else {
+                    per_slots.insert(slots.to_string(), json!(0));
+                }
+            }
+        }
+        Ok::<_, anyhow::Error>(json!({
+            "native_ctx": fp.native_ctx,
+            "weights_mib": fp.weights_mib,
+            "max_ctx_by_slots": per_slots,
+        }))
+    })
+    .await;
+    match r {
+        Ok(Ok(v)) => Json(v),
+        Ok(Err(e)) => Json(json!({"error": format!("{e:#}")})),
+        Err(e) => Json(json!({"error": format!("{e:#}")})),
+    }
+}
+
 pub async fn available_models(State(state): State<AppState>) -> Json<Value> {
     let mut out = Vec::new();
     scan_gguf(&state.models_dir, 0, &mut out);

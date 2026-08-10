@@ -89,6 +89,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/models", axum::routing::get(openai::list_models))
         .route("/available_models", axum::routing::get(admin::available_models))
         .route("/model_native_ctx", axum::routing::get(admin::model_native_ctx))
+        .route("/ctx_matrix", axum::routing::get(admin::ctx_matrix))
         .route("/switch_model", axum::routing::post(admin::switch_model))
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth));
 
