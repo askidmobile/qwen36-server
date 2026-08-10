@@ -47,11 +47,20 @@ impl Engine for MockEngine {
 }
 
 fn app(deltas: Vec<&str>) -> axum::Router {
+    let mock: Arc<dyn Engine> = Arc::new(MockEngine {
+        deltas: deltas.into_iter().map(String::from).collect(),
+    });
+    let switcher = Arc::new(qwen36_server::engine_swap::SwappableEngine::new(
+        mock,
+        std::path::PathBuf::from("mock.gguf"),
+        8192,
+        4,
+    ));
     build_router(AppState {
-        engine: Arc::new(MockEngine {
-            deltas: deltas.into_iter().map(String::from).collect(),
-        }),
+        engine: switcher.clone(),
+        switcher,
         api_key: "test-key".into(),
+        models_dir: std::path::PathBuf::from("."),
     })
 }
 

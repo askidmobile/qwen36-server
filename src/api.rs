@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod anthropic;
 pub mod openai;
 pub mod responses;
@@ -23,6 +24,10 @@ use crate::engine_types::Engine;
 pub struct AppState {
     pub engine: Arc<dyn Engine>,
     pub api_key: String,
+    /// Тот же engine, но конкретный тип — для admin switch.
+    pub switcher: Arc<crate::engine_swap::SwappableEngine>,
+    /// Корень сканирования GGUF (QWEN36_MODELS_DIR или директория модели).
+    pub models_dir: std::path::PathBuf,
 }
 
 #[derive(Serialize)]
@@ -82,6 +87,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/responses", axum::routing::post(responses::responses))
         .route("/messages", axum::routing::post(anthropic::messages))
         .route("/models", axum::routing::get(openai::list_models))
+        .route("/available_models", axum::routing::get(admin::available_models))
+        .route("/switch_model", axum::routing::post(admin::switch_model))
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth));
 
     Router::new().nest("/v1", v1).with_state(state)

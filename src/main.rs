@@ -11,6 +11,7 @@ use qwen36_server::{
     config::Config,
     engine::{CandleEngine, Engine},
     engine_batched::{BatchConfig, BatchedEngine},
+    engine_swap::SwappableEngine,
 };
 use std::sync::Arc;
 
@@ -42,9 +43,29 @@ async fn main() -> Result<()> {
         info.id, info.quant, info.context_length, info.slots
     );
 
-    let state = AppState {
+    // Корень сканирования моделей: QWEN36_MODELS_DIR или родитель директории
+    // модели (D:\Models\org\repo\model.gguf → D:\Models).
+    let models_dir = std::env::var("QWEN36_MODELS_DIR")
+        .map(std::path::PathBuf::from)
+        .ok()
+        .or_else(|| {
+            cfg.model
+                .parent()
+                .and_then(|p| p.parent())
+                .map(|p| p.to_path_buf())
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let switcher = Arc::new(SwappableEngine::new(
         engine,
+        cfg.model.clone(),
+        cfg.ctx,
+        cfg.slots,
+    ));
+    let state = AppState {
+        engine: switcher.clone(),
+        switcher,
         api_key: cfg.api_key.clone(),
+        models_dir,
     };
     let app = build_router(state).merge(Router::new().route(
         "/",

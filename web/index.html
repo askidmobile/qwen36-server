@@ -109,6 +109,9 @@ details.think .tc pre { opacity: .9; }
     <option value="thinking-coding">thinking-coding</option>
     <option value="instruct">instruct</option>
   </select>
+  <select id="modelsel" title="Модель (GGUF с диска сервера)"></select>
+  <input type="number" id="ctxset" title="Контекст (токены)" min="2048" step="1024" style="width:92px">
+  <button id="applymodel" title="Переключить модель/контекст (перезагрузка ~1-3 мин)">Применить</button>
   <div class="ctxwrap">
     <div class="ctxlabel" id="ctxlabel">контекст: 0 / 81920</div>
     <div class="ctxbar"><div id="ctxfill"></div></div>
@@ -182,6 +185,67 @@ async function api(path, opts = {}) {
 function showKeyForm() { $("keyform").style.display = "flex"; }
 function hideKeyForm() { $("keyform").style.display = "none"; }
 
+// --- Выбор модели / контекста (admin API) ---
+let modelSwitching = false;
+
+async function loadAvailableModels() {
+  try {
+    const r = await api("/v1/available_models");
+    if (!r.ok) return;
+    const j = await r.json();
+    const sel = $("modelsel");
+    sel.innerHTML = "";
+    for (const m of j.models || []) {
+      const o = document.createElement("option");
+      o.value = m.path;
+      o.textContent = m.name + " (" + m.size_mib + " MiB)";
+      if (j.current && m.path === j.current.path) o.selected = true;
+      sel.append(o);
+    }
+    if (j.current && j.current.ctx) $("ctxset").value = j.current.ctx;
+    if (j.loading) watchModelSwitch();
+  } catch (e) { /* ключ ещё не введён — loadModels покажет форму */ }
+}
+
+async function watchModelSwitch() {
+  if (modelSwitching) return;
+  modelSwitching = true;
+  $("applymodel").disabled = true;
+  $("send").disabled = true;
+  $("modelinfo").textContent = "переключение модели…";
+  for (;;) {
+    await new Promise(r => setTimeout(r, 5000));
+    try {
+      const r = await api("/v1/available_models");
+      if (!r.ok) continue;
+      const j = await r.json();
+      if (!j.loading) {
+        modelSwitching = false;
+        $("applymodel").disabled = false;
+        $("send").disabled = false;
+        if (j.last_error) {
+          $("modelinfo").textContent = "ошибка загрузки: " + j.last_error.slice(0, 120);
+        }
+        loadModels();
+        loadAvailableModels();
+        break;
+      }
+    } catch (e) { /* retry */ }
+  }
+}
+
+$("applymodel").onclick = async () => {
+  const path = $("modelsel").value;
+  const ctx = parseInt($("ctxset").value, 10);
+  if (!path) return;
+  const r = await api("/v1/switch_model", {
+    method: "POST",
+    body: JSON.stringify({ path, ctx: Number.isFinite(ctx) ? ctx : undefined }),
+  });
+  if (r.ok) watchModelSwitch();
+  else $("modelinfo").textContent = "switch: HTTP " + r.status;
+};
+
 async function loadModels() {
   try {
     const r = await api("/v1/models");
@@ -190,7 +254,10 @@ async function loadModels() {
     const m = j.data && j.data[0];
     if (m) {
       hideKeyForm();
-      if (m.context_length) ctxLen = m.context_length;
+      if (m.context_length) {
+        ctxLen = m.context_length;
+        if (!$("ctxset").value) $("ctxset").value = m.context_length;
+      }
       if (m.id) modelId = m.id;
       $("modelinfo").textContent =
         [m.id, m.quant, "ctx " + (m.context_length || "?"), "slots " + (m.slots ?? "?")].filter(Boolean).join(" · ");
@@ -577,6 +644,7 @@ else if (!getChat()) store.current = store.chats[0].id;
 renderChatList();
 renderMessages();
 loadModels();
+loadAvailableModels();
 </script>
 </body>
 </html>

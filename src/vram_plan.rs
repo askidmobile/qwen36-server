@@ -93,6 +93,22 @@ pub fn total_vram_mib() -> Option<usize> {
         .ok()
 }
 
+/// Свободная VRAM (MiB) через nvidia-smi. Для ожидания освобождения при switch.
+pub fn free_vram_mib() -> Option<usize> {
+    let out = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
 /// Рабочий запас: cuBLAS workspace, dequant scratch, logits, фрагментация.
 const WORKSPACE_MIB: usize = 384;
 /// Доля карты, выше которой начинается paging/риск OOM.

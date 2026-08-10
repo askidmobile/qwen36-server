@@ -1,0 +1,187 @@
+//! Admin-эндпоинты: список локальных GGUF + горячая замена модели.
+//!
+//! - GET  /v1/available_models — *.gguf в QWEN36_MODELS_DIR (recursive ≤3 ур.)
+//! - POST /v1/switch_model {path, ctx?, slots?} — выгрузить текущий движок,
+//!   дождаться освобождения VRAM, загрузить новый, swap. Во время загрузки
+//!   generate → 503. Ответ сразу (202), прогресс — через GET /v1/models.
+
+use axum::{extract::State, http::StatusCode, response::{IntoResponse, Response}, Json};
+use serde::Deserialize;
+use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+
+use super::{api_error, AppState};
+use crate::engine_batched::{BatchConfig, BatchedEngine};
+use crate::vram_plan;
+
+#[derive(Deserialize)]
+pub struct SwitchRequest {
+    /// Полный путь к GGUF или имя файла из available_models.
+    path: String,
+    ctx: Option<usize>,
+    slots: Option<usize>,
+}
+
+/// Рекурсивный сбор *.gguf (глубина ≤ 3 от корня).
+fn scan_gguf(dir: &Path, depth: usize, out: &mut Vec<Value>) {
+    if depth > 3 {
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            scan_gguf(&p, depth + 1, out);
+        } else if p.extension().and_then(|s| s.to_str()) == Some("gguf") {
+            let size_mib = e.metadata().map(|m| m.len() / 1024 / 1024).unwrap_or(0);
+            out.push(json!({
+                "name": p.file_name().and_then(|s| s.to_str()).unwrap_or("?"),
+                "path": p.to_string_lossy(),
+                "size_mib": size_mib,
+            }));
+        }
+    }
+}
+
+pub async fn available_models(State(state): State<AppState>) -> Json<Value> {
+    let mut out = Vec::new();
+    scan_gguf(&state.models_dir, 0, &mut out);
+    out.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    let (cur, ctx, slots) = state
+        .switcher
+        .current
+        .read()
+        .map(|c| c.clone())
+        .unwrap_or_else(|_| (PathBuf::new(), 0, 0));
+    Json(json!({
+        "models_dir": state.models_dir.to_string_lossy(),
+        "current": { "path": cur.to_string_lossy(), "ctx": ctx, "slots": slots },
+        "loading": state.switcher.loading.load(Ordering::Relaxed),
+        "last_error": state.switcher.last_error.read().map(|s| s.clone()).unwrap_or_default(),
+        "models": out,
+    }))
+}
+
+pub async fn switch_model(State(state): State<AppState>, Json(req): Json<SwitchRequest>) -> Response {
+    if state.switcher.loading.swap(true, Ordering::Relaxed) {
+        return api_error(StatusCode::CONFLICT, "invalid_request_error", "model switch already in progress");
+    }
+
+    // Разрешить имя файла в полный путь.
+    let path = if Path::new(&req.path).is_absolute() || req.path.contains(['/', '\\']) {
+        PathBuf::from(&req.path)
+    } else {
+        // поиск по имени в models_dir
+        let mut found = Vec::new();
+        scan_gguf(&state.models_dir, 0, &mut found);
+        found
+            .iter()
+            .find(|m| m["name"].as_str() == Some(req.path.as_str()))
+            .map(|m| PathBuf::from(m["path"].as_str().unwrap()))
+            .unwrap_or_else(|| PathBuf::from(&req.path))
+    };
+    if !path.exists() {
+        state.switcher.loading.store(false, Ordering::Relaxed);
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "invalid_request_error",
+            format!("model not found: {}", path.display()),
+        );
+    }
+
+    let (_cur_path, cur_ctx, cur_slots) = state
+        .switcher
+        .current
+        .read()
+        .map(|c| c.clone())
+        .unwrap_or_else(|_| (PathBuf::new(), 8192, 4));
+    let req_ctx = req.ctx.unwrap_or(cur_ctx);
+    let req_slots = req.slots.unwrap_or(cur_slots).clamp(1, 4);
+
+    tokio::spawn(async move {
+        let result = do_switch(&state, path, req_ctx, req_slots).await;
+        if let Err(e) = result {
+            eprintln!("[switch] FAILED: {e:#}");
+            if let Ok(mut le) = state.switcher.last_error.write() {
+                *le = format!("{e:#}");
+            }
+        }
+        state.switcher.loading.store(false, Ordering::Relaxed);
+    });
+
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({"status": "loading", "path": req.path, "ctx": req_ctx, "slots": req_slots})),
+    )
+        .into_response()
+}
+
+async fn do_switch(
+    state: &AppState,
+    path: PathBuf,
+    req_ctx: usize,
+    req_slots: usize,
+) -> anyhow::Result<()> {
+    // 1. VRAM-план для новой модели.
+    let fp = vram_plan::footprint_from_gguf(&path)?;
+    let (ctx, slots) = match vram_plan::total_vram_mib() {
+        Some(total) => {
+            let plan = vram_plan::compute(total, &fp, req_ctx, req_slots)?;
+            eprintln!("[switch] {}", plan.report);
+            (plan.ctx, plan.slots)
+        }
+        None => (req_ctx, req_slots),
+    };
+
+    // 2. Выгрузить старый движок и дождаться освобождения VRAM.
+    let old = state.switcher.take();
+    drop(old);
+    if vram_plan::total_vram_mib().is_some() {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        loop {
+            let free = vram_plan::free_vram_mib().unwrap_or(0);
+            if free as usize >= fp.weights_mib + 512 {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                eprintln!("[switch] timeout waiting VRAM free (free={free}MiB), продолжаю");
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    }
+
+    // 3. Загрузить новый движок (всегда batched при slots>1, иначе single).
+    eprintln!(
+        "[switch] loading {} ctx={ctx} slots={slots}",
+        path.display()
+    );
+    let engine: Arc<dyn crate::engine::Engine> = if slots > 1 {
+        BatchedEngine::load(BatchConfig {
+            model_path: path.to_string_lossy().into_owned(),
+            slots,
+            max_queue: 64,
+            req_timeout: std::time::Duration::from_secs(3600),
+            context_length: ctx,
+        })
+        .await?
+    } else {
+        // single-slot через Config-like структуру нет — используем CandleEngine
+        // с минимальным Config.
+        let cfg = crate::config::Config {
+            model: path.clone(),
+            host: String::new(),
+            port: 0,
+            api_key: String::new(),
+            ctx,
+            slots,
+        };
+        Arc::new(crate::engine::CandleEngine::load(&cfg)?)
+    };
+    let info = engine.model_info();
+    eprintln!("[switch] loaded: id={} ctx={} slots={}", info.id, info.context_length, info.slots);
+    state.switcher.install(engine, path, ctx, slots);
+    Ok(())
+}
