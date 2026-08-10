@@ -61,6 +61,7 @@ fn app(deltas: Vec<&str>) -> axum::Router {
         switcher,
         api_key: "test-key".into(),
         models_dir: std::path::PathBuf::from("."),
+        cuda_device: None,
     })
 }
 

@@ -39,6 +39,10 @@ async fn main() -> Result<()> {
     } else {
         Arc::new(CandleEngine::load(&cfg)?)
     };
+    #[cfg(feature = "cuda")]
+    let cuda_device = candle_core::Device::new_cuda(0).ok();
+    #[cfg(not(feature = "cuda"))]
+    let cuda_device = None;
     let info = engine.model_info();
     eprintln!(
         "[qwen36] loaded: id={} quant={} ctx={} slots={}",
@@ -68,6 +72,7 @@ async fn main() -> Result<()> {
         switcher,
         api_key: cfg.api_key.clone(),
         models_dir,
+        cuda_device,
     };
     let app = build_router(state).merge(Router::new().route(
         "/",
