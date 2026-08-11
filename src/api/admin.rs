@@ -24,6 +24,19 @@ pub struct SwitchRequest {
     slots: Option<usize>,
 }
 
+/// split-часть GGUF: `name-00001-of-00002.gguf` (по одному файлу не грузится).
+fn is_split_part(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".gguf") else { return false };
+    let Some(pos) = stem.rfind("-of-") else { return false };
+    let before = &stem[..pos];
+    let after = &stem[pos + 4..];
+    let first = before.rsplit('-').next().unwrap_or("");
+    first.len() == 5
+        && first.bytes().all(|b| b.is_ascii_digit())
+        && after.len() == 5
+        && after.bytes().all(|b| b.is_ascii_digit())
+}
+
 /// Рекурсивный сбор *.gguf (глубина ≤ 3 от корня).
 fn scan_gguf(dir: &Path, depth: usize, out: &mut Vec<Value>) {
     if depth > 3 {
@@ -35,9 +48,14 @@ fn scan_gguf(dir: &Path, depth: usize, out: &mut Vec<Value>) {
         if p.is_dir() {
             scan_gguf(&p, depth + 1, out);
         } else if p.extension().and_then(|s| s.to_str()) == Some("gguf") {
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("?");
+            // Пропускаем незагружаемые: split-части (-00001-of-00002) и mmproj.
+            if is_split_part(name) || name.starts_with("mmproj") {
+                continue;
+            }
             let size_mib = e.metadata().map(|m| m.len() / 1024 / 1024).unwrap_or(0);
             out.push(json!({
-                "name": p.file_name().and_then(|s| s.to_str()).unwrap_or("?"),
+                "name": name,
                 "path": p.to_string_lossy(),
                 "size_mib": size_mib,
             }));
