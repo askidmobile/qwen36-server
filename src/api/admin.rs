@@ -207,7 +207,7 @@ pub async fn switch_model(State(state): State<AppState>, Json(req): Json<SwitchR
         .map(|c| c.clone())
         .unwrap_or_else(|_| (PathBuf::new(), 8192, 4));
     let req_ctx = req.ctx.unwrap_or(cur_ctx);
-    let req_slots = req.slots.unwrap_or(cur_slots).clamp(1, 4);
+    let req_slots = req.slots.unwrap_or(cur_slots).clamp(1, 8);
 
     tokio::spawn(async move {
         let result = do_switch(&state, path, req_ctx, req_slots).await;
