@@ -65,6 +65,20 @@ scripts/stability_smoke.sh         # критерий BD-008 (на yttri-win)
 
 ## Производительность
 
+### A100 80GB (Selectel, 2026-08-11) — наш стек vs llama.cpp
+
+| Модель (Q8_0) | llama tg128 | наш decode B=1 | наш B=4 aggregate |
+|---|---|---|---|
+| Qwen3.6-27B | 40.5 t/s | 29 t/s (34.5ms/step) | — |
+| Qwen3.6-35B-A3B | 141.3 t/s | 51.5 t/s (19.4ms/step) | 103 t/s (39ms/step) |
+| Ornith-1.0-35B | 140.9 t/s | 51.7 t/s | — |
+
+Prefill: llama 1316-3470 t/s vs наши ~240-360 t/s (512-чанки).
+Ключевые фиксы дня: slot_ids device-cache (6x на dense), PTX indexed MoE (3x на MoE),
+Q8_0 stride-баг в indexed_moe kernel, BF16→F16 загрузка полных моделей.
+
+### yttri-win (RTX 3060 12 GB, CUDA 12.4) — исторический baseline
+
 Бенчмарк на yttri-win (RTX 3060 12 GB, CUDA 12.4, driver 591.86).
 Модель: Qwen3.6-27B Q4_K_M (15.4 GB GGUF), ctx 8192, 4 слота.
 Скрипт: `scripts/bench.ps1` (HttpWebRequest для real-streaming TTFT, runspaces для
