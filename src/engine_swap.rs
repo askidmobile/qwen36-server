@@ -3,7 +3,7 @@
 //! Во время загрузки generate() → Err("model is loading") → 503.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 
 use anyhow::Result;

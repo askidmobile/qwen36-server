@@ -207,6 +207,7 @@ pub async fn messages(State(state): State<AppState>, Json(req): Json<MessagesReq
         .into_response();
     }
 
+    let has_tools = req.tools.as_ref().map(|t| !t.is_null()).unwrap_or(false);
     let rx = match state.engine.generate(msgs, params).await {
         Ok(r) => r,
         Err(e) => return internal_error(e.to_string()),
@@ -236,11 +237,13 @@ pub async fn messages(State(state): State<AppState>, Json(req): Json<MessagesReq
                 ));
             }
             acc.push_str(&d);
-            out.push(Event::default().event("content_block_delta").data(
-                json!({"type": "content_block_delta", "index": 0,
-                       "delta": {"type": "text_delta", "text": d}})
-                .to_string(),
-            ));
+            if !has_tools {
+                out.push(Event::default().event("content_block_delta").data(
+                    json!({"type": "content_block_delta", "index": 0,
+                           "delta": {"type": "text_delta", "text": d}})
+                    .to_string(),
+                ));
+            }
             true
         }
         StreamEvent::Done {
@@ -258,7 +261,15 @@ pub async fn messages(State(state): State<AppState>, Json(req): Json<MessagesReq
                     .to_string(),
                 ));
             }
-            let (_text, calls) = parse_tool_calls(&acc);
+            let (text, calls) = parse_tool_calls(&acc);
+            // tools в запросе: текст был буферизован — эмитим без разметки.
+            if has_tools && !text.is_empty() {
+                out.push(Event::default().event("content_block_delta").data(
+                    json!({"type": "content_block_delta", "index": 0,
+                           "delta": {"type": "text_delta", "text": text}})
+                    .to_string(),
+                ));
+            }
             out.push(Event::default().event("content_block_stop").data(
                 json!({"type": "content_block_stop", "index": 0}).to_string(),
             ));

@@ -275,11 +275,11 @@ fn dispatch_loop(
     let mut bindings: Vec<Option<SlotBinding>> = (0..cfg.slots).map(|_| None).collect();
     let mut pending: VecDeque<AdmitReq> = VecDeque::new();
     let mut cancelled: HashSet<u64> = HashSet::new();
-    /// Per-slot sampling state: params + rng.
+    // Per-slot sampling state: params + rng.
     let mut slot_samplers: HashMap<usize, (GenParams, Rng)> = HashMap::new();
-    /// Per-slot last emitted token count (для incremental decode).
+    // Per-slot last emitted token count (для incremental decode).
     let mut slot_emitted_toks: HashMap<usize, usize> = HashMap::new();
-    /// Per-slot truncated flag (для Done).
+    // Per-slot truncated flag (для Done).
     let mut slot_truncated: HashMap<usize, bool> = HashMap::new();
     // Диагностика: heartbeat раз в 5s пока есть активные слоты.
     let mut last_hb = Instant::now();
@@ -327,50 +327,39 @@ fn dispatch_loop(
         sched.set_sampler(sampler_box);
 
         let trace = std::env::var_os("QWEN36_TRACE").is_some();
-        if trace {
-            eprintln!("[dl] before tokenizer.lock");
-        }
-        // tok_guard — std::sync::MutexGuard: step_with и drain синхронные.
-        let did_work = {
-            let tok_guard = tokenizer.lock().unwrap_or_else(|e| e.into_inner());
-            if trace {
-                eprintln!("[dl] got tokenizer.lock");
-            }
-            let outcome = sched.step_with(&mut |sidx, _generated| {
-                bindings
-                    .get(sidx)
-                    .and_then(|b| b.as_ref())
-                    .map(|b| b.cancelled)
-                    .unwrap_or(false)
-            });
-            match outcome {
-                Ok(StepOutcome::DidPrefill { first_token_emitted }) => {
-                    if first_token_emitted {
-                        drain_after_step(&mut sched, &mut bindings, &mut slot_emitted_toks, &tok_guard);
-                    }
-                    true
-                }
-                Ok(StepOutcome::DidDecode(_)) => {
-                    if trace {
-                        eprintln!("[dl] before drain");
-                    }
+        // GPU-шаг БЕЗ мьютекса токенизатора (аудит 2026-08-10): иначе входящие
+        // HTTP-запросы блокируются на lock() в generate() на весь шаг.
+        // Токенизатор нужен только drain'у после шага.
+        let outcome = sched.step_with(&mut |sidx, _generated| {
+            bindings
+                .get(sidx)
+                .and_then(|b| b.as_ref())
+                .map(|b| b.cancelled)
+                .unwrap_or(false)
+        });
+        let did_work = match outcome {
+            Ok(StepOutcome::DidPrefill { first_token_emitted }) => {
+                if first_token_emitted {
+                    let tok_guard = tokenizer.lock().unwrap_or_else(|e| e.into_inner());
                     drain_after_step(&mut sched, &mut bindings, &mut slot_emitted_toks, &tok_guard);
-                    if trace {
-                        eprintln!("[dl] after drain");
-                    }
-                    true
                 }
-                Ok(StepOutcome::Idle) => false,
-                Err(e) => {
-                    eprintln!("[batch] scheduler step error: {e:#}");
-                    for idx in 0..bindings.len() {
-                        if let Some(b) = bindings[idx].as_mut() {
-                            let _ = b.out.try_send(StreamEvent::Error(format!("{e:#}")));
-                            b.cancelled = true;
-                        }
+                true
+            }
+            Ok(StepOutcome::DidDecode(_)) => {
+                let tok_guard = tokenizer.lock().unwrap_or_else(|e| e.into_inner());
+                drain_after_step(&mut sched, &mut bindings, &mut slot_emitted_toks, &tok_guard);
+                true
+            }
+            Ok(StepOutcome::Idle) => false,
+            Err(e) => {
+                eprintln!("[batch] scheduler step error: {e:#}");
+                for idx in 0..bindings.len() {
+                    if let Some(b) = bindings[idx].as_mut() {
+                        let _ = b.out.try_send(StreamEvent::Error(format!("{e:#}")));
+                        b.cancelled = true;
                     }
-                    true
                 }
+                true
             }
         };
 
@@ -646,7 +635,7 @@ fn finish_slot(
     slot_truncated: &mut HashMap<usize, bool>,
     tokenizer: &Arc<Mutex<tokenizers::Tokenizer>>,
 ) {
-    let Some(mut b) = bindings[idx].take() else { return };
+    let Some(b) = bindings[idx].take() else { return };
     // Flush holdback-хвоста (U+FFFD) перед Done: полный decode generated.
     if !b.cancelled {
         let generated = sched.slots_mut()[idx].generated_tokens().to_vec();

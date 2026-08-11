@@ -138,6 +138,18 @@ pub async fn switch_model(State(state): State<AppState>, Json(req): Json<SwitchR
             .map(|m| PathBuf::from(m["path"].as_str().unwrap()))
             .unwrap_or_else(|| PathBuf::from(&req.path))
     };
+    // Sandbox: только внутри models_dir, канонизация против `..` (аудит 2026-08-10).
+    let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+    let root = state.models_dir.canonicalize().unwrap_or_else(|_| state.models_dir.clone());
+    if !canon.starts_with(&root) {
+        state.switcher.loading.store(false, Ordering::Relaxed);
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "invalid_request_error",
+            format!("path outside models_dir: {}", canon.display()),
+        );
+    }
+    let path = canon;
     if !path.exists() {
         state.switcher.loading.store(false, Ordering::Relaxed);
         return api_error(

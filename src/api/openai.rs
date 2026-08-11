@@ -144,7 +144,10 @@ pub async fn chat_completions(
         .unwrap_or(false);
 
     if req.stream {
-        return stream_chat(state, messages, params, include_usage).await;
+        // tools в запросе → буферизуем текст (иначе <tool_call> разметка
+        // утекает в SSE-поток раньше парсинга — аудит 2026-08-10).
+        let has_tools = req.tools.as_ref().map(|t| !t.is_null()).unwrap_or(false);
+        return stream_chat(state, messages, params, include_usage, has_tools).await;
     }
 
     let out = match generate_collect(state.engine.as_ref(), messages, params).await {
@@ -204,6 +207,7 @@ async fn stream_chat(
     messages: Vec<ChatMessage>,
     params: GenParams,
     include_usage: bool,
+    has_tools: bool,
 ) -> Response {
     let id = format!("chatcmpl-{}", uuid::Uuid::new_v4().simple());
     let model = state.engine.model_info().id;
@@ -221,7 +225,9 @@ async fn stream_chat(
                 out.push(Event::default().data(chunk(&id, &model, json!({"role": "assistant"}), None)));
             }
             acc.push_str(&d);
-            out.push(Event::default().data(chunk(&id, &model, json!({"content": d}), None)));
+            if !has_tools {
+                out.push(Event::default().data(chunk(&id, &model, json!({"content": d}), None)));
+            }
             true
         }
         StreamEvent::Done {
@@ -234,10 +240,12 @@ async fn stream_chat(
                 first = false;
                 out.push(Event::default().data(chunk(&id, &model, json!({"role": "assistant"}), None)));
             }
-            let (_text, calls) = parse_tool_calls(&acc);
-            // tool_calls эмитим дельтами в конце; текст уже ушёл как deltas
-            // (ограничение: tool_call-разметка могла утечь в поток —
-            // ponytail: буферизовать весь поток при заданных tools)
+            let (text, calls) = parse_tool_calls(&acc);
+            // tools в запросе: текст буферизован — эмитим его (без tool_call
+            // разметки) одной дельтой до tool_calls-чанков.
+            if has_tools && !text.is_empty() {
+                out.push(Event::default().data(chunk(&id, &model, json!({"content": text}), None)));
+            }
             for (i, (name, args)) in calls.iter().enumerate() {
                 out.push(Event::default().data(chunk(
                     &id,
