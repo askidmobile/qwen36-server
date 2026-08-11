@@ -34,6 +34,7 @@ async fn main() -> Result<()> {
             context_length: cfg.ctx,
             kv_budget_mib: cfg.kv_budget_mib,
             kv_per_tok_mib: cfg.kv_per_tok_mib,
+            prefix_cache_mib: cfg.prefix_cache_mib,
         };
         BatchedEngine::load(bcfg).await?
     } else {

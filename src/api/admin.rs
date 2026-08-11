@@ -278,6 +278,8 @@ async fn do_switch(
             context_length: ctx,
             kv_budget_mib,
             kv_per_tok_mib,
+            prefix_cache_mib: std::env::var("QWEN36_PREFIX_CACHE_MIB")
+                .ok().and_then(|v| v.parse().ok()).unwrap_or(2048),
         })
         .await?
     } else {
@@ -292,6 +294,7 @@ async fn do_switch(
             slots,
             kv_budget_mib,
             kv_per_tok_mib,
+            prefix_cache_mib: 2048,
         };
         Arc::new(crate::engine::CandleEngine::load(&cfg)?)
     };

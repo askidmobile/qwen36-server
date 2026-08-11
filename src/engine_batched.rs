@@ -44,6 +44,8 @@ pub struct BatchConfig {
     pub kv_budget_mib: f64,
     /// MiB KV на токен на слот.
     pub kv_per_tok_mib: f64,
+    /// Бюджет prefix cache (MiB, snapshot'ы state). 0 = выключен.
+    pub prefix_cache_mib: usize,
 }
 
 impl BatchConfig {
@@ -66,6 +68,7 @@ impl BatchConfig {
             context_length: num("QWEN36_CTX", 81920),
             kv_budget_mib: 0.0,
             kv_per_tok_mib: 0.0,
+            prefix_cache_mib: num("QWEN36_PREFIX_CACHE_MIB", 2048),
         }
     }
 }
@@ -76,6 +79,8 @@ struct AdmitReq {
     params: GenParams,
     truncated: bool,
     prompt_tokens: usize,
+    /// Ключ prefix cache (hash полного prompt); None — кэш выключен.
+    cache_key: Option<u64>,
     out: mpsc::Sender<StreamEvent>,
 }
 
@@ -90,6 +95,7 @@ struct SlotBinding {
     params: GenParams,
     prompt_tokens: usize,
     completion_tokens: usize,
+    cache_key: Option<u64>,
     /// Уже эмитнутый префикс (строка, не индекс): decode_text может
     /// ретроактивно менять ранние байты (многотокенные UTF-8), поэтому
     /// индекс небезопасен — сравниваем префиксы.
@@ -122,6 +128,7 @@ pub struct BatchedEngine {
     max_queue: usize,
     in_flight: Arc<AtomicUsize>,
     tokenizer: Arc<Mutex<tokenizers::Tokenizer>>,
+    prefix_cache: Option<Arc<crate::prefix_cache::SharedPrefixCache>>,
 }
 
 impl BatchedEngine {
@@ -161,15 +168,23 @@ impl BatchedEngine {
             max_queue: cfg.max_queue,
             in_flight: Arc::new(AtomicUsize::new(0)),
             tokenizer: Arc::new(Mutex::new(tokenizer)),
+            prefix_cache: if cfg.prefix_cache_mib > 0 {
+                Some(Arc::new(crate::prefix_cache::SharedPrefixCache::new(
+                    crate::prefix_cache::PrefixCache::new(cfg.prefix_cache_mib),
+                )))
+            } else {
+                None
+            },
         });
 
         let tokenizer = engine.tokenizer.clone();
         let in_flight = Arc::clone(&engine.in_flight);
         let cfg2 = Arc::clone(&cfg);
+        let prefix_cache = engine.prefix_cache.clone();
         // scheduler/adapter не Send (CUDA context не thread-safe) → свой thread,
         // не tokio::spawn. dispatch_loop синхронная; blocking_recv на idle.
         std::thread::spawn(move || {
-            dispatch_loop(scheduler, rx_ingest, cfg2, in_flight, tokenizer);
+            dispatch_loop(scheduler, rx_ingest, cfg2, in_flight, tokenizer, prefix_cache);
         });
 
         Ok(engine)
@@ -234,12 +249,18 @@ impl Engine for BatchedEngine {
         let (out_tx, out_rx) = mpsc::channel(SLOT_CHAN_CAP);
         let req_id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.in_flight.fetch_add(1, Ordering::Relaxed);
+        let cache_key = if self.prefix_cache.is_some() {
+            Some(crate::prefix_cache::PrefixCache::key_for(&prompt))
+        } else {
+            None
+        };
         let req = AdmitReq {
             req_id,
             prompt,
             params: GenParams { ..params },
             truncated,
             prompt_tokens,
+            cache_key,
             out: out_tx,
         };
         self.tx_ingest
@@ -271,6 +292,7 @@ fn dispatch_loop(
     cfg: Arc<BatchConfig>,
     in_flight: Arc<AtomicUsize>,
     tokenizer: Arc<Mutex<tokenizers::Tokenizer>>,
+    prefix_cache: Option<Arc<crate::prefix_cache::SharedPrefixCache>>,
 ) {
     let mut bindings: Vec<Option<SlotBinding>> = (0..cfg.slots).map(|_| None).collect();
     let mut pending: VecDeque<AdmitReq> = VecDeque::new();
@@ -293,7 +315,7 @@ fn dispatch_loop(
                         in_flight.fetch_sub(1, Ordering::Relaxed);
                         continue;
                     }
-                    admit(req, &mut sched, &mut bindings, &mut pending, &mut slot_samplers, &mut slot_truncated, &cfg);
+                    admit(req, &mut sched, &mut bindings, &mut pending, &mut slot_samplers, &mut slot_truncated, &cfg, &prefix_cache);
                 }
                 IngestMsg::Cancel { req_id } => {
                     cancel(req_id, &mut bindings, &mut pending, &mut cancelled, &in_flight);
@@ -342,6 +364,8 @@ fn dispatch_loop(
                 if first_token_emitted {
                     let tok_guard = tokenizer.lock().unwrap_or_else(|e| e.into_inner());
                     drain_after_step(&mut sched, &mut bindings, &mut slot_emitted_toks, &tok_guard);
+                    drop(tok_guard);
+                    on_prefill_complete(&mut sched, &bindings, &prefix_cache);
                 }
                 true
             }
@@ -384,7 +408,7 @@ fn dispatch_loop(
             if trace {
                 eprintln!("[dl] finished slot {idx}");
             }
-            admit_from_pending(&mut pending, &mut sched, &mut bindings, &mut slot_samplers, &mut slot_truncated, &cfg);
+            admit_from_pending(&mut pending, &mut sched, &mut bindings, &mut slot_samplers, &mut slot_truncated, &cfg, &prefix_cache);
         }
 
         // Heartbeat: статусы слотов каждые 5s при активности.
@@ -414,7 +438,7 @@ fn dispatch_loop(
                         if cancelled.remove(&req.req_id) {
                             in_flight.fetch_sub(1, Ordering::Relaxed);
                         } else {
-                            admit(req, &mut sched, &mut bindings, &mut pending, &mut slot_samplers, &mut slot_truncated, &cfg);
+                            admit(req, &mut sched, &mut bindings, &mut pending, &mut slot_samplers, &mut slot_truncated, &cfg, &prefix_cache);
                         }
                     }
                     IngestMsg::Cancel { req_id } => {
@@ -528,6 +552,25 @@ fn kv_fits(
     used + est <= cfg.kv_budget_mib
 }
 
+    /// Cache fill: prefill завершён — забираем snapshot в prefix cache.
+    // (вызывается при DidPrefill{first_token_emitted})
+    fn on_prefill_complete(
+        sched: &mut BatchScheduler<Qwen35BatchAdapter>,
+        bindings: &[Option<SlotBinding>],
+        cache: &Option<std::sync::Arc<crate::prefix_cache::SharedPrefixCache>>,
+    ) {
+        let Some(cache) = cache else { return };
+        for (idx, b) in bindings.iter().enumerate() {
+            let Some(b) = b else { continue };
+            let Some(key) = b.cache_key else { continue };
+            if let Some(snap) = sched.model_mut().slot_snapshot(idx) {
+                if let Ok(mut c) = cache.lock() {
+                    c.put(key, snap);
+                }
+            }
+        }
+    }
+
 fn admit(
     req: AdmitReq,
     sched: &mut BatchScheduler<Qwen35BatchAdapter>,
@@ -536,10 +579,11 @@ fn admit(
     slot_samplers: &mut HashMap<usize, (GenParams, Rng)>,
     slot_truncated: &mut HashMap<usize, bool>,
     cfg: &BatchConfig,
+    prefix_cache: &Option<std::sync::Arc<crate::prefix_cache::SharedPrefixCache>>,
 ) {
     match bindings.iter().position(|b| b.is_none()) {
         Some(idx) if kv_fits(sched, bindings, cfg, req.prompt_tokens) => {
-            seed_slot(idx, req, sched, bindings, slot_samplers, slot_truncated)
+            seed_slot(idx, req, sched, bindings, slot_samplers, slot_truncated, prefix_cache)
         }
         _ => pending.push_back(req),
     }
@@ -552,6 +596,7 @@ fn admit_from_pending(
     slot_samplers: &mut HashMap<usize, (GenParams, Rng)>,
     slot_truncated: &mut HashMap<usize, bool>,
     cfg: &BatchConfig,
+    prefix_cache: &Option<std::sync::Arc<crate::prefix_cache::SharedPrefixCache>>,
 ) {
     while let Some(idx) = bindings.iter().position(|b| b.is_none()) {
         let fits = pending
@@ -562,7 +607,7 @@ fn admit_from_pending(
             break;
         }
         let req = pending.pop_front().unwrap();
-        seed_slot(idx, req, sched, bindings, slot_samplers, slot_truncated);
+        seed_slot(idx, req, sched, bindings, slot_samplers, slot_truncated, prefix_cache);
     }
 }
 
@@ -574,7 +619,21 @@ fn seed_slot(
     bindings: &mut [Option<SlotBinding>],
     slot_samplers: &mut HashMap<usize, (GenParams, Rng)>,
     slot_truncated: &mut HashMap<usize, bool>,
+    prefix_cache: &Option<std::sync::Arc<crate::prefix_cache::SharedPrefixCache>>,
 ) {
+    // Prefix cache: hit → snapshot в слот + primed admit (prefill 1 токена).
+    let primed = if let (Some(cache), Some(key)) = (prefix_cache, req.cache_key) {
+        let hit = cache.lock().ok().and_then(|mut c| c.get(key));
+        match hit {
+            Some(snap) => {
+                sched.model_mut().inject_slot_snapshot(idx, snap);
+                Some(req.prompt_tokens - 1)
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
     let prompt_tokens = req.prompt_tokens;
     let max_new = req.params.max_tokens;
     let seed = req.params.seed.unwrap_or_else(|| {
@@ -584,8 +643,17 @@ fn seed_slot(
             .unwrap_or(42)
     });
     let params = req.params.clone();
-    // TODO-F4: sched.submit(prompt, max_new) — форк переводит Slot в Prefilling.
-    sched.submit(req.prompt, max_new);
+    match primed {
+        Some(prefix_len) => {
+            if qwen35_batch::scheduler::trace_on() {
+                eprintln!("[cache] HIT slot={idx} prefix={prefix_len} tok");
+            }
+            sched.submit_primed(req.prompt, max_new, prefix_len);
+        }
+        None => {
+            sched.submit(req.prompt, max_new);
+        }
+    }
     slot_samplers.insert(idx, (params.clone(), Rng::new(seed)));
     slot_truncated.insert(idx, req.truncated);
     bindings[idx] = Some(SlotBinding {
@@ -594,6 +662,7 @@ fn seed_slot(
         params,
         prompt_tokens,
         completion_tokens: 0,
+        cache_key: req.cache_key,
         emitted_text: String::new(),
         stop_hit: false,
         forced: false,
