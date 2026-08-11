@@ -248,6 +248,15 @@ async function loadAvailableModels() {
       if (j.current && m.path === j.current.path) o.selected = true;
       sel.append(o);
     }
+    // Текущая модель не в списке (файл удалён/вне models_dir) — синтетическая
+    // опция, чтобы селектор всегда показывал РЕАЛЬНО загруженную модель.
+    if (j.current && j.current.path && ![...sel.options].some(o => o.value === j.current.path)) {
+      const o = document.createElement("option");
+      o.value = j.current.path;
+      o.textContent = j.current.path.split(/[\\/]/).pop() + " (текущая, файла нет в списке)";
+      o.selected = true;
+      sel.append(o);
+    }
     if (j.current) {
       if (j.current.ctx) $("ctxsel").dataset.current = j.current.ctx;
       if (j.current.slots) $("slotssel").value = j.current.slots;
