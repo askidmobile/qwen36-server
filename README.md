@@ -67,15 +67,17 @@ scripts/stability_smoke.sh         # критерий BD-008 (на yttri-win)
 
 ### A100 80GB (Selectel, 2026-08-11) — наш стек vs llama.cpp
 
-| Модель (Q8_0) | llama tg128 | наш decode B=1 | наш B=4 aggregate |
-|---|---|---|---|
-| Qwen3.6-27B | 40.5 t/s | 29 t/s (34.5ms/step) | — |
-| Qwen3.6-35B-A3B | 141.3 t/s | 51.5 t/s (19.4ms/step) | 103 t/s (39ms/step) |
-| Ornith-1.0-35B | 140.9 t/s | 51.7 t/s | — |
+| Модель (Q8_0) | llama tg128 | наш decode B=1 | наш B=4 aggregate | llama pp | наш prefill 25.5K |
+|---|---|---|---|---|---|
+| Qwen3.6-27B | 40.4 t/s | 30.8 t/s (32.5ms/step) | 57.4 t/s | 1316 t/s | 585 t/s |
+| Qwen3.6-35B-A3B | 140.9 t/s | 51.6 t/s (19.4ms/step) | 108.7 t/s | 3466 t/s | 640 t/s |
+| Ornith-1.0-35B | 140.9 t/s | 51.7 t/s | — | 3470 t/s | ~640 t/s |
 
-Prefill: llama 1316-3470 t/s vs наши ~240-360 t/s (512-чанки).
-Ключевые фиксы дня: slot_ids device-cache (6x на dense), PTX indexed MoE (3x на MoE),
-Q8_0 stride-баг в indexed_moe kernel, BF16→F16 загрузка полных моделей.
+Фиксы дня: slot_ids device-cache (6x dense decode), PTX indexed MoE (3x MoE),
+Q8_0 stride-баг в indexed_moe kernel, race в split-K flash-decode (гонка m/l
+между warps — деградация после 2K ctx), FA2 prefill, register-state DeltaNet
+prefill (по схеме llama gated_delta_net), BF16→F16 загрузка полных моделей,
+Q8 KV head-last layout.
 
 ### yttri-win (RTX 3060 12 GB, CUDA 12.4) — исторический baseline
 
