@@ -27,7 +27,7 @@ use crate::engine_types::{ChatMessage, Engine, GenParams, ModelInfo, StreamEvent
 use crate::sampler::{self, Rng};
 
 /// Макс. слотов = DECODE_BATCH_CAPACITY форка.
-pub const MAX_SLOTS: usize = 4;
+pub const MAX_SLOTS: usize = 8;
 /// Capacity per-slot канала StreamEvent.
 const SLOT_CHAN_CAP: usize = 64;
 /// Запас токенов под погрешность per-message оценки sliding window.
