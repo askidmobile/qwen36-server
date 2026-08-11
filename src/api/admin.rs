@@ -53,6 +53,16 @@ fn scan_gguf(dir: &Path, depth: usize, out: &mut Vec<Value>) {
             if is_split_part(name) || name.starts_with("mmproj") {
                 continue;
             }
+            // Пропускаем файлы, которые прямо сейчас докачиваются (mtime < 30s):
+            // частичный GGUF валиден по заголовку, но тензоры = мусор
+            // (поймано: чат выдавал token ids вместо текста).
+            if let Ok(meta) = e.metadata() {
+                if let Ok(mtime) = meta.modified() {
+                    if mtime.elapsed().map(|d| d.as_secs() < 30).unwrap_or(false) {
+                        continue;
+                    }
+                }
+            }
             let size_mib = e.metadata().map(|m| m.len() / 1024 / 1024).unwrap_or(0);
             out.push(json!({
                 "name": name,
@@ -175,6 +185,19 @@ pub async fn switch_model(State(state): State<AppState>, Json(req): Json<SwitchR
             "invalid_request_error",
             format!("model not found: {}", path.display()),
         );
+    }
+    // Отказ для файла, который докачивается прямо сейчас (mtime < 30s).
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if let Ok(mtime) = meta.modified() {
+            if mtime.elapsed().map(|d| d.as_secs() < 30).unwrap_or(false) {
+                state.switcher.loading.store(false, Ordering::Relaxed);
+                return api_error(
+                    StatusCode::CONFLICT,
+                    "invalid_request_error",
+                    "model file is still downloading (mtime < 30s)",
+                );
+            }
+        }
     }
 
     let (_cur_path, cur_ctx, cur_slots) = state
