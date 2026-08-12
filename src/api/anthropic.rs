@@ -6,7 +6,9 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::api::{bad_request, generate_collect, internal_error, parse_tool_calls, sse_response, AppState};
+use crate::api::{
+    bad_request, generate_collect, internal_error, parse_tool_calls, sse_response, AppState,
+};
 use crate::engine_types::{ChatMessage, GenParams, StreamEvent};
 
 #[derive(Deserialize)]
@@ -112,7 +114,9 @@ fn text_and_thinking_blocks(text: &str) -> Vec<Value> {
             blocks.push(json!({"type": "text", "text": before}));
         }
         let after = &rest[start + "<think>".len()..];
-        let Some(end) = after.find("</think>") else { break };
+        let Some(end) = after.find("</think>") else {
+            break;
+        };
         blocks.push(json!({"type": "thinking", "thinking": after[..end]}));
         rest = &after[end + "</think>".len()..];
     }
@@ -144,6 +148,9 @@ pub async fn messages(State(state): State<AppState>, Json(req): Json<MessagesReq
     let Some(max_tokens) = req.max_tokens else {
         return bad_request("max_tokens is required");
     };
+    if max_tokens == 0 {
+        return bad_request("max_tokens must be greater than 0");
+    }
 
     let mut msgs: Vec<ChatMessage> = Vec::new();
     if let Some(sys) = &req.system {
@@ -229,20 +236,28 @@ pub async fn messages(State(state): State<AppState>, Json(req): Json<MessagesReq
         StreamEvent::Delta(d) => {
             if !started {
                 started = true;
-                out.push(Event::default().event("message_start").data(message_start.clone()));
-                out.push(Event::default().event("content_block_start").data(
-                    json!({"type": "content_block_start", "index": 0,
+                out.push(
+                    Event::default()
+                        .event("message_start")
+                        .data(message_start.clone()),
+                );
+                out.push(
+                    Event::default().event("content_block_start").data(
+                        json!({"type": "content_block_start", "index": 0,
                            "content_block": {"type": "text", "text": ""}})
-                    .to_string(),
-                ));
+                        .to_string(),
+                    ),
+                );
             }
             acc.push_str(&d);
             if !has_tools {
-                out.push(Event::default().event("content_block_delta").data(
-                    json!({"type": "content_block_delta", "index": 0,
+                out.push(
+                    Event::default().event("content_block_delta").data(
+                        json!({"type": "content_block_delta", "index": 0,
                            "delta": {"type": "text_delta", "text": d}})
-                    .to_string(),
-                ));
+                        .to_string(),
+                    ),
+                );
             }
             true
         }
@@ -254,63 +269,83 @@ pub async fn messages(State(state): State<AppState>, Json(req): Json<MessagesReq
         } => {
             if !started {
                 started = true;
-                out.push(Event::default().event("message_start").data(message_start.clone()));
-                out.push(Event::default().event("content_block_start").data(
-                    json!({"type": "content_block_start", "index": 0,
+                out.push(
+                    Event::default()
+                        .event("message_start")
+                        .data(message_start.clone()),
+                );
+                out.push(
+                    Event::default().event("content_block_start").data(
+                        json!({"type": "content_block_start", "index": 0,
                            "content_block": {"type": "text", "text": ""}})
-                    .to_string(),
-                ));
+                        .to_string(),
+                    ),
+                );
             }
             let (text, calls) = parse_tool_calls(&acc);
             // tools в запросе: текст был буферизован — эмитим без разметки.
             if has_tools && !text.is_empty() {
-                out.push(Event::default().event("content_block_delta").data(
-                    json!({"type": "content_block_delta", "index": 0,
+                out.push(
+                    Event::default().event("content_block_delta").data(
+                        json!({"type": "content_block_delta", "index": 0,
                            "delta": {"type": "text_delta", "text": text}})
-                    .to_string(),
-                ));
+                        .to_string(),
+                    ),
+                );
             }
-            out.push(Event::default().event("content_block_stop").data(
-                json!({"type": "content_block_stop", "index": 0}).to_string(),
-            ));
+            out.push(
+                Event::default()
+                    .event("content_block_stop")
+                    .data(json!({"type": "content_block_stop", "index": 0}).to_string()),
+            );
             // tool_use блоки — буферизованно, целиком (допустимо по заданию)
             for (i, (name, args)) in calls.iter().enumerate() {
                 let idx = i + 1;
                 let input: Value = serde_json::from_str(args).unwrap_or_else(|_| json!({}));
-                out.push(Event::default().event("content_block_start").data(
-                    json!({"type": "content_block_start", "index": idx,
+                out.push(
+                    Event::default().event("content_block_start").data(
+                        json!({"type": "content_block_start", "index": idx,
                            "content_block": {"type": "tool_use",
                                "id": format!("toolu_{}", uuid::Uuid::new_v4().simple()),
                                "name": name, "input": {}}})
-                    .to_string(),
-                ));
+                        .to_string(),
+                    ),
+                );
                 out.push(Event::default().event("content_block_delta").data(
                     json!({"type": "content_block_delta", "index": idx,
                            "delta": {"type": "input_json_delta", "partial_json": input.to_string()}})
                     .to_string(),
                 ));
-                out.push(Event::default().event("content_block_stop").data(
-                    json!({"type": "content_block_stop", "index": idx}).to_string(),
-                ));
+                out.push(
+                    Event::default()
+                        .event("content_block_stop")
+                        .data(json!({"type": "content_block_stop", "index": idx}).to_string()),
+                );
             }
-            out.push(Event::default().event("message_delta").data(
-                json!({"type": "message_delta",
+            out.push(
+                Event::default().event("message_delta").data(
+                    json!({"type": "message_delta",
                        "delta": {"stop_reason": map_stop_reason(&finish_reason, !calls.is_empty()),
                                   "stop_sequence": null},
                        "usage": {"input_tokens": prompt_tokens, "output_tokens": completion_tokens,
                                   "truncated": truncated}})
-                .to_string(),
-            ));
-            out.push(Event::default().event("message_stop").data(
-                json!({"type": "message_stop"}).to_string(),
-            ));
+                    .to_string(),
+                ),
+            );
+            out.push(
+                Event::default()
+                    .event("message_stop")
+                    .data(json!({"type": "message_stop"}).to_string()),
+            );
             false
         }
         StreamEvent::Error(e) => {
-            out.push(Event::default().event("error").data(
-                json!({"type": "error", "error": {"type": "internal_error", "message": e}})
-                    .to_string(),
-            ));
+            out.push(
+                Event::default().event("error").data(
+                    json!({"type": "error", "error": {"type": "internal_error", "message": e}})
+                        .to_string(),
+                ),
+            );
             false
         }
     })

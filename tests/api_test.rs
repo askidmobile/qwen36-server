@@ -102,6 +102,30 @@ async fn unauthorized_without_key() {
 }
 
 #[tokio::test]
+async fn zero_output_tokens_are_bad_requests() {
+    for (uri, body) in [
+        (
+            "/v1/chat/completions",
+            serde_json::json!({"messages": [{"role": "user", "content": "hi"}], "max_tokens": 0}),
+        ),
+        (
+            "/v1/responses",
+            serde_json::json!({"input": "hi", "max_output_tokens": 0}),
+        ),
+        (
+            "/v1/messages",
+            serde_json::json!({"messages": [{"role": "user", "content": "hi"}], "max_tokens": 0}),
+        ),
+    ] {
+        let resp = app(vec![])
+            .oneshot(authed(json_req("POST", uri, body)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{uri}");
+    }
+}
+
+#[tokio::test]
 async fn models_list_format() {
     let resp = app(vec![])
         .oneshot(authed(

@@ -49,7 +49,8 @@ fn input_to_messages(input: &Value) -> Result<Vec<ChatMessage>, Response> {
                                     }
                                 }
                                 Some("input_image") | Some("image_url") => {
-                                    return Err(bad_request("vision not supported")); // BD-004
+                                    return Err(bad_request("vision not supported"));
+                                    // BD-004
                                 }
                                 _ => {}
                             }
@@ -61,15 +62,30 @@ fn input_to_messages(input: &Value) -> Result<Vec<ChatMessage>, Response> {
                 Ok(ChatMessage { role, content })
             })
             .collect(),
-        _ => Err(bad_request("input must be a string or an array of messages")),
+        _ => Err(bad_request(
+            "input must be a string or an array of messages",
+        )),
     }
 }
 
-fn response_object(id: &str, model: &str, text: &str, usage: (usize, usize), status: &str) -> Value {
+fn response_object(
+    id: &str,
+    model: &str,
+    text: &str,
+    usage: (usize, usize),
+    status: &str,
+) -> Value {
     response_object_ext(id, model, text, usage, status, false)
 }
 
-fn response_object_ext(id: &str, model: &str, text: &str, usage: (usize, usize), status: &str, truncated: bool) -> Value {
+fn response_object_ext(
+    id: &str,
+    model: &str,
+    text: &str,
+    usage: (usize, usize),
+    status: &str,
+    truncated: bool,
+) -> Value {
     json!({
         "id": id,
         "object": "response",
@@ -92,13 +108,19 @@ fn response_object_ext(id: &str, model: &str, text: &str, usage: (usize, usize),
     })
 }
 
-pub async fn responses(State(state): State<AppState>, Json(req): Json<ResponsesRequest>) -> Response {
+pub async fn responses(
+    State(state): State<AppState>,
+    Json(req): Json<ResponsesRequest>,
+) -> Response {
     let messages = match input_to_messages(&req.input) {
         Ok(m) => m,
         Err(r) => return r,
     };
     let mut params = GenParams::default();
     if let Some(m) = req.max_output_tokens {
+        if m == 0 {
+            return bad_request("max_output_tokens must be greater than 0");
+        }
         params.max_tokens = m;
     }
     if let Some(t) = req.temperature {
@@ -144,7 +166,11 @@ pub async fn responses(State(state): State<AppState>, Json(req): Json<ResponsesR
         StreamEvent::Delta(d) => {
             if !created_sent {
                 created_sent = true;
-                out.push(Event::default().event("response.created").data(created.clone()));
+                out.push(
+                    Event::default()
+                        .event("response.created")
+                        .data(created.clone()),
+                );
             }
             acc.push_str(&d);
             out.push(
@@ -162,9 +188,20 @@ pub async fn responses(State(state): State<AppState>, Json(req): Json<ResponsesR
         } => {
             if !created_sent {
                 created_sent = true;
-                out.push(Event::default().event("response.created").data(created.clone()));
+                out.push(
+                    Event::default()
+                        .event("response.created")
+                        .data(created.clone()),
+                );
             }
-            let obj = response_object_ext(&id, &model, &acc, (prompt_tokens, completion_tokens), "completed", truncated);
+            let obj = response_object_ext(
+                &id,
+                &model,
+                &acc,
+                (prompt_tokens, completion_tokens),
+                "completed",
+                truncated,
+            );
             out.push(
                 Event::default()
                     .event("response.completed")
@@ -173,8 +210,10 @@ pub async fn responses(State(state): State<AppState>, Json(req): Json<ResponsesR
             false
         }
         StreamEvent::Error(e) => {
-            out.push(Event::default()
-                .data(json!({"error": {"type": "internal_error", "message": e}}).to_string()));
+            out.push(
+                Event::default()
+                    .data(json!({"error": {"type": "internal_error", "message": e}}).to_string()),
+            );
             false
         }
     })

@@ -6,7 +6,9 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::api::{bad_request, generate_collect, internal_error, parse_tool_calls, sse_response, AppState};
+use crate::api::{
+    bad_request, generate_collect, internal_error, parse_tool_calls, sse_response, AppState,
+};
 use crate::engine_types::{ChatMessage, GenParams, StreamEvent};
 
 #[derive(Deserialize)]
@@ -82,9 +84,9 @@ fn to_gen_params(req: &ChatCompletionRequest) -> GenParams {
     if let Some(stop) = &req.stop {
         match stop {
             Value::String(s) => p.stop.push(s.clone()),
-            Value::Array(arr) => {
-                p.stop.extend(arr.iter().filter_map(|v| v.as_str().map(String::from)))
-            }
+            Value::Array(arr) => p
+                .stop
+                .extend(arr.iter().filter_map(|v| v.as_str().map(String::from))),
             _ => {}
         }
     }
@@ -136,6 +138,9 @@ pub async fn chat_completions(
         Err(r) => return r,
     };
     let params = to_gen_params(&req);
+    if params.max_tokens == 0 {
+        return bad_request("max_tokens must be greater than 0");
+    }
     let include_usage = req
         .stream_options
         .as_ref()
@@ -222,7 +227,12 @@ async fn stream_chat(
         StreamEvent::Delta(d) => {
             if first {
                 first = false;
-                out.push(Event::default().data(chunk(&id, &model, json!({"role": "assistant"}), None)));
+                out.push(Event::default().data(chunk(
+                    &id,
+                    &model,
+                    json!({"role": "assistant"}),
+                    None,
+                )));
             }
             acc.push_str(&d);
             if !has_tools {
@@ -238,7 +248,12 @@ async fn stream_chat(
         } => {
             if first {
                 first = false;
-                out.push(Event::default().data(chunk(&id, &model, json!({"role": "assistant"}), None)));
+                out.push(Event::default().data(chunk(
+                    &id,
+                    &model,
+                    json!({"role": "assistant"}),
+                    None,
+                )));
             }
             let (text, calls) = parse_tool_calls(&acc);
             // tools в запросе: текст буферизован — эмитим его (без tool_call
@@ -259,30 +274,38 @@ async fn stream_chat(
                     None,
                 )));
             }
-            let finish = if calls.is_empty() { finish_reason.as_str() } else { "tool_calls" };
+            let finish = if calls.is_empty() {
+                finish_reason.as_str()
+            } else {
+                "tool_calls"
+            };
             out.push(Event::default().data(chunk(&id, &model, json!({}), Some(finish))));
             if include_usage {
-                out.push(Event::default().data(
-                    json!({
-                        "id": id, "object": "chat.completion.chunk",
-                        "created": now_unix(), "model": model,
-                        "choices": [],
-                        "usage": {
-                            "prompt_tokens": prompt_tokens,
-                            "completion_tokens": completion_tokens,
-                            "total_tokens": prompt_tokens + completion_tokens,
-                            "truncated": truncated,
-                        },
-                    })
-                    .to_string(),
-                ));
+                out.push(
+                    Event::default().data(
+                        json!({
+                            "id": id, "object": "chat.completion.chunk",
+                            "created": now_unix(), "model": model,
+                            "choices": [],
+                            "usage": {
+                                "prompt_tokens": prompt_tokens,
+                                "completion_tokens": completion_tokens,
+                                "total_tokens": prompt_tokens + completion_tokens,
+                                "truncated": truncated,
+                            },
+                        })
+                        .to_string(),
+                    ),
+                );
             }
             out.push(Event::default().data("[DONE]"));
             false
         }
         StreamEvent::Error(e) => {
-            out.push(Event::default()
-                .data(json!({"error": {"type": "internal_error", "message": e}}).to_string()));
+            out.push(
+                Event::default()
+                    .data(json!({"error": {"type": "internal_error", "message": e}}).to_string()),
+            );
             false
         }
     })
