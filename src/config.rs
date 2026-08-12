@@ -33,6 +33,10 @@ impl Config {
             .ok()
             .filter(|k| !k.is_empty())
             .ok_or_else(|| anyhow!("QWEN36_API_KEY обязателен (без него сервер не стартует)"))?;
+        let prefix_cache_mib = parse_env("QWEN36_PREFIX_CACHE_MIB", 0usize)?;
+        if prefix_cache_mib != 0 {
+            anyhow::bail!("prefix cache temporarily disabled (QWEN36_PREFIX_CACHE_MIB must be 0)");
+        }
         let mut cfg = Self {
             model: std::env::var("QWEN36_MODEL")
                 .map(PathBuf::from)
@@ -44,7 +48,7 @@ impl Config {
             slots: parse_env("QWEN36_SLOTS", 4usize)?,
             kv_budget_mib: 0.0,
             kv_per_tok_mib: 0.0,
-            prefix_cache_mib: parse_env("QWEN36_PREFIX_CACHE_MIB", 0usize)?,
+            prefix_cache_mib,
         };
         cfg.apply_vram_plan()?;
         Ok(cfg)
@@ -117,5 +121,10 @@ mod tests {
 
         env::set_var("QWEN36_PORT", "x");
         assert!(Config::from_env().is_err());
+        env::set_var("QWEN36_PORT", "8080");
+        env::set_var("QWEN36_PREFIX_CACHE_MIB", "1");
+        let err = Config::from_env().unwrap_err().to_string();
+        assert!(err.contains("prefix cache temporarily disabled"));
+        env::remove_var("QWEN36_PREFIX_CACHE_MIB");
     }
 }

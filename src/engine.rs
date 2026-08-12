@@ -76,7 +76,7 @@ impl GenParams {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
-    pub role: String,    // system|user|assistant|tool
+    pub role: String, // system|user|assistant|tool
     pub content: String,
 }
 
@@ -269,14 +269,10 @@ fn run_generation(
         } = &mut *st;
         model.clear_state();
 
-        let ids = candle_core::Tensor::from_vec(
-            prompt_ids.clone(),
-            (1usize, prompt_ids.len()),
-            &dev,
-        )?;
+        let ids =
+            candle_core::Tensor::from_vec(prompt_ids.clone(), (1usize, prompt_ids.len()), dev)?;
         let logits_t = model.forward(&ids, 0)?;
         let mut logits = last_logits(&logits_t)?;
-        let mut pos = prompt_ids.len();
 
         let seed = params.seed.unwrap_or_else(|| {
             std::time::SystemTime::now()
@@ -302,7 +298,7 @@ fn run_generation(
             };
         }
 
-        for _ in 0..params.max_tokens {
+        for next_pos in (prompt_ids.len()..).take(params.max_tokens) {
             let tok = sampler::sample(
                 &logits,
                 params.temperature,
@@ -330,7 +326,7 @@ fn run_generation(
             if !params.stop.is_empty() {
                 let scan_from = full_text.len().saturating_sub(max_stop_len + 64);
                 let scan_from = floor_char_boundary(&full_text, scan_from)
-                .max(emitted_text.len().min(full_text.len()));
+                    .max(emitted_text.len().min(full_text.len()));
                 if let Some(rel) = full_text[scan_from..].find_any(&params.stop) {
                     cut_at = Some(scan_from + rel);
                 }
@@ -346,7 +342,9 @@ fn run_generation(
             if full_text.starts_with(&emitted_text) && end >= emitted_text.len() {
                 let chunk = &full_text[emitted_text.len()..end];
                 if !chunk.is_empty()
-                    && tx.blocking_send(StreamEvent::Delta(chunk.to_string())).is_err()
+                    && tx
+                        .blocking_send(StreamEvent::Delta(chunk.to_string()))
+                        .is_err()
                 {
                     return Ok(()); // клиент отключился
                 }
@@ -359,10 +357,9 @@ fn run_generation(
             }
 
             // Следующий decode-шаг: forward по 1 токену (single-slot state уже в модели).
-            let next = candle_core::Tensor::from_vec(vec![tok], (1usize, 1usize), &dev)?;
-            let logits_t = model.forward(&next, pos)?;
+            let next = candle_core::Tensor::from_vec(vec![tok], (1usize, 1usize), dev)?;
+            let logits_t = model.forward(&next, next_pos)?;
             logits = last_logits(&logits_t)?;
-            pos += 1;
         }
         flush_tail!();
         finish("length", generated.len(), &tx);
@@ -404,8 +401,8 @@ fn load_model(path: &Path, device: &candle_core::Device) -> Result<(ModelWeights
     use std::sync::Arc;
 
     let file = std::fs::File::open(path).map_err(|e| anyhow!("open GGUF {path:?}: {e}"))?;
-    let mmap = unsafe { memmap2::MmapOptions::new().map(&file) }
-        .map_err(|e| anyhow!("mmap GGUF: {e}"))?;
+    let mmap =
+        unsafe { memmap2::MmapOptions::new().map(&file) }.map_err(|e| anyhow!("mmap GGUF: {e}"))?;
     let mmap = Arc::new(mmap);
     let mut c = std::io::Cursor::new(mmap.as_ref());
     let ct = gguf_file::Content::read(&mut c).map_err(|e| anyhow!("read GGUF: {e}"))?;
@@ -423,7 +420,8 @@ fn load_model(path: &Path, device: &candle_core::Device) -> Result<(ModelWeights
         ModelWeights::from_gguf(ct, mmap, device).map_err(|e| anyhow!("load weights: {e}"))?
     };
     #[cfg(not(all(target_os = "macos", feature = "metal")))]
-    let model = ModelWeights::from_gguf(ct, mmap, device).map_err(|e| anyhow!("load weights: {e}"))?;
+    let model =
+        ModelWeights::from_gguf(ct, mmap, device).map_err(|e| anyhow!("load weights: {e}"))?;
     Ok((model, eos))
 }
 
@@ -456,11 +454,7 @@ pub fn model_id_from_filename(path: &Path) -> String {
     let base = stem
         .rsplit_once("-UD-")
         .map(|(b, _)| b)
-        .unwrap_or_else(|| {
-            stem.rsplit_once('-')
-                .map(|(b, _)| b)
-                .unwrap_or(stem)
-        });
+        .unwrap_or_else(|| stem.rsplit_once('-').map(|(b, _)| b).unwrap_or(stem));
     base.to_lowercase()
 }
 
@@ -471,7 +465,9 @@ pub fn model_id_from_filename(path: &Path) -> String {
 #[cfg(feature = "cuda")]
 pub fn maybe_retain_mempool(dev: &candle_core::Device) {
     use candle_core::cuda_backend::mem_pool;
-    let Ok(cuda_dev) = dev.as_cuda_device() else { return };
+    let Ok(cuda_dev) = dev.as_cuda_device() else {
+        return;
+    };
     let free = mem_pool::free_mib(cuda_dev).unwrap_or(0);
     let total = crate::vram_plan::total_vram_mib().unwrap_or(0) as u64;
     let need = total / 2;
@@ -508,10 +504,7 @@ pub fn trim_messages(
     if total <= budget {
         return (messages.to_vec(), false);
     }
-    let n_system = messages
-        .iter()
-        .take_while(|m| m.role == "system")
-        .count();
+    let n_system = messages.iter().take_while(|m| m.role == "system").count();
     let (systems, body) = messages.split_at(n_system);
     let sys_tokens: usize = systems.iter().map(&count).sum();
     let mut body: Vec<ChatMessage> = body.to_vec();
@@ -535,10 +528,7 @@ pub trait FindAny {
 }
 impl FindAny for str {
     fn find_any(&self, needles: &[String]) -> Option<usize> {
-        needles
-            .iter()
-            .filter_map(|n| self.find(n.as_str()))
-            .min()
+        needles.iter().filter_map(|n| self.find(n.as_str())).min()
     }
 }
 

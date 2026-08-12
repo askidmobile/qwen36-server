@@ -5,7 +5,12 @@
 //!   дождаться освобождения VRAM, загрузить новый, swap. Во время загрузки
 //!   generate → 503. Ответ сразу (202), прогресс — через GET /v1/models.
 
-use axum::{extract::State, http::StatusCode, response::{IntoResponse, Response}, Json};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -26,8 +31,12 @@ pub struct SwitchRequest {
 
 /// split-часть GGUF: `name-00001-of-00002.gguf` (по одному файлу не грузится).
 fn is_split_part(name: &str) -> bool {
-    let Some(stem) = name.strip_suffix(".gguf") else { return false };
-    let Some(pos) = stem.rfind("-of-") else { return false };
+    let Some(stem) = name.strip_suffix(".gguf") else {
+        return false;
+    };
+    let Some(pos) = stem.rfind("-of-") else {
+        return false;
+    };
     let before = &stem[..pos];
     let after = &stem[pos + 4..];
     let first = before.rsplit('-').next().unwrap_or("");
@@ -42,7 +51,9 @@ fn scan_gguf(dir: &Path, depth: usize, out: &mut Vec<Value>) {
     if depth > 3 {
         return;
     }
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in rd.flatten() {
         let p = e.path();
         if p.is_dir() {
@@ -86,7 +97,9 @@ pub async fn model_native_ctx(
         return Json(json!({"native_ctx": 0, "error": "outside models_dir"}));
     }
     let nc = tokio::task::spawn_blocking(move || {
-        crate::vram_plan::footprint_from_gguf(&p).map(|fp| fp.native_ctx).unwrap_or(0)
+        crate::vram_plan::footprint_from_gguf(&p)
+            .map(|fp| fp.native_ctx)
+            .unwrap_or(0)
     })
     .await
     .unwrap_or(0);
@@ -148,9 +161,16 @@ pub async fn available_models(State(state): State<AppState>) -> Json<Value> {
     }))
 }
 
-pub async fn switch_model(State(state): State<AppState>, Json(req): Json<SwitchRequest>) -> Response {
+pub async fn switch_model(
+    State(state): State<AppState>,
+    Json(req): Json<SwitchRequest>,
+) -> Response {
     if state.switcher.loading.swap(true, Ordering::Relaxed) {
-        return api_error(StatusCode::CONFLICT, "invalid_request_error", "model switch already in progress");
+        return api_error(
+            StatusCode::CONFLICT,
+            "invalid_request_error",
+            "model switch already in progress",
+        );
     }
 
     // Разрешить имя файла в полный путь.
@@ -168,7 +188,10 @@ pub async fn switch_model(State(state): State<AppState>, Json(req): Json<SwitchR
     };
     // Sandbox: только внутри models_dir, канонизация против `..` (аудит 2026-08-10).
     let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
-    let root = state.models_dir.canonicalize().unwrap_or_else(|_| state.models_dir.clone());
+    let root = state
+        .models_dir
+        .canonicalize()
+        .unwrap_or_else(|_| state.models_dir.clone());
     if !canon.starts_with(&root) {
         state.switcher.loading.store(false, Ordering::Relaxed);
         return api_error(
@@ -207,7 +230,20 @@ pub async fn switch_model(State(state): State<AppState>, Json(req): Json<SwitchR
         .map(|c| c.clone())
         .unwrap_or_else(|_| (PathBuf::new(), 8192, 4));
     let req_ctx = req.ctx.unwrap_or(cur_ctx);
-    let req_slots = req.slots.unwrap_or(cur_slots).clamp(1, 8);
+    let req_slots_raw = req.slots.unwrap_or(cur_slots);
+    if req_slots_raw == 0 || req_slots_raw > crate::engine_batched::MAX_SLOTS {
+        state.switcher.loading.store(false, Ordering::Relaxed);
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            format!(
+                "slots {} exceeds max {}",
+                req_slots_raw,
+                crate::engine_batched::MAX_SLOTS
+            ),
+        );
+    }
+    let req_slots = req_slots_raw;
 
     tokio::spawn(async move {
         let result = do_switch(&state, path, req_ctx, req_slots).await;
@@ -239,7 +275,12 @@ async fn do_switch(
         Some(total) => {
             let plan = vram_plan::compute_dynamic(total, &fp, req_ctx, req_slots)?;
             eprintln!("[switch] {}", plan.report);
-            (plan.ctx, plan.slots, plan.kv_budget_mib, plan.kv_per_tok_mib)
+            (
+                plan.ctx,
+                plan.slots,
+                plan.kv_budget_mib,
+                plan.kv_per_tok_mib,
+            )
         }
         None => (req_ctx, req_slots, 0.0, 0.0),
     };
@@ -253,7 +294,7 @@ async fn do_switch(
             let free = vram_plan::free_vram_mib().unwrap_or(0);
             // Порог = веса новой модели (без +512: driver pool/nvidia-smi
             // занижают free, сверхзапрос таймаутит — уже ловили 180s «зависание»).
-            if free as usize >= fp.weights_mib {
+            if free >= fp.weights_mib {
                 break;
             }
             if std::time::Instant::now() > deadline {
@@ -278,8 +319,7 @@ async fn do_switch(
             context_length: ctx,
             kv_budget_mib,
             kv_per_tok_mib,
-            prefix_cache_mib: std::env::var("QWEN36_PREFIX_CACHE_MIB")
-                .ok().and_then(|v| v.parse().ok()).unwrap_or(0),
+            prefix_cache_mib: 0,
         })
         .await?
     } else {
@@ -299,7 +339,10 @@ async fn do_switch(
         Arc::new(crate::engine::CandleEngine::load(&cfg)?)
     };
     let info = engine.model_info();
-    eprintln!("[switch] loaded: id={} ctx={} slots={}", info.id, info.context_length, info.slots);
+    eprintln!(
+        "[switch] loaded: id={} ctx={} slots={}",
+        info.id, info.context_length, info.slots
+    );
     state.switcher.install(engine, path, ctx, slots);
     Ok(())
 }

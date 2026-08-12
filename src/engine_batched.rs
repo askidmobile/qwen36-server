@@ -15,14 +15,17 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail};
-use qwen35_batch::model::{BatchModel, Sampler as ForkSampler};
+use qwen35_batch::model::Sampler as ForkSampler;
 use qwen35_batch::real::tokenizer::{self, ChatMsg};
 use qwen35_batch::real::Qwen35BatchAdapter;
 use qwen35_batch::scheduler::{BatchScheduler, StepOutcome};
 use qwen35_batch::slot::SlotStatus;
 use tokio::sync::mpsc;
 
-use crate::engine::{model_id_from_filename, quant_from_filename, select_device, trim_messages, FindAny, floor_char_boundary};
+use crate::engine::{
+    floor_char_boundary, model_id_from_filename, quant_from_filename, select_device, trim_messages,
+    FindAny,
+};
 use crate::engine_types::{ChatMessage, Engine, GenParams, ModelInfo, StreamEvent};
 use crate::sampler::{self, Rng};
 
@@ -54,9 +57,7 @@ impl BatchConfig {
         let num = |k: &str, d: usize| get(k).and_then(|v| v.parse().ok()).unwrap_or(d);
         let mut slots = num("QWEN36_SLOTS", 4);
         if slots > MAX_SLOTS {
-            eprintln!(
-                "[batch] QWEN36_SLOTS={slots} > {MAX_SLOTS} (DECODE_BATCH_CAPACITY), clamp"
-            );
+            eprintln!("[batch] QWEN36_SLOTS={slots} > {MAX_SLOTS} (DECODE_BATCH_CAPACITY), clamp");
             slots = MAX_SLOTS;
         }
         Self {
@@ -79,10 +80,6 @@ struct AdmitReq {
     params: GenParams,
     truncated: bool,
     prompt_tokens: usize,
-    /// Ключ prefix cache (hash полного prompt); None — кэш выключен.
-    cache_key: Option<u64>,
-    /// Token IDs prompt'а (для prefix cache: hash collision protection).
-    prompt_vec: Vec<u32>,
     out: mpsc::Sender<StreamEvent>,
 }
 
@@ -97,14 +94,10 @@ struct SlotBinding {
     params: GenParams,
     prompt_tokens: usize,
     completion_tokens: usize,
-    cache_key: Option<u64>,
-    prompt_vec: Vec<u32>,
     /// ретроактивно менять ранние байты (многотокенные UTF-8), поэтому
     /// индекс небезопасен — сравниваем префиксы.
     emitted_text: String,
     stop_hit: bool,
-    /// Принудительное завершение по KV-бюджету → finish_reason "length".
-    forced: bool,
     cancelled: bool,
     last_progress: Instant,
 }
@@ -117,9 +110,9 @@ pub struct CancelGuard {
 
 impl Drop for CancelGuard {
     fn drop(&mut self) {
-        let _ = self
-            .tx
-            .try_send(IngestMsg::Cancel { req_id: self.req_id });
+        let _ = self.tx.try_send(IngestMsg::Cancel {
+            req_id: self.req_id,
+        });
     }
 }
 
@@ -130,14 +123,21 @@ pub struct BatchedEngine {
     max_queue: usize,
     in_flight: Arc<AtomicUsize>,
     tokenizer: Arc<Mutex<tokenizers::Tokenizer>>,
-    prefix_cache: Option<Arc<crate::prefix_cache::SharedPrefixCache>>,
 }
 
 impl BatchedEngine {
     pub async fn load(cfg: BatchConfig) -> anyhow::Result<Arc<Self>> {
         // Форк имеет DECODE_BATCH_CAPACITY=4: больше слотов → panic при seed_slot_batched.
         if cfg.slots > MAX_SLOTS {
-            anyhow::bail!("slots {} exceeds MAX_SLOTS {} (DECODE_BATCH_CAPACITY in fork)", cfg.slots, MAX_SLOTS);
+            anyhow::bail!(
+                "slots {} exceeds MAX_SLOTS {} (DECODE_BATCH_CAPACITY in fork)",
+                cfg.slots,
+                MAX_SLOTS
+            );
+        }
+        // Prefix cache: временно отключён (submit_primed контракт не готов).
+        if cfg.prefix_cache_mib != 0 {
+            anyhow::bail!("prefix cache temporarily disabled (QWEN36_PREFIX_CACHE_MIB>0)");
         }
         let cfg = Arc::new(cfg);
         let (tx_ingest, rx_ingest) = mpsc::channel(cfg.max_queue);
@@ -174,23 +174,15 @@ impl BatchedEngine {
             max_queue: cfg.max_queue,
             in_flight: Arc::new(AtomicUsize::new(0)),
             tokenizer: Arc::new(Mutex::new(tokenizer)),
-            prefix_cache: if cfg.prefix_cache_mib > 0 {
-                Some(Arc::new(crate::prefix_cache::SharedPrefixCache::new(
-                    crate::prefix_cache::PrefixCache::new(cfg.prefix_cache_mib),
-                )))
-            } else {
-                None
-            },
         });
 
         let tokenizer = engine.tokenizer.clone();
         let in_flight = Arc::clone(&engine.in_flight);
         let cfg2 = Arc::clone(&cfg);
-        let prefix_cache = engine.prefix_cache.clone();
         // scheduler/adapter не Send (CUDA context не thread-safe) → свой thread,
         // не tokio::spawn. dispatch_loop синхронная; blocking_recv на idle.
         std::thread::spawn(move || {
-            dispatch_loop(scheduler, rx_ingest, cfg2, in_flight, tokenizer, prefix_cache);
+            dispatch_loop(scheduler, rx_ingest, cfg2, in_flight, tokenizer);
         });
 
         Ok(engine)
@@ -255,20 +247,12 @@ impl Engine for BatchedEngine {
         let (out_tx, out_rx) = mpsc::channel(SLOT_CHAN_CAP);
         let req_id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.in_flight.fetch_add(1, Ordering::Relaxed);
-        let cache_key = if self.prefix_cache.is_some() {
-            Some(crate::prefix_cache::PrefixCache::key_for(&prompt))
-        } else {
-            None
-        };
-        let prompt_vec = prompt.clone();
         let req = AdmitReq {
             req_id,
             prompt,
             params: GenParams { ..params },
             truncated,
             prompt_tokens,
-            cache_key,
-            prompt_vec,
             out: out_tx,
         };
         self.tx_ingest
@@ -300,7 +284,6 @@ fn dispatch_loop(
     cfg: Arc<BatchConfig>,
     in_flight: Arc<AtomicUsize>,
     tokenizer: Arc<Mutex<tokenizers::Tokenizer>>,
-    prefix_cache: Option<Arc<crate::prefix_cache::SharedPrefixCache>>,
 ) {
     let mut bindings: Vec<Option<SlotBinding>> = (0..cfg.slots).map(|_| None).collect();
     let mut pending: VecDeque<AdmitReq> = VecDeque::new();
@@ -323,10 +306,24 @@ fn dispatch_loop(
                         in_flight.fetch_sub(1, Ordering::Relaxed);
                         continue;
                     }
-                    admit(req, &mut sched, &mut bindings, &mut pending, &mut slot_samplers, &mut slot_truncated, &cfg, &prefix_cache);
+                    admit(
+                        req,
+                        &mut sched,
+                        &mut bindings,
+                        &mut pending,
+                        &mut slot_samplers,
+                        &mut slot_truncated,
+                        &cfg,
+                    );
                 }
                 IngestMsg::Cancel { req_id } => {
-                    cancel(req_id, &mut bindings, &mut pending, &mut cancelled, &in_flight);
+                    cancel(
+                        req_id,
+                        &mut bindings,
+                        &mut pending,
+                        &mut cancelled,
+                        &in_flight,
+                    );
                 }
             }
         }
@@ -346,7 +343,15 @@ fn dispatch_loop(
                 })
                 .unwrap_or(false);
             if timed_out {
-                free_slot(idx, &mut bindings, &mut sched, &in_flight, &mut slot_samplers, &mut slot_emitted_toks, &mut slot_truncated);
+                free_slot(
+                    idx,
+                    &mut bindings,
+                    &mut sched,
+                    &in_flight,
+                    &mut slot_samplers,
+                    &mut slot_emitted_toks,
+                    &mut slot_truncated,
+                );
             }
         }
 
@@ -368,25 +373,36 @@ fn dispatch_loop(
                 .unwrap_or(false)
         });
         let did_work = match outcome {
-            Ok(StepOutcome::DidPrefill { first_token_emitted }) => {
+            Ok(StepOutcome::DidPrefill {
+                first_token_emitted,
+            }) => {
                 if first_token_emitted {
                     let tok_guard = tokenizer.lock().unwrap_or_else(|e| e.into_inner());
-                    drain_after_step(&mut sched, &mut bindings, &mut slot_emitted_toks, &tok_guard);
+                    drain_after_step(
+                        &mut sched,
+                        &mut bindings,
+                        &mut slot_emitted_toks,
+                        &tok_guard,
+                    );
                     drop(tok_guard);
-                    on_prefill_complete(&mut sched, &bindings, &prefix_cache);
                 }
                 true
             }
             Ok(StepOutcome::DidDecode(_)) => {
                 let tok_guard = tokenizer.lock().unwrap_or_else(|e| e.into_inner());
-                drain_after_step(&mut sched, &mut bindings, &mut slot_emitted_toks, &tok_guard);
+                drain_after_step(
+                    &mut sched,
+                    &mut bindings,
+                    &mut slot_emitted_toks,
+                    &tok_guard,
+                );
                 true
             }
             Ok(StepOutcome::Idle) => false,
             Err(e) => {
                 eprintln!("[batch] scheduler step error: {e:#}");
-                for idx in 0..bindings.len() {
-                    if let Some(b) = bindings[idx].as_mut() {
+                for binding in &mut bindings {
+                    if let Some(b) = binding.as_mut() {
                         let _ = b.out.try_send(StreamEvent::Error(format!("{e:#}")));
                         b.cancelled = true;
                     }
@@ -412,26 +428,35 @@ fn dispatch_loop(
             eprintln!("[dl] finishing slots {finished_idxs:?}");
         }
         for idx in finished_idxs {
-            finish_slot(idx, &mut bindings, &mut sched, &in_flight, &mut slot_samplers, &mut slot_emitted_toks, &mut slot_truncated, &tokenizer);
+            finish_slot(
+                idx,
+                &mut bindings,
+                &mut sched,
+                &in_flight,
+                &mut slot_samplers,
+                &mut slot_emitted_toks,
+                &mut slot_truncated,
+                &tokenizer,
+            );
             if trace {
                 eprintln!("[dl] finished slot {idx}");
             }
-            admit_from_pending(&mut pending, &mut sched, &mut bindings, &mut slot_samplers, &mut slot_truncated, &cfg, &prefix_cache);
+            admit_from_pending(
+                &mut pending,
+                &mut sched,
+                &mut bindings,
+                &mut slot_samplers,
+                &mut slot_truncated,
+                &cfg,
+            );
         }
 
         // Heartbeat: статусы слотов каждые 5s при активности.
-        if last_hb.elapsed() > Duration::from_secs(5)
-            && bindings.iter().any(|b| b.is_some())
-        {
+        if last_hb.elapsed() > Duration::from_secs(5) && bindings.iter().any(|b| b.is_some()) {
             let st: Vec<String> = (0..cfg.slots)
                 .map(|i| {
                     let s = &sched.slots_mut()[i];
-                    format!(
-                        "{}:{:?}:gen={}",
-                        i,
-                        s.status,
-                        s.generated_tokens().len()
-                    )
+                    format!("{}:{:?}:gen={}", i, s.status, s.generated_tokens().len())
                 })
                 .collect();
             eprintln!("[hb] pending={} slots={}", pending.len(), st.join(" "));
@@ -446,11 +471,25 @@ fn dispatch_loop(
                         if cancelled.remove(&req.req_id) {
                             in_flight.fetch_sub(1, Ordering::Relaxed);
                         } else {
-                            admit(req, &mut sched, &mut bindings, &mut pending, &mut slot_samplers, &mut slot_truncated, &cfg, &prefix_cache);
+                            admit(
+                                req,
+                                &mut sched,
+                                &mut bindings,
+                                &mut pending,
+                                &mut slot_samplers,
+                                &mut slot_truncated,
+                                &cfg,
+                            );
                         }
                     }
                     IngestMsg::Cancel { req_id } => {
-                        cancel(req_id, &mut bindings, &mut pending, &mut cancelled, &in_flight);
+                        cancel(
+                            req_id,
+                            &mut bindings,
+                            &mut pending,
+                            &mut cancelled,
+                            &in_flight,
+                        );
                     }
                 },
                 None => break,
@@ -477,7 +516,9 @@ fn drain_after_step(
         if generated.len() <= emitted {
             continue;
         }
-        let Some(b) = bindings[idx].as_mut() else { continue };
+        let Some(b) = bindings[idx].as_mut() else {
+            continue;
+        };
         b.completion_tokens = generated.len();
         b.last_progress = Instant::now();
 
@@ -560,35 +601,6 @@ fn kv_fits(
     used + est <= cfg.kv_budget_mib
 }
 
-    /// Cache fill: prefill завершён — забираем snapshot в prefix cache.
-    // (вызывается при DidPrefill{first_token_emitted})
-    fn on_prefill_complete(
-        sched: &mut BatchScheduler<Qwen35BatchAdapter>,
-        bindings: &[Option<SlotBinding>],
-        cache: &Option<std::sync::Arc<crate::prefix_cache::SharedPrefixCache>>,
-    ) {
-        let Some(cache) = cache else { return };
-        for (idx, b) in bindings.iter().enumerate() {
-            let Some(b) = b else { continue };
-            let Some(key) = b.cache_key else { continue };
-            // Только слоты, завершившие prefill (Decoding), а не те, что
-            // ещё в Prefilling. Проверка через scheduler slot status.
-            use qwen35_batch::slot::SlotStatus;
-            if sched.slots_mut()[idx].status != SlotStatus::Decoding {
-                continue;
-            }
-            if let Some(snap) = sched.model_mut().slot_snapshot(idx) {
-                // Position snapshot'а должна совпадать с prompt_tokens —
-                // только полный prompt попадает в кэш.
-                if snap.position == b.prompt_tokens {
-                    if let Ok(mut c) = cache.lock() {
-                        c.put(key, snap, b.prompt_vec.clone());
-                    }
-                }
-            }
-        }
-    }
-
 fn admit(
     req: AdmitReq,
     sched: &mut BatchScheduler<Qwen35BatchAdapter>,
@@ -597,11 +609,10 @@ fn admit(
     slot_samplers: &mut HashMap<usize, (GenParams, Rng)>,
     slot_truncated: &mut HashMap<usize, bool>,
     cfg: &BatchConfig,
-    prefix_cache: &Option<std::sync::Arc<crate::prefix_cache::SharedPrefixCache>>,
 ) {
     match bindings.iter().position(|b| b.is_none()) {
         Some(idx) if kv_fits(sched, bindings, cfg, req.prompt_tokens) => {
-            seed_slot(idx, req, sched, bindings, slot_samplers, slot_truncated, prefix_cache)
+            seed_slot(idx, req, sched, bindings, slot_samplers, slot_truncated)
         }
         _ => pending.push_back(req),
     }
@@ -614,7 +625,6 @@ fn admit_from_pending(
     slot_samplers: &mut HashMap<usize, (GenParams, Rng)>,
     slot_truncated: &mut HashMap<usize, bool>,
     cfg: &BatchConfig,
-    prefix_cache: &Option<std::sync::Arc<crate::prefix_cache::SharedPrefixCache>>,
 ) {
     while let Some(idx) = bindings.iter().position(|b| b.is_none()) {
         let fits = pending
@@ -625,7 +635,7 @@ fn admit_from_pending(
             break;
         }
         let req = pending.pop_front().unwrap();
-        seed_slot(idx, req, sched, bindings, slot_samplers, slot_truncated, prefix_cache);
+        seed_slot(idx, req, sched, bindings, slot_samplers, slot_truncated);
     }
 }
 
@@ -637,24 +647,7 @@ fn seed_slot(
     bindings: &mut [Option<SlotBinding>],
     slot_samplers: &mut HashMap<usize, (GenParams, Rng)>,
     slot_truncated: &mut HashMap<usize, bool>,
-    prefix_cache: &Option<std::sync::Arc<crate::prefix_cache::SharedPrefixCache>>,
 ) {
-    // Prefix cache: hit → snapshot в слот + primed admit.
-    // Snapshot хранит state ПОСЛЕ полного prompt (position = prompt_tokens).
-    // submit_primed с prefix_len = prompt_tokens означает что scheduler
-    // НЕ прогоняет prefill вообще — state уже полный, сразу decode.
-    let primed = if let (Some(cache), Some(key)) = (prefix_cache, req.cache_key) {
-        let hit = cache.lock().ok().and_then(|mut c| c.get(key, &req.prompt));
-        match hit {
-            Some(snap) => {
-                sched.model_mut().inject_slot_snapshot(idx, snap);
-                Some(req.prompt_tokens)  // полный prompt уже в state
-            }
-            None => None,
-        }
-    } else {
-        None
-    };
     let prompt_tokens = req.prompt_tokens;
     let max_new = req.params.max_tokens;
     let seed = req.params.seed.unwrap_or_else(|| {
@@ -664,17 +657,7 @@ fn seed_slot(
             .unwrap_or(42)
     });
     let params = req.params.clone();
-    match primed {
-        Some(prefix_len) => {
-            if qwen35_batch::scheduler::trace_on() {
-                eprintln!("[cache] HIT slot={idx} prefix={prefix_len} tok");
-            }
-            sched.submit_primed(req.prompt, max_new, prefix_len);
-        }
-        None => {
-            sched.submit(req.prompt, max_new);
-        }
-    }
+    sched.submit(req.prompt, max_new);
     slot_samplers.insert(idx, (params.clone(), Rng::new(seed)));
     slot_truncated.insert(idx, req.truncated);
     bindings[idx] = Some(SlotBinding {
@@ -683,11 +666,8 @@ fn seed_slot(
         params,
         prompt_tokens,
         completion_tokens: 0,
-        cache_key: req.cache_key,
-        prompt_vec: req.prompt_vec,
         emitted_text: String::new(),
         stop_hit: false,
-        forced: false,
         cancelled: false,
         last_progress: Instant::now(),
     });
@@ -716,6 +696,7 @@ fn cancel(
 }
 
 /// FINISHED: Done с usage → reset (TODO-F4/F6).
+#[allow(clippy::too_many_arguments)]
 fn finish_slot(
     idx: usize,
     bindings: &mut [Option<SlotBinding>],
@@ -726,7 +707,9 @@ fn finish_slot(
     slot_truncated: &mut HashMap<usize, bool>,
     tokenizer: &Arc<Mutex<tokenizers::Tokenizer>>,
 ) {
-    let Some(b) = bindings[idx].take() else { return };
+    let Some(b) = bindings[idx].take() else {
+        return;
+    };
     // Flush holdback-хвоста (U+FFFD) перед Done: полный decode generated.
     if !b.cancelled {
         let generated = sched.slots_mut()[idx].generated_tokens().to_vec();
@@ -838,10 +821,50 @@ mod tests {
         std::env::remove_var("QWEN36_SLOTS");
     }
 
+    fn test_config(slots: usize, prefix_cache_mib: usize) -> BatchConfig {
+        BatchConfig {
+            model_path: "missing.gguf".into(),
+            slots,
+            max_queue: 1,
+            req_timeout: Duration::from_secs(1),
+            context_length: 32,
+            kv_budget_mib: 0.0,
+            kv_per_tok_mib: 0.0,
+            prefix_cache_mib,
+        }
+    }
+
+    #[tokio::test]
+    async fn load_rejects_slots_above_fork_capacity_before_model_load() {
+        let err = match BatchedEngine::load(test_config(MAX_SLOTS + 1, 0)).await {
+            Ok(_) => panic!("slots above capacity must be rejected"),
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains("exceeds MAX_SLOTS"));
+    }
+
+    #[tokio::test]
+    async fn load_rejects_prefix_cache_before_model_load() {
+        let err = match BatchedEngine::load(test_config(1, 1)).await {
+            Ok(_) => panic!("prefix cache must be rejected"),
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains("prefix cache temporarily disabled"));
+    }
+
     #[test]
     fn indexed_sampler_uses_per_slot_params() {
         let mut params = HashMap::new();
-        params.insert(0, (GenParams { top_k: 1, ..Default::default() }, Rng::new(1)));
+        params.insert(
+            0,
+            (
+                GenParams {
+                    top_k: 1,
+                    ..Default::default()
+                },
+                Rng::new(1),
+            ),
+        );
         let mut s = IndexedSampler { params };
         let logits = vec![0.1, 0.9, 0.2, 5.0];
         for _ in 0..4 {
@@ -851,7 +874,9 @@ mod tests {
 
     #[test]
     fn indexed_sampler_fallback_greedy_when_no_params() {
-        let mut s = IndexedSampler { params: HashMap::new() };
+        let mut s = IndexedSampler {
+            params: HashMap::new(),
+        };
         let logits = vec![0.1, 0.9, 0.2, 5.0];
         assert_eq!(s.sample_indexed(99, &[], &logits), 3);
     }

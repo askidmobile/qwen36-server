@@ -89,7 +89,11 @@ async fn body_string(resp: axum::response::Response) -> String {
 #[tokio::test]
 async fn unauthorized_without_key() {
     let resp = app(vec![])
-        .oneshot(json_req("POST", "/v1/chat/completions", serde_json::json!({"messages": []})))
+        .oneshot(json_req(
+            "POST",
+            "/v1/chat/completions",
+            serde_json::json!({"messages": []}),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -181,7 +185,10 @@ async fn chat_completions_tool_calls() {
     assert_eq!(resp.status(), StatusCode::OK);
     let v: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
     assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
-    assert_eq!(v["choices"][0]["message"]["tool_calls"][0]["function"]["name"], "get_weather");
+    assert_eq!(
+        v["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+        "get_weather"
+    );
     assert_eq!(v["choices"][0]["message"]["content"], "let me check");
 }
 
@@ -267,10 +274,41 @@ async fn anthropic_stream() {
         "message_delta",
         "message_stop",
     ] {
-        assert!(body.contains(&format!("event: {ev}")), "missing {ev} in: {body}");
+        assert!(
+            body.contains(&format!("event: {ev}")),
+            "missing {ev} in: {body}"
+        );
     }
     assert!(body.contains("text_delta"));
     assert!(body.contains("\"stop_reason\":\"end_turn\""));
+}
+
+#[tokio::test]
+async fn switch_model_rejects_too_many_slots_before_unloading_current_engine() {
+    let app = app(vec![]);
+    let resp = app
+        .clone()
+        .oneshot(authed(json_req(
+            "POST",
+            "/v1/switch_model",
+            serde_json::json!({"path": "Cargo.toml", "slots": 5}),
+        )))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let resp = app
+        .oneshot(authed(
+            Request::builder()
+                .uri("/v1/models")
+                .body(Body::empty())
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
+    assert_eq!(v["data"][0]["id"], "qwen3.6-27b");
 }
 
 #[tokio::test]

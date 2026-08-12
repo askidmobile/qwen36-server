@@ -44,6 +44,7 @@ impl Rng {
 
 /// Сэмплировать токен из логитов. `generated` — уже сгенерированные токены
 /// запроса (для penalties). Возвращает token id.
+#[allow(clippy::too_many_arguments)]
 pub fn sample(
     logits: &[f32],
     temperature: f32,
@@ -239,9 +240,7 @@ mod tests {
         // top-k кандидатов, что полная сортировка (до ties).
         let mut rng = Rng::new(99);
         for _ in 0..50 {
-            let logits: Vec<f32> = (0..10_000)
-                .map(|_| rng.next_f32() * 20.0 - 10.0)
-                .collect();
+            let logits: Vec<f32> = (0..10_000).map(|_| rng.next_f32() * 20.0 - 10.0).collect();
             let mut r1 = Rng::new(7);
             let t = sample(&logits, 0.0, 20, 1.0, 0.0, 0.0, 1.0, &[], &mut r1);
             let want = logits
