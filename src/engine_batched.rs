@@ -361,7 +361,7 @@ fn dispatch_loop(
         });
         sched.set_sampler(sampler_box);
 
-        let trace = std::env::var_os("QWEN36_TRACE").is_some();
+        let trace = qwen35_batch::scheduler::trace_on();
         // GPU-шаг БЕЗ мьютекса токенизатора (аудит 2026-08-10): иначе входящие
         // HTTP-запросы блокируются на lock() в generate() на весь шаг.
         // Токенизатор нужен только drain'у после шага.
