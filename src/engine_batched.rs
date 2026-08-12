@@ -27,7 +27,7 @@ use crate::engine_types::{ChatMessage, Engine, GenParams, ModelInfo, StreamEvent
 use crate::sampler::{self, Rng};
 
 /// Макс. слотов = DECODE_BATCH_CAPACITY форка.
-pub const MAX_SLOTS: usize = 8;
+pub const MAX_SLOTS: usize = 4;
 /// Capacity per-slot канала StreamEvent.
 const SLOT_CHAN_CAP: usize = 64;
 /// Запас токенов под погрешность per-message оценки sliding window.
@@ -68,7 +68,7 @@ impl BatchConfig {
             context_length: num("QWEN36_CTX", 81920),
             kv_budget_mib: 0.0,
             kv_per_tok_mib: 0.0,
-            prefix_cache_mib: num("QWEN36_PREFIX_CACHE_MIB", 2048),
+            prefix_cache_mib: num("QWEN36_PREFIX_CACHE_MIB", 0),
         }
     }
 }
@@ -81,6 +81,8 @@ struct AdmitReq {
     prompt_tokens: usize,
     /// Ключ prefix cache (hash полного prompt); None — кэш выключен.
     cache_key: Option<u64>,
+    /// Token IDs prompt'а (для prefix cache: hash collision protection).
+    prompt_vec: Vec<u32>,
     out: mpsc::Sender<StreamEvent>,
 }
 
@@ -96,7 +98,7 @@ struct SlotBinding {
     prompt_tokens: usize,
     completion_tokens: usize,
     cache_key: Option<u64>,
-    /// Уже эмитнутый префикс (строка, не индекс): decode_text может
+    prompt_vec: Vec<u32>,
     /// ретроактивно менять ранние байты (многотокенные UTF-8), поэтому
     /// индекс небезопасен — сравниваем префиксы.
     emitted_text: String,
@@ -133,6 +135,10 @@ pub struct BatchedEngine {
 
 impl BatchedEngine {
     pub async fn load(cfg: BatchConfig) -> anyhow::Result<Arc<Self>> {
+        // Форк имеет DECODE_BATCH_CAPACITY=4: больше слотов → panic при seed_slot_batched.
+        if cfg.slots > MAX_SLOTS {
+            anyhow::bail!("slots {} exceeds MAX_SLOTS {} (DECODE_BATCH_CAPACITY in fork)", cfg.slots, MAX_SLOTS);
+        }
         let cfg = Arc::new(cfg);
         let (tx_ingest, rx_ingest) = mpsc::channel(cfg.max_queue);
 
@@ -254,6 +260,7 @@ impl Engine for BatchedEngine {
         } else {
             None
         };
+        let prompt_vec = prompt.clone();
         let req = AdmitReq {
             req_id,
             prompt,
@@ -261,6 +268,7 @@ impl Engine for BatchedEngine {
             truncated,
             prompt_tokens,
             cache_key,
+            prompt_vec,
             out: out_tx,
         };
         self.tx_ingest
@@ -563,9 +571,19 @@ fn kv_fits(
         for (idx, b) in bindings.iter().enumerate() {
             let Some(b) = b else { continue };
             let Some(key) = b.cache_key else { continue };
+            // Только слоты, завершившие prefill (Decoding), а не те, что
+            // ещё в Prefilling. Проверка через scheduler slot status.
+            use qwen35_batch::slot::SlotStatus;
+            if sched.slots_mut()[idx].status != SlotStatus::Decoding {
+                continue;
+            }
             if let Some(snap) = sched.model_mut().slot_snapshot(idx) {
-                if let Ok(mut c) = cache.lock() {
-                    c.put(key, snap);
+                // Position snapshot'а должна совпадать с prompt_tokens —
+                // только полный prompt попадает в кэш.
+                if snap.position == b.prompt_tokens {
+                    if let Ok(mut c) = cache.lock() {
+                        c.put(key, snap, b.prompt_vec.clone());
+                    }
                 }
             }
         }
@@ -621,13 +639,16 @@ fn seed_slot(
     slot_truncated: &mut HashMap<usize, bool>,
     prefix_cache: &Option<std::sync::Arc<crate::prefix_cache::SharedPrefixCache>>,
 ) {
-    // Prefix cache: hit → snapshot в слот + primed admit (prefill 1 токена).
+    // Prefix cache: hit → snapshot в слот + primed admit.
+    // Snapshot хранит state ПОСЛЕ полного prompt (position = prompt_tokens).
+    // submit_primed с prefix_len = prompt_tokens означает что scheduler
+    // НЕ прогоняет prefill вообще — state уже полный, сразу decode.
     let primed = if let (Some(cache), Some(key)) = (prefix_cache, req.cache_key) {
-        let hit = cache.lock().ok().and_then(|mut c| c.get(key));
+        let hit = cache.lock().ok().and_then(|mut c| c.get(key, &req.prompt));
         match hit {
             Some(snap) => {
                 sched.model_mut().inject_slot_snapshot(idx, snap);
-                Some(req.prompt_tokens - 1)
+                Some(req.prompt_tokens)  // полный prompt уже в state
             }
             None => None,
         }
@@ -663,6 +684,7 @@ fn seed_slot(
         prompt_tokens,
         completion_tokens: 0,
         cache_key: req.cache_key,
+        prompt_vec: req.prompt_vec,
         emitted_text: String::new(),
         stop_hit: false,
         forced: false,

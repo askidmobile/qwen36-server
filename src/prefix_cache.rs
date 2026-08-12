@@ -13,6 +13,8 @@ use qwen35_batch::real::model_weights::StateSnapshot;
 struct Entry {
     snap: StateSnapshot,
     size_mib: usize,
+    // Token IDs для защиты от hash collision: get сверяет полный prompt.
+    tokens: Vec<u32>,
 }
 
 pub struct PrefixCache {
@@ -40,8 +42,9 @@ impl PrefixCache {
         h.finish()
     }
 
-    pub fn get(&mut self, key: u64) -> Option<StateSnapshot> {
-        if self.map.contains_key(&key) {
+    pub fn get(&mut self, key: u64, tokens: &[u32]) -> Option<StateSnapshot> {
+        let match_entry = self.map.get(&key).map(|e| e.tokens == tokens);
+        if match_entry == Some(true) {
             self.touch(key);
             self.map.get(&key).map(|e| e.snap.clone())
         } else {
@@ -49,7 +52,7 @@ impl PrefixCache {
         }
     }
 
-    pub fn put(&mut self, key: u64, snap: StateSnapshot) {
+    pub fn put(&mut self, key: u64, snap: StateSnapshot, tokens: Vec<u32>) {
         let size_mib = (snap.size_bytes() / 1024 / 1024).max(1);
         if size_mib > self.budget_mib {
             return; // snapshot больше всего бюджета — не кэшируем
@@ -67,7 +70,7 @@ impl PrefixCache {
         }
         self.total_mib += size_mib;
         self.lru.push_back(key);
-        self.map.insert(key, Entry { snap, size_mib });
+        self.map.insert(key, Entry { snap, size_mib, tokens });
     }
 
     fn touch(&mut self, key: u64) {
@@ -105,18 +108,18 @@ mod tests {
     #[test]
     fn lru_eviction_by_budget() {
         let mut c = PrefixCache::new(3);
-        c.put(1, fake_snap(1));
-        c.put(2, fake_snap(1));
-        c.put(3, fake_snap(1));
+        c.put(1, fake_snap(1), vec![1]);
+        c.put(2, fake_snap(1), vec![2]);
+        c.put(3, fake_snap(1), vec![3]);
         assert_eq!(c.len(), 3);
         // 4-й не влезает → вытесняет самый старый (key 1).
-        c.put(4, fake_snap(1));
-        assert!(c.get(1).is_none());
-        assert!(c.get(2).is_some());
-        assert!(c.get(4).is_some());
+        c.put(4, fake_snap(1), vec![4]);
+        assert!(c.get(1, &[1]).is_none());
+        assert!(c.get(2, &[2]).is_some());
+        assert!(c.get(4, &[4]).is_some());
         // get(2) поднял его в LRU → следующим вытесняется key 3.
-        c.put(5, fake_snap(1));
-        assert!(c.get(3).is_none());
-        assert!(c.get(2).is_some());
+        c.put(5, fake_snap(1), vec![5]);
+        assert!(c.get(3, &[3]).is_none());
+        assert!(c.get(2, &[2]).is_some());
     }
 }
