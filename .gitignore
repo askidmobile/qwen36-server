@@ -2,4 +2,7 @@
 Cargo.lock
 *.gguf
 models/
+.env
+.env.*
+!.env.example
 .DS_Store

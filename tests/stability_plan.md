@@ -7,7 +7,7 @@
 ## Пререквизиты
 
 - yttri-win (192.168.2.89): собранный `qwen36-server` (cargo build --release,
-  BD-018), модель UD-Q2_K_XL на D:, env `QWEN36_MODEL`, `QWEN36_API_KEY`,
+  BD-018), модель UD-Q2_K_XL на D:, env `QWEN36_MODEL`, `QWEN36_API_KEYS`,
   `QWEN36_SLOTS=4`, `QWEN36_CTX=81920`.
 - Локальная машина: curl, ssh-доступ на yttri-win (для nvidia-smi / проверки
   процесса) — скрипт параметризован (`SSH_HOST` опционален; без него VRAM-

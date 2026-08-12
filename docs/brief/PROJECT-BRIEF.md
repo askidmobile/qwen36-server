@@ -20,7 +20,7 @@ llama.cpp осознанно НЕ используется как компоне
 
 - **Владелец (Askid)** — единственный разработчик и основной пользователь: агентное кодирование, тесты инференс-стека.
 - **Клиенты-агенты** (Codex/OpenCode/курсоры) — через OpenAI/Anthropic-совместимые API в LAN.
-- Доступ: один мастер-ключ (BD-005), LAN-only, HTTP (BD-006).
+- Доступ: именованные API-ключи без ролей (BD-021 overrides BD-005), LAN-only, HTTP (BD-006).
 
 ## 4. Решение (видение v1)
 
@@ -48,7 +48,7 @@ flowchart LR
 | `GET /v1/models` | OpenAI + ext | id/object/created/owned_by + контекст, квант, слоты, режимы (BD-015) |
 | `GET /` (static) | — | веб-чат |
 
-Аутентификация: `Authorization: Bearer <master-key>` (BD-005). Vision-запросы → 400 (BD-004).
+Аутентификация: `Authorization: Bearer <key>`, ключ берётся из `QWEN36_API_KEYS` (BD-021). Vision-запросы → 400 (BD-004).
 
 ## 6. Веб-чат (v1)
 
@@ -69,7 +69,7 @@ flowchart LR
 - Замеры скорости/VRAM (вехи, не критерии — BD-008)
 
 **Out (v1):**
-- Vision (OQ-2), MTP speculative (OQ-3), полный Responses API (OQ-6), IQ2-ядра (OQ-1), TLS/мультиключи/лимиты per-key
+- Vision (OQ-2), MTP speculative (OQ-3), полный Responses API (OQ-6), IQ2-ядра (OQ-1), TLS/роли/лимиты per-key
 
 ## 8. Данные и приватность
 

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use qwen36_server::api::{build_router, AppState};
+use qwen36_server::config::ApiKey;
 use qwen36_server::engine_types::{ChatMessage, Engine, GenParams, ModelInfo, StreamEvent};
 use tower::ServiceExt;
 
@@ -59,7 +60,17 @@ fn app(deltas: Vec<&str>) -> axum::Router {
     build_router(AppState {
         engine: switcher.clone(),
         switcher,
-        api_key: "test-key".into(),
+        api_keys: vec![
+            ApiKey {
+                key: "test-key".into(),
+                name: "primary".into(),
+            },
+            ApiKey {
+                key: "second-key".into(),
+                name: "secondary".into(),
+            },
+        ]
+        .into(),
         models_dir: std::path::PathBuf::from("."),
         cuda_device: None,
     })
@@ -123,6 +134,25 @@ async fn zero_output_tokens_are_bad_requests() {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{uri}");
     }
+}
+
+#[tokio::test]
+async fn every_configured_api_key_is_accepted() {
+    let req = Request::builder()
+        .uri("/v1/models")
+        .header("authorization", "Bearer second-key")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app(vec![]).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let req = Request::builder()
+        .uri("/v1/models")
+        .header("authorization", "Bearer second-key-wrong")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app(vec![]).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

@@ -9,7 +9,7 @@
 | Путь к GGUF | `QWEN36_MODEL` | `models/qwen36-27b-q2_k_xl.gguf` |
 | Host | `QWEN36_HOST` | `0.0.0.0` |
 | Port | `QWEN36_PORT` | `8080` |
-| Master API key | `QWEN36_API_KEY` | обязателен; без него сервер не стартует |
+| Именованные API-ключи | `QWEN36_API_KEYS` | обязательный JSON-массив `[{"key":"...","name":"..."}]` |
 | Контекст | `QWEN36_CTX` | `81920` |
 | Слоты | `QWEN36_SLOTS` | `4` |
 
@@ -62,7 +62,7 @@ Engine реализуется поверх `qwen35-batch` (`ModelWeights::from_g
 - `POST /v1/messages` — Anthropic: тело `{model, max_tokens (обязателен), messages, system?, tools?, tool_choice?, stream}`; заголовок `anthropic-version: 2023-06-01`; SSE: `message_start`, `content_block_start/delta/stop` (text | tool_use), `message_delta` (stop_reason + usage), `message_stop`.
 - `GET /v1/models` — `{object:"list", data:[{id, object:"model", created, owned_by:"local", context_length, quant, slots, modes}]}`.
 - `GET /` — статика веб-чата.
-- Auth: `Authorization: Bearer $QWEN36_API_KEY` на всех `/v1/*`; без/неверный → 401 `{error:{type:"authentication_error"}}`.
+- Auth: `Authorization: Bearer <key>` на всех `/v1/*`; `<key>` должен совпасть с полем `key` одного объекта `QWEN36_API_KEYS`; без/неверный → 401 `{error:{type:"authentication_error"}}`. `name` — уникальная метка, права ключей одинаковы.
 - Image/video content в messages → 400 `{error:{type:"invalid_request_error", message:"vision not supported"}}` (BD-004).
 
 ## Tools

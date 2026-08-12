@@ -1,9 +1,26 @@
 //! Конфиг из env `QWEN36_*` (docs/engine-api.md §Config).
 
-use anyhow::{anyhow, Result};
-use std::path::PathBuf;
+use anyhow::{anyhow, Context, Result};
+use serde::Deserialize;
+use std::path::{Path, PathBuf};
 
 use crate::vram_plan;
+
+#[derive(Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ApiKey {
+    pub key: String,
+    pub name: String,
+}
+
+impl std::fmt::Debug for ApiKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiKey")
+            .field("key", &"[REDACTED]")
+            .field("name", &self.name)
+            .finish()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -13,8 +30,8 @@ pub struct Config {
     pub host: String,
     /// Port (`QWEN36_PORT`, default 8080).
     pub port: u16,
-    /// Master API key (`QWEN36_API_KEY`, обязателен).
-    pub api_key: String,
+    /// Именованные API-ключи (`QWEN36_API_KEYS`, JSON-массив; обязателен).
+    pub api_keys: Vec<ApiKey>,
     /// Контекст (`QWEN36_CTX`, default 81920).
     pub ctx: usize,
     /// Слоты (`QWEN36_SLOTS`, default 4).
@@ -28,11 +45,19 @@ pub struct Config {
 }
 
 impl Config {
+    /// Загрузить `.env`, затем разобрать конфигурацию. Уже заданные process env
+    /// имеют приоритет. Путь: `QWEN36_ENV_FILE`, иначе `.env` в cwd.
+    pub fn load() -> Result<Self> {
+        let path = std::env::var("QWEN36_ENV_FILE").unwrap_or_else(|_| ".env".into());
+        load_env_file(Path::new(&path))?;
+        Self::from_env()
+    }
+
     pub fn from_env() -> Result<Self> {
-        let api_key = std::env::var("QWEN36_API_KEY")
-            .ok()
-            .filter(|k| !k.is_empty())
-            .ok_or_else(|| anyhow!("QWEN36_API_KEY обязателен (без него сервер не стартует)"))?;
+        let api_keys =
+            parse_api_keys(&std::env::var("QWEN36_API_KEYS").map_err(|_| {
+                anyhow!("QWEN36_API_KEYS обязателен: JSON-массив объектов key/name")
+            })?)?;
         let prefix_cache_mib = parse_env("QWEN36_PREFIX_CACHE_MIB", 0usize)?;
         if prefix_cache_mib != 0 {
             anyhow::bail!("prefix cache temporarily disabled (QWEN36_PREFIX_CACHE_MIB must be 0)");
@@ -43,7 +68,7 @@ impl Config {
                 .unwrap_or_else(|_| PathBuf::from("models/qwen36-27b-q2_k_xl.gguf")),
             host: std::env::var("QWEN36_HOST").unwrap_or_else(|_| "0.0.0.0".into()),
             port: parse_env("QWEN36_PORT", 8080u16)?,
-            api_key,
+            api_keys,
             ctx: parse_env("QWEN36_CTX", 81920usize)?,
             slots: parse_env("QWEN36_SLOTS", 4usize)?,
             kv_budget_mib: 0.0,
@@ -76,6 +101,78 @@ impl Config {
     }
 }
 
+fn parse_api_keys(raw: &str) -> Result<Vec<ApiKey>> {
+    let keys: Vec<ApiKey> = serde_json::from_str(raw)
+        .context("QWEN36_API_KEYS: ожидается JSON-массив объектов key/name")?;
+    if keys.is_empty() {
+        anyhow::bail!("QWEN36_API_KEYS: нужен хотя бы один ключ");
+    }
+    let mut names = std::collections::HashSet::new();
+    let mut values = std::collections::HashSet::new();
+    for entry in &keys {
+        if entry.name.trim().is_empty() || entry.key.trim().is_empty() {
+            anyhow::bail!("QWEN36_API_KEYS: key и name не могут быть пустыми");
+        }
+        if entry.name.trim() != entry.name || entry.key.trim() != entry.key {
+            anyhow::bail!(
+                "QWEN36_API_KEYS: key и name не должны начинаться/заканчиваться пробелами"
+            );
+        }
+        if !names.insert(entry.name.as_str()) {
+            anyhow::bail!("QWEN36_API_KEYS: повтор name {:?}", entry.name);
+        }
+        if !values.insert(entry.key.as_str()) {
+            anyhow::bail!("QWEN36_API_KEYS: ключ {:?} указан повторно", entry.name);
+        }
+    }
+    Ok(keys)
+}
+
+fn load_env_file(path: &Path) -> Result<()> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("read env file {}", path.display())),
+    };
+    for (idx, raw_line) in text.lines().enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let (name, raw_value) = line
+            .split_once('=')
+            .ok_or_else(|| anyhow!("{}:{}: ожидается NAME=value", path.display(), idx + 1))?;
+        let name = name.trim();
+        if !valid_env_name(name) {
+            anyhow::bail!(
+                "{}:{}: некорректное имя переменной {name:?}",
+                path.display(),
+                idx + 1
+            );
+        }
+        if std::env::var_os(name).is_none() {
+            let value = raw_value.trim();
+            let value = if value.len() >= 2
+                && ((value.starts_with('"') && value.ends_with('"'))
+                    || (value.starts_with('\'') && value.ends_with('\'')))
+            {
+                &value[1..value.len() - 1]
+            } else {
+                value
+            };
+            std::env::set_var(name, value);
+        }
+    }
+    Ok(())
+}
+
+fn valid_env_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    matches!(bytes.next(), Some(b'A'..=b'Z' | b'a'..=b'z' | b'_'))
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
 fn parse_env<T: std::str::FromStr>(name: &str, default: T) -> Result<T>
 where
     T::Err: std::fmt::Display,
@@ -95,18 +192,22 @@ mod tests {
 
     // Тесты гоняют env процесса — сериализуем вручную через один тест.
     #[test]
-    fn from_env_defaults_and_required_key() {
-        env::remove_var("QWEN36_API_KEY");
-        assert!(Config::from_env().is_err(), "без API key старт запрещён");
+    fn from_env_defaults_and_required_keys() {
+        env::remove_var("QWEN36_API_KEYS");
+        assert!(Config::from_env().is_err(), "без API keys старт запрещён");
 
-        env::set_var("QWEN36_API_KEY", "k");
+        env::set_var(
+            "QWEN36_API_KEYS",
+            r#"[{"key":"k1","name":"primary"},{"key":"k2","name":"backup"}]"#,
+        );
         env::remove_var("QWEN36_MODEL");
         env::remove_var("QWEN36_HOST");
         env::remove_var("QWEN36_PORT");
         env::remove_var("QWEN36_CTX");
         env::remove_var("QWEN36_SLOTS");
         let c = Config::from_env().unwrap();
-        assert_eq!(c.api_key, "k");
+        assert_eq!(c.api_keys.len(), 2);
+        assert_eq!(c.api_keys[0].name, "primary");
         assert_eq!(c.model, PathBuf::from("models/qwen36-27b-q2_k_xl.gguf"));
         assert_eq!(c.host, "0.0.0.0");
         assert_eq!(c.port, 8080);
@@ -119,6 +220,17 @@ mod tests {
         assert_eq!(c.port, 9000);
         assert_eq!(c.ctx, 4096);
 
+        for invalid in [
+            "[]",
+            r#"[{"key":"","name":"empty"}]"#,
+            r#"[{"key":"same","name":"a"},{"key":"same","name":"b"}]"#,
+            r#"[{"key":"a","name":"same"},{"key":"b","name":"same"}]"#,
+            r#"[{"key":" spaced","name":"bad"}]"#,
+        ] {
+            env::set_var("QWEN36_API_KEYS", invalid);
+            assert!(Config::from_env().is_err(), "{invalid}");
+        }
+        env::set_var("QWEN36_API_KEYS", r#"[{"key":"k1","name":"primary"}]"#);
         env::set_var("QWEN36_PORT", "x");
         assert!(Config::from_env().is_err());
         env::set_var("QWEN36_PORT", "8080");
@@ -126,5 +238,33 @@ mod tests {
         let err = Config::from_env().unwrap_err().to_string();
         assert!(err.contains("prefix cache temporarily disabled"));
         env::remove_var("QWEN36_PREFIX_CACHE_MIB");
+
+        let path = std::env::temp_dir().join(format!("qwen36-env-{}.tmp", std::process::id()));
+        std::fs::write(
+            &path,
+            "# comment\nQWEN36_API_KEYS='[{\"key\":\"file-key\",\"name\":\"file\"}]'\nQWEN36_PORT=9001\n",
+        )
+        .unwrap();
+        env::remove_var("QWEN36_API_KEYS");
+        env::set_var("QWEN36_PORT", "9002");
+        load_env_file(&path).unwrap();
+        assert_eq!(env::var("QWEN36_PORT").unwrap(), "9002");
+        assert_eq!(
+            parse_api_keys(&env::var("QWEN36_API_KEYS").unwrap()).unwrap()[0].name,
+            "file"
+        );
+        env::remove_var("QWEN36_API_KEYS");
+        env::remove_var("QWEN36_PORT");
+
+        env::set_var("QWEN36_ENV_FILE", &path);
+        env::set_var("QWEN36_NO_VRAM_PLAN", "1");
+        let c = Config::load().unwrap();
+        assert_eq!(c.api_keys[0].name, "file");
+        assert_eq!(c.port, 9001);
+        env::remove_var("QWEN36_ENV_FILE");
+        env::remove_var("QWEN36_NO_VRAM_PLAN");
+        env::remove_var("QWEN36_API_KEYS");
+        env::remove_var("QWEN36_PORT");
+        std::fs::remove_file(path).unwrap();
     }
 }

@@ -19,7 +19,16 @@ const CHAT_HTML: &str = include_str!("../web/index.html");
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cfg = Config::from_env()?;
+    let cfg = Config::load()?;
+    eprintln!(
+        "[qwen36] api keys: {} ({})",
+        cfg.api_keys.len(),
+        cfg.api_keys
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     eprintln!(
         "[qwen36] model={:?} ctx={} slots={} listen={}:{}",
         cfg.model, cfg.ctx, cfg.slots, cfg.host, cfg.port
@@ -71,14 +80,12 @@ async fn main() -> Result<()> {
     let state = AppState {
         engine: switcher.clone(),
         switcher,
-        api_key: cfg.api_key.clone(),
+        api_keys: cfg.api_keys.clone().into(),
         models_dir,
         cuda_device,
     };
-    let app = build_router(state).merge(Router::new().route(
-        "/",
-        get(|| async { Html(CHAT_HTML) }),
-    ));
+    let app =
+        build_router(state).merge(Router::new().route("/", get(|| async { Html(CHAT_HTML) })));
     let listener = tokio::net::TcpListener::bind(format!("{}:{}", cfg.host, cfg.port)).await?;
     axum::serve(listener, app).await?;
     Ok(())

@@ -23,7 +23,7 @@ use crate::engine_types::Engine;
 #[derive(Clone)]
 pub struct AppState {
     pub engine: Arc<dyn Engine>,
-    pub api_key: String,
+    pub api_keys: Arc<[crate::config::ApiKey]>,
     /// Тот же engine, но конкретный тип — для admin switch.
     pub switcher: Arc<crate::engine_swap::SwappableEngine>,
     /// Корень сканирования GGUF (QWEN36_MODELS_DIR или директория модели).
@@ -65,13 +65,28 @@ pub fn internal_error(message: impl Into<String>) -> Response {
     api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", message)
 }
 
+fn api_key_matches(candidate: &str, configured: &str) -> bool {
+    let candidate = candidate.as_bytes();
+    let configured = configured.as_bytes();
+    let mut diff = candidate.len() ^ configured.len();
+    for idx in 0..candidate.len().max(configured.len()) {
+        diff |= (candidate.get(idx).copied().unwrap_or(0)
+            ^ configured.get(idx).copied().unwrap_or(0)) as usize;
+    }
+    diff == 0
+}
+
 async fn auth(State(state): State<AppState>, req: Request<Body>, next: Next) -> Response {
     let ok = req
         .headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|k| k == state.api_key)
+        .map(|key| {
+            state.api_keys.iter().fold(false, |matched, entry| {
+                matched | api_key_matches(key, &entry.key)
+            })
+        })
         .unwrap_or(false);
     if !ok {
         return api_error(
@@ -85,12 +100,21 @@ async fn auth(State(state): State<AppState>, req: Request<Body>, next: Next) -> 
 
 pub fn build_router(state: AppState) -> Router {
     let v1 = Router::new()
-        .route("/chat/completions", axum::routing::post(openai::chat_completions))
+        .route(
+            "/chat/completions",
+            axum::routing::post(openai::chat_completions),
+        )
         .route("/responses", axum::routing::post(responses::responses))
         .route("/messages", axum::routing::post(anthropic::messages))
         .route("/models", axum::routing::get(openai::list_models))
-        .route("/available_models", axum::routing::get(admin::available_models))
-        .route("/model_native_ctx", axum::routing::get(admin::model_native_ctx))
+        .route(
+            "/available_models",
+            axum::routing::get(admin::available_models),
+        )
+        .route(
+            "/model_native_ctx",
+            axum::routing::get(admin::model_native_ctx),
+        )
         .route("/ctx_matrix", axum::routing::get(admin::ctx_matrix))
         .route("/switch_model", axum::routing::post(admin::switch_model))
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth));

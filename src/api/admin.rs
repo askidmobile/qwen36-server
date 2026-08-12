@@ -329,7 +329,7 @@ async fn do_switch(
             model: path.clone(),
             host: String::new(),
             port: 0,
-            api_key: String::new(),
+            api_keys: Vec::new(),
             ctx,
             slots,
             kv_budget_mib,

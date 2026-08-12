@@ -4,7 +4,7 @@
 # План: tests/stability_plan.md. Portable bash (macOS + Linux), set -u only.
 #
 # Использование:
-#   KEY=master-key ./scripts/stability_smoke.sh
+#   KEY=<один key из QWEN36_API_KEYS> ./scripts/stability_smoke.sh
 #   KEY=... HOST=http://192.168.2.89:8080 SSH_HOST=yttri-win ./scripts/stability_smoke.sh
 set -u
 
@@ -18,7 +18,7 @@ POLL_SEC="${POLL_SEC:-30}"
 VRAM_TOLERANCE_MIB="${VRAM_TOLERANCE_MIB:-512}"
 
 if [ -z "$KEY" ]; then
-    echo "FATAL: KEY (master API key) не задан" >&2
+    echo "FATAL: KEY (одно значение key из QWEN36_API_KEYS) не задан" >&2
     exit 2
 fi
 mkdir -p "$OUT_DIR"
