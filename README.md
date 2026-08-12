@@ -345,6 +345,8 @@ curl "$BASE_URL/v1/chat/completions" \
   -d '{"model":"qwen3.6","messages":[{"role":"user","content":"Привет"}],"max_tokens":128,"thinking":false}'
 ```
 
+Для быстрых обычных ответов передавайте `"thinking":false` или `"chat_template_kwargs":{"enable_thinking":false}`. Веб-чат запускается в этом режиме по умолчанию. Thinking генерирует отдельную последовательность reasoning-токенов перед финальным ответом; скрытие блока в UI не экономит время GPU.
+
 Streaming:
 
 ```bash

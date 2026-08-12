@@ -104,10 +104,10 @@ details.think .tc pre { opacity: .9; }
   <span class="brand" id="brand">Qwen3.6</span>
   <span id="modelinfo" class="badge">…</span>
   <input type="password" id="apikey" placeholder="API key" autocomplete="off">
-  <select id="mode" title="Режим / пресет сэмплинга">
-    <option value="thinking">thinking</option>
-    <option value="thinking-coding">thinking-coding</option>
-    <option value="instruct">instruct</option>
+  <select id="mode" title="Быстрый режим генерирует ответ сразу; thinking сначала пишет рассуждение">
+    <option value="instruct" selected>быстро · без рассуждений</option>
+    <option value="thinking">thinking · общее</option>
+    <option value="thinking-coding">thinking · код</option>
   </select>
   <select id="modelsel" title="Модель (GGUF с диска сервера)"></select>
   <select id="slotssel" title="Параллельные слоты (меньше слотов = больше контекст)">
@@ -172,6 +172,8 @@ const PARAM_IDS = ["temperature","top_p","top_k","min_p","presence_penalty","rep
 // --- Хранилище (BD-005, BD-014: всё в localStorage) ---
 const store = {
   get key() { return localStorage.getItem("q36_api_key") || ""; },
+  get mode() { return localStorage.getItem("q36_mode") || "instruct"; },
+  set mode(v) { localStorage.setItem("q36_mode", v); },
   set key(v) { v ? localStorage.setItem("q36_api_key", v) : localStorage.removeItem("q36_api_key"); },
   get chats() { try { return JSON.parse(localStorage.getItem("q36_chats") || "[]"); } catch { return []; } },
   set chats(v) { localStorage.setItem("q36_chats", JSON.stringify(v)); },
@@ -445,8 +447,8 @@ function parseThinking(text, assumeThinking) {
     if (after.trim()) parts.push({ kind: "text", text: after.replace(/^\n+/, "") });
     if (parts.length) return parts;
   }
-  // Кейс 0b: стрим в thinking-режиме, маркеров ещё нет — весь текст это
-  // рассуждение (opener в промпте, closer ещё в пути).
+  // Кейс 0b: thinking-режим, маркеров ещё нет — весь текст это
+  // рассуждение (opener находится в prompt, closer ещё не сгенерирован).
   if (assumeThinking && open < 0 && close < 0 && text.trim()) {
     return [{ kind: "think", text }];
   }
@@ -500,7 +502,7 @@ function renderMsg(msg, streaming) {
 function fillBubble(bubble, msg, streaming) {
   bubble.innerHTML = "";
   if (msg.role === "assistant") {
-    const assumeThinking = !!streaming && msg.thinking !== false;
+    const assumeThinking = msg.thinking === true;
     for (const part of parseThinking(msg.content || "", assumeThinking)) {
       if (part.kind === "think") {
         const det = document.createElement("details");
@@ -699,7 +701,10 @@ $("stopbtn").onclick = () => { if (abortCtrl) abortCtrl.abort(); };
 $("input").addEventListener("keydown", e => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
 });
-$("mode").onchange = () => applyPreset($("mode").value);
+$("mode").onchange = () => {
+  store.mode = $("mode").value;
+  applyPreset($("mode").value);
+};
 $("newchat").onclick = () => {
   const c = newChat();
   const chats = store.chats; chats.unshift(c); store.chats = chats;
@@ -716,6 +721,7 @@ $("keysave").onclick = () => {
 
 // --- Инициализация ---
 $("apikey").value = store.key;
+$("mode").value = store.mode;
 applyPreset($("mode").value);
 if (!store.chats.length) { const c = newChat(); store.chats = [c]; store.current = c.id; }
 else if (!getChat()) store.current = store.chats[0].id;
