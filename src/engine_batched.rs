@@ -9,8 +9,8 @@
 //! - TODO-F5 (форк): `Sampler::sample_indexed(slot, generated, logits)` — per-request params.
 //! - TODO-F6 (форк): `BatchScheduler::slots_mut()` — сбор Finished.
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -75,7 +75,6 @@ impl BatchConfig {
 }
 
 struct AdmitReq {
-    req_id: u64,
     prompt: Vec<u32>,
     params: GenParams,
     truncated: bool,
@@ -85,11 +84,9 @@ struct AdmitReq {
 
 enum IngestMsg {
     Admit(AdmitReq),
-    Cancel { req_id: u64 },
 }
 
 struct SlotBinding {
-    req_id: u64,
     out: mpsc::Sender<StreamEvent>,
     params: GenParams,
     prompt_tokens: usize,
@@ -102,24 +99,9 @@ struct SlotBinding {
     last_progress: Instant,
 }
 
-/// Guard: клиент дропнул Receiver → Cancel в dispatch loop.
-pub struct CancelGuard {
-    req_id: u64,
-    tx: mpsc::Sender<IngestMsg>,
-}
-
-impl Drop for CancelGuard {
-    fn drop(&mut self) {
-        let _ = self.tx.try_send(IngestMsg::Cancel {
-            req_id: self.req_id,
-        });
-    }
-}
-
 pub struct BatchedEngine {
     tx_ingest: mpsc::Sender<IngestMsg>,
     info: ModelInfo,
-    next_id: Arc<AtomicU64>,
     max_queue: usize,
     in_flight: Arc<AtomicUsize>,
     tokenizer: Arc<Mutex<tokenizers::Tokenizer>>,
@@ -170,7 +152,6 @@ impl BatchedEngine {
         let engine = Arc::new(Self {
             tx_ingest,
             info,
-            next_id: Arc::new(AtomicU64::new(1)),
             max_queue: cfg.max_queue,
             in_flight: Arc::new(AtomicUsize::new(0)),
             tokenizer: Arc::new(Mutex::new(tokenizer)),
@@ -246,10 +227,8 @@ impl Engine for BatchedEngine {
         params.clamp_to_context(prompt_tokens, self.info.context_length)?;
 
         let (out_tx, out_rx) = mpsc::channel(SLOT_CHAN_CAP);
-        let req_id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.in_flight.fetch_add(1, Ordering::Relaxed);
         let req = AdmitReq {
-            req_id,
             prompt,
             params: GenParams { ..params },
             truncated,
@@ -268,13 +247,6 @@ impl Engine for BatchedEngine {
     }
 }
 
-pub fn cancel_guard(engine: &BatchedEngine, req_id: u64) -> CancelGuard {
-    CancelGuard {
-        req_id,
-        tx: engine.tx_ingest.clone(),
-    }
-}
-
 // ────────────────────────────────────────────────────────────────────────────
 // Dispatch loop — единственный владелец scheduler'а/модели.
 // ────────────────────────────────────────────────────────────────────────────
@@ -288,7 +260,6 @@ fn dispatch_loop(
 ) {
     let mut bindings: Vec<Option<SlotBinding>> = (0..cfg.slots).map(|_| None).collect();
     let mut pending: VecDeque<AdmitReq> = VecDeque::new();
-    let mut cancelled: HashSet<u64> = HashSet::new();
     // Per-slot sampling state: params + rng.
     let mut slot_samplers: HashMap<usize, (GenParams, Rng)> = HashMap::new();
     // Per-slot last emitted token count (для incremental decode).
@@ -302,30 +273,15 @@ fn dispatch_loop(
         // 1. Слить накопленные ingest-сообщения.
         while let Ok(msg) = rx.try_recv() {
             match msg {
-                IngestMsg::Admit(req) => {
-                    if cancelled.remove(&req.req_id) {
-                        in_flight.fetch_sub(1, Ordering::Relaxed);
-                        continue;
-                    }
-                    admit(
-                        req,
-                        &mut sched,
-                        &mut bindings,
-                        &mut pending,
-                        &mut slot_samplers,
-                        &mut slot_truncated,
-                        &cfg,
-                    );
-                }
-                IngestMsg::Cancel { req_id } => {
-                    cancel(
-                        req_id,
-                        &mut bindings,
-                        &mut pending,
-                        &mut cancelled,
-                        &in_flight,
-                    );
-                }
+                IngestMsg::Admit(req) => admit(
+                    req,
+                    &mut sched,
+                    &mut bindings,
+                    &mut pending,
+                    &mut slot_samplers,
+                    &mut slot_truncated,
+                    &cfg,
+                ),
             }
         }
 
@@ -467,32 +423,15 @@ fn dispatch_loop(
         // 5. Нет работы — ждём; есть — yield.
         if !did_work && pending.is_empty() && bindings.iter().all(|b| b.is_none()) {
             match rx.blocking_recv() {
-                Some(msg) => match msg {
-                    IngestMsg::Admit(req) => {
-                        if cancelled.remove(&req.req_id) {
-                            in_flight.fetch_sub(1, Ordering::Relaxed);
-                        } else {
-                            admit(
-                                req,
-                                &mut sched,
-                                &mut bindings,
-                                &mut pending,
-                                &mut slot_samplers,
-                                &mut slot_truncated,
-                                &cfg,
-                            );
-                        }
-                    }
-                    IngestMsg::Cancel { req_id } => {
-                        cancel(
-                            req_id,
-                            &mut bindings,
-                            &mut pending,
-                            &mut cancelled,
-                            &in_flight,
-                        );
-                    }
-                },
+                Some(IngestMsg::Admit(req)) => admit(
+                    req,
+                    &mut sched,
+                    &mut bindings,
+                    &mut pending,
+                    &mut slot_samplers,
+                    &mut slot_truncated,
+                    &cfg,
+                ),
                 None => break,
             }
         } else {
@@ -662,7 +601,6 @@ fn seed_slot(
     slot_samplers.insert(idx, (params.clone(), Rng::new(seed)));
     slot_truncated.insert(idx, req.truncated);
     bindings[idx] = Some(SlotBinding {
-        req_id: req.req_id,
         out: req.out,
         params,
         prompt_tokens,
@@ -672,28 +610,6 @@ fn seed_slot(
         cancelled: false,
         last_progress: Instant::now(),
     });
-}
-
-fn cancel(
-    req_id: u64,
-    bindings: &mut [Option<SlotBinding>],
-    pending: &mut VecDeque<AdmitReq>,
-    cancelled: &mut HashSet<u64>,
-    in_flight: &AtomicUsize,
-) {
-    let before = pending.len();
-    pending.retain(|r| r.req_id != req_id);
-    if pending.len() != before {
-        in_flight.fetch_sub(1, Ordering::Relaxed);
-        return;
-    }
-    for b in bindings.iter_mut().flatten() {
-        if b.req_id == req_id {
-            b.cancelled = true;
-            return;
-        }
-    }
-    cancelled.insert(req_id);
 }
 
 /// FINISHED: Done с usage → reset (TODO-F4/F6).
