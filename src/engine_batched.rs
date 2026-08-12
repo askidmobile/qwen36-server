@@ -273,6 +273,9 @@ fn dispatch_loop(
         // 1. Слить накопленные ingest-сообщения.
         while let Ok(msg) = rx.try_recv() {
             match msg {
+                IngestMsg::Admit(req) if req.out.is_closed() => {
+                    in_flight.fetch_sub(1, Ordering::Relaxed);
+                }
                 IngestMsg::Admit(req) => admit(
                     req,
                     &mut sched,
@@ -309,6 +312,13 @@ fn dispatch_loop(
                     &mut slot_emitted_toks,
                     &mut slot_truncated,
                 );
+            }
+        }
+
+        // Клиент мог отключиться во время очереди/prefill, до первой Delta.
+        for b in bindings.iter_mut().flatten() {
+            if b.out.is_closed() {
+                b.cancelled = true;
             }
         }
 
@@ -405,6 +415,7 @@ fn dispatch_loop(
                 &mut slot_samplers,
                 &mut slot_truncated,
                 &cfg,
+                &in_flight,
             );
         }
 
@@ -423,6 +434,9 @@ fn dispatch_loop(
         // 5. Нет работы — ждём; есть — yield.
         if !did_work && pending.is_empty() && bindings.iter().all(|b| b.is_none()) {
             match rx.blocking_recv() {
+                Some(IngestMsg::Admit(req)) if req.out.is_closed() => {
+                    in_flight.fetch_sub(1, Ordering::Relaxed);
+                }
                 Some(IngestMsg::Admit(req)) => admit(
                     req,
                     &mut sched,
@@ -565,8 +579,13 @@ fn admit_from_pending(
     slot_samplers: &mut HashMap<usize, (GenParams, Rng)>,
     slot_truncated: &mut HashMap<usize, bool>,
     cfg: &BatchConfig,
+    in_flight: &AtomicUsize,
 ) {
     while let Some(idx) = bindings.iter().position(|b| b.is_none()) {
+        while pending.front().is_some_and(|req| req.out.is_closed()) {
+            pending.pop_front();
+            in_flight.fetch_sub(1, Ordering::Relaxed);
+        }
         let fits = pending
             .front()
             .map(|r| kv_fits(sched, bindings, cfg, r.prompt_tokens))
