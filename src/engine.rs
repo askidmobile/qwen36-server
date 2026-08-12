@@ -57,6 +57,27 @@ impl Default for GenParams {
 }
 
 impl GenParams {
+    /// Ограничить decode остатком context window после точной токенизации prompt.
+    pub(crate) fn clamp_to_context(
+        &mut self,
+        prompt_tokens: usize,
+        context_length: usize,
+    ) -> Result<()> {
+        if self.max_tokens == 0 {
+            anyhow::bail!("max_tokens must be greater than 0");
+        }
+        let available = context_length
+            .checked_sub(prompt_tokens)
+            .filter(|&n| n > 0)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "prompt has {prompt_tokens} tokens, context length is {context_length}"
+                )
+            })?;
+        self.max_tokens = self.max_tokens.min(available);
+        Ok(())
+    }
+
     /// Применить пресет BD-016: поля пресета замещают defaults,
     /// явно заданные stop/seed/max_tokens сохраняются.
     pub fn from_preset(p: SamplingPreset) -> Self {
@@ -166,7 +187,7 @@ impl Engine for CandleEngine {
     async fn generate(
         &self,
         messages: Vec<ChatMessage>,
-        params: GenParams,
+        mut params: GenParams,
     ) -> Result<mpsc::Receiver<StreamEvent>> {
         // Sliding window (BD-017): system сохраняется, режутся старые пары.
         // Оценка: токены каждого сообщения отдельно (BPE-границы дают погрешность
@@ -219,6 +240,7 @@ impl Engine for CandleEngine {
             };
         }
         let prompt_tokens = prompt_ids.len();
+        params.clamp_to_context(prompt_tokens, self.ctx)?;
 
         let (tx, rx) = mpsc::channel(64);
         let state = Arc::clone(&self.state);
@@ -541,6 +563,20 @@ mod tests {
             role: role.into(),
             content: content.into(),
         }
+    }
+
+    #[test]
+    fn max_tokens_is_clamped_to_remaining_context() {
+        let mut p = GenParams {
+            max_tokens: 100,
+            ..Default::default()
+        };
+        p.clamp_to_context(20, 64).unwrap();
+        assert_eq!(p.max_tokens, 44);
+        assert!(p.clamp_to_context(64, 64).is_err());
+
+        p.max_tokens = 0;
+        assert!(p.clamp_to_context(1, 64).is_err());
     }
 
     #[test]

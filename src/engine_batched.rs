@@ -194,7 +194,7 @@ impl Engine for BatchedEngine {
     async fn generate(
         &self,
         messages: Vec<ChatMessage>,
-        params: GenParams,
+        mut params: GenParams,
     ) -> anyhow::Result<mpsc::Receiver<StreamEvent>> {
         if self.in_flight.load(Ordering::Relaxed) >= self.max_queue + MAX_SLOTS {
             bail!("queue full (QWEN36_MAX_QUEUE)");
@@ -243,6 +243,7 @@ impl Engine for BatchedEngine {
             let n = ids.len();
             (ids, n, was_trimmed)
         };
+        params.clamp_to_context(prompt_tokens, self.info.context_length)?;
 
         let (out_tx, out_rx) = mpsc::channel(SLOT_CHAN_CAP);
         let req_id = self.next_id.fetch_add(1, Ordering::Relaxed);
