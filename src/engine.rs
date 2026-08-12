@@ -531,17 +531,19 @@ pub fn trim_messages(
     let sys_tokens: usize = systems.iter().map(&count).sum();
     let mut body: Vec<ChatMessage> = body.to_vec();
     let mut body_tokens: usize = body.iter().map(&count).sum();
+    let mut removed = false;
 
     // Режем парами (user+assistant) с головы; последнее сообщение не трогаем.
     while sys_tokens + body_tokens > budget && body.len() > 1 {
         let take = if body.len() > 2 { 2 } else { 1 };
         for m in body.drain(..take) {
             body_tokens = body_tokens.saturating_sub(count(&m));
+            removed = true;
         }
     }
     let mut out: Vec<ChatMessage> = systems.to_vec();
     out.extend(body);
-    (out, true)
+    (out, removed)
 }
 
 /// Найти первую из stop-строк (минимальная позиция).
@@ -634,7 +636,7 @@ mod tests {
     fn trim_keeps_last_message_even_over_budget() {
         let m = vec![msg("system", "s"), msg("user", "x".repeat(100).as_str())];
         let (out, truncated) = trim_messages(&m, 10, |m| m.content.len());
-        assert!(truncated);
+        assert!(!truncated); // history не удалялась
         assert_eq!(out.len(), 2); // system + последний user
     }
 
