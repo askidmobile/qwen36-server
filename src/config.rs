@@ -23,7 +23,7 @@ pub struct Config {
     pub kv_budget_mib: f64,
     /// MiB KV на токен на слот (для admission).
     pub kv_per_tok_mib: f64,
-    /// Бюджет prefix cache (MiB). 0 = выключен (`QWEN36_PREFIX_CACHE_MIB`, default 2048).
+    /// Бюджет prefix cache (MiB). 0 = выключен (`QWEN36_PREFIX_CACHE_MIB`, default 0 (выключен: primed admit восстанавливает snapshot против stale state)).
     pub prefix_cache_mib: usize,
 }
 
@@ -44,7 +44,7 @@ impl Config {
             slots: parse_env("QWEN36_SLOTS", 4usize)?,
             kv_budget_mib: 0.0,
             kv_per_tok_mib: 0.0,
-            prefix_cache_mib: parse_env("QWEN36_PREFIX_CACHE_MIB", 2048usize)?,
+            prefix_cache_mib: parse_env("QWEN36_PREFIX_CACHE_MIB", 0usize)?,
         };
         cfg.apply_vram_plan()?;
         Ok(cfg)
