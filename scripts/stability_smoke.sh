@@ -48,6 +48,13 @@ server_alive() { # 0 = жив (HTTP отвечает); процессная пр
     curl -sf -o /dev/null -m 5 -H "Authorization: Bearer $KEY" "$HOST/v1/models"
 }
 
+is_uint() { # 0 = непустая строка только из цифр
+    case "$1" in
+        ''|*[!0-9]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
 # ── 1. preflight ─────────────────────────────────────────────────────────────
 
 echo "== preflight: $HOST (clients=$CLIENTS, max_tokens~$MAX_TOKENS, out=$OUT_DIR)"
@@ -61,8 +68,8 @@ grep -q '"slots"' "$models_json" \
     && report "preflight" "PASS" "$(tr -d '\n ' < "$models_json" | head -c 160)" \
     || report "preflight" "FAIL" "нет поля slots в /v1/models"
 
-V0="$(vram_used_mib | head -n1 | tr -d ' ')"
-if [ -n "$V0" ]; then
+V0="$(vram_used_mib | head -n1 | tr -d '[:space:]')"
+if is_uint "$V0"; then
     echo "vram baseline: ${V0} MiB"
 else
     echo "vram baseline: недоступно (нет SSH_HOST/nvidia-smi) — VRAM-проверки SKIP"
@@ -109,7 +116,7 @@ while :; do
         died="сервер перестал отвечать во время прогона"
         break
     fi
-    v="$(vram_used_mib | head -n1 | tr -d ' ')"
+    v="$(vram_used_mib | head -n1 | tr -d '[:space:]')"
     echo "$(date +%s) ${v:-nan}" >> "$OUT_DIR/vram.log"
     sleep "$POLL_SEC"
 done
@@ -144,9 +151,9 @@ else
     report "streams-done" "FAIL" "$streams_ok/$CLIENTS стримов завершились"
 fi
 
-V1="$(vram_used_mib | head -n1 | tr -d ' ')"
+V1="$(vram_used_mib | head -n1 | tr -d '[:space:]')"
 echo "$(date +%s) ${V1:-nan}" >> "$OUT_DIR/vram.log"
-if [ -n "$V0" ] && [ -n "$V1" ]; then
+if is_uint "$V0" && is_uint "$V1"; then
     delta=$((V1 - V0))
     [ "$delta" -lt 0 ] && delta=$((-delta))
     if [ "$delta" -le "$VRAM_TOLERANCE_MIB" ]; then
