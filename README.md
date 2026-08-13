@@ -137,7 +137,7 @@ QWEN36_MODELS_DIR=D:\Models
 | `QWEN36_REQ_TIMEOUT` | `600` | Timeout запроса batched engine, секунды |
 | `QWEN36_MAX_QUEUE` | `64` | Максимальная очередь |
 | `QWEN36_TRACE` | off | Trace: `1`, `true`, `yes` или `on` |
-| `QWEN36_MOE_BACKEND` | `reference` | Для CUDA MoE можно выбрать `ptx` |
+| `QWEN36_MOE_BACKEND` | auto | CUDA MoE использует PTX для проверенных routed dtypes; `reference` — диагностический rollback |
 | `QWEN36_PREFILL_CHUNK` | внутренний default | Размер prefill chunk |
 | `QWEN36_NO_VRAM_PLAN` | unset | Отключить автоматический VRAM-план |
 
