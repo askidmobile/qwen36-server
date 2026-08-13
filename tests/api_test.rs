@@ -137,6 +137,23 @@ async fn zero_output_tokens_are_bad_requests() {
 }
 
 #[tokio::test]
+async fn invalid_chat_sampling_parameters_are_bad_requests() {
+    for body in [
+        serde_json::json!({"messages": [], "temperature": -0.1}),
+        serde_json::json!({"messages": [], "top_p": 0.0}),
+        serde_json::json!({"messages": [], "min_p": 1.1}),
+        serde_json::json!({"messages": [], "presence_penalty": 2.1}),
+        serde_json::json!({"messages": [], "repetition_penalty": 0.0}),
+    ] {
+        let resp = app(vec![])
+            .oneshot(authed(json_req("POST", "/v1/chat/completions", body)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+#[tokio::test]
 async fn every_configured_api_key_is_accepted() {
     let req = Request::builder()
         .uri("/v1/models")

@@ -20,6 +20,11 @@ pub struct ChatCompletionRequest {
     stream: bool,
     temperature: Option<f32>,
     top_p: Option<f32>,
+    top_k: Option<usize>,
+    min_p: Option<f32>,
+    presence_penalty: Option<f32>,
+    repetition_penalty: Option<f32>,
+    seed: Option<u64>,
     max_tokens: Option<usize>,
     stop: Option<Value>, // string | [string]
     #[allow(dead_code)]
@@ -78,6 +83,19 @@ fn to_gen_params(req: &ChatCompletionRequest) -> GenParams {
     if let Some(t) = req.top_p {
         p.top_p = t;
     }
+    if let Some(k) = req.top_k {
+        p.top_k = k;
+    }
+    if let Some(m) = req.min_p {
+        p.min_p = m;
+    }
+    if let Some(penalty) = req.presence_penalty {
+        p.presence_penalty = penalty;
+    }
+    if let Some(penalty) = req.repetition_penalty {
+        p.repetition_penalty = penalty;
+    }
+    p.seed = req.seed;
     if let Some(m) = req.max_tokens {
         p.max_tokens = m;
     }
@@ -140,6 +158,21 @@ pub async fn chat_completions(
     let params = to_gen_params(&req);
     if params.max_tokens == 0 {
         return bad_request("max_tokens must be greater than 0");
+    }
+    if params.temperature < 0.0 {
+        return bad_request("temperature must be non-negative");
+    }
+    if !(0.0 < params.top_p && params.top_p <= 1.0) {
+        return bad_request("top_p must be greater than 0 and at most 1");
+    }
+    if !(0.0..=1.0).contains(&params.min_p) {
+        return bad_request("min_p must be between 0 and 1");
+    }
+    if !(-2.0..=2.0).contains(&params.presence_penalty) {
+        return bad_request("presence_penalty must be between -2 and 2");
+    }
+    if params.repetition_penalty <= 0.0 {
+        return bad_request("repetition_penalty must be greater than 0");
     }
     let include_usage = req
         .stream_options
@@ -375,4 +408,28 @@ pub async fn list_models(State(state): State<AppState>) -> Response {
         }],
     }))
     .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chat_sampling_extensions_are_applied() {
+        let req: ChatCompletionRequest = serde_json::from_value(json!({
+            "messages": [],
+            "top_k": 7,
+            "min_p": 0.1,
+            "presence_penalty": 1.5,
+            "repetition_penalty": 1.2,
+            "seed": 42
+        }))
+        .unwrap();
+        let params = to_gen_params(&req);
+        assert_eq!(params.top_k, 7);
+        assert_eq!(params.min_p, 0.1);
+        assert_eq!(params.presence_penalty, 1.5);
+        assert_eq!(params.repetition_penalty, 1.2);
+        assert_eq!(params.seed, Some(42));
+    }
 }

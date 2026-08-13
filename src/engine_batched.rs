@@ -86,6 +86,8 @@ enum IngestMsg {
     Admit(AdmitReq),
 }
 
+type SlotSamplers = Arc<Mutex<HashMap<usize, (GenParams, Rng)>>>;
+
 struct SlotBinding {
     out: mpsc::Sender<StreamEvent>,
     params: GenParams,
@@ -260,8 +262,12 @@ fn dispatch_loop(
 ) {
     let mut bindings: Vec<Option<SlotBinding>> = (0..cfg.slots).map(|_| None).collect();
     let mut pending: VecDeque<AdmitReq> = VecDeque::new();
-    // Per-slot sampling state: params + rng.
-    let mut slot_samplers: HashMap<usize, (GenParams, Rng)> = HashMap::new();
+    // Per-slot sampling state persists across decode steps. Replacing sampler
+    // from a cloned map each step resets every RNG to the same quantile.
+    let slot_samplers: SlotSamplers = Arc::new(Mutex::new(HashMap::new()));
+    sched.set_sampler(Box::new(IndexedSampler {
+        params: Arc::clone(&slot_samplers),
+    }));
     // Per-slot last emitted token count (для incremental decode).
     let mut slot_emitted_toks: HashMap<usize, usize> = HashMap::new();
     // Per-slot truncated flag (для Done).
@@ -281,7 +287,7 @@ fn dispatch_loop(
                     &mut sched,
                     &mut bindings,
                     &mut pending,
-                    &mut slot_samplers,
+                    &slot_samplers,
                     &mut slot_truncated,
                     &cfg,
                 ),
@@ -308,7 +314,7 @@ fn dispatch_loop(
                     &mut bindings,
                     &mut sched,
                     &in_flight,
-                    &mut slot_samplers,
+                    &slot_samplers,
                     &mut slot_emitted_toks,
                     &mut slot_truncated,
                 );
@@ -322,12 +328,7 @@ fn dispatch_loop(
             }
         }
 
-        // 3. Обновить sampler (per-slot params могли поменяться при admit) + шаг.
-        let sampler_box: Box<dyn ForkSampler> = Box::new(IndexedSampler {
-            params: slot_samplers.clone(),
-        });
-        sched.set_sampler(sampler_box);
-
+        // 3. Persistent sampler advances shared per-slot RNG state in place.
         let trace = qwen35_batch::scheduler::trace_on();
         // GPU-шаг БЕЗ мьютекса токенизатора (аудит 2026-08-10): иначе входящие
         // HTTP-запросы блокируются на lock() в generate() на весь шаг.
@@ -400,7 +401,7 @@ fn dispatch_loop(
                 &mut bindings,
                 &mut sched,
                 &in_flight,
-                &mut slot_samplers,
+                &slot_samplers,
                 &mut slot_emitted_toks,
                 &mut slot_truncated,
                 &tokenizer,
@@ -412,7 +413,7 @@ fn dispatch_loop(
                 &mut pending,
                 &mut sched,
                 &mut bindings,
-                &mut slot_samplers,
+                &slot_samplers,
                 &mut slot_truncated,
                 &cfg,
                 &in_flight,
@@ -442,7 +443,7 @@ fn dispatch_loop(
                     &mut sched,
                     &mut bindings,
                     &mut pending,
-                    &mut slot_samplers,
+                    &slot_samplers,
                     &mut slot_truncated,
                     &cfg,
                 ),
@@ -560,7 +561,7 @@ fn admit(
     sched: &mut BatchScheduler<Qwen35BatchAdapter>,
     bindings: &mut [Option<SlotBinding>],
     pending: &mut VecDeque<AdmitReq>,
-    slot_samplers: &mut HashMap<usize, (GenParams, Rng)>,
+    slot_samplers: &SlotSamplers,
     slot_truncated: &mut HashMap<usize, bool>,
     cfg: &BatchConfig,
 ) {
@@ -576,7 +577,7 @@ fn admit_from_pending(
     pending: &mut VecDeque<AdmitReq>,
     sched: &mut BatchScheduler<Qwen35BatchAdapter>,
     bindings: &mut [Option<SlotBinding>],
-    slot_samplers: &mut HashMap<usize, (GenParams, Rng)>,
+    slot_samplers: &SlotSamplers,
     slot_truncated: &mut HashMap<usize, bool>,
     cfg: &BatchConfig,
     in_flight: &AtomicUsize,
@@ -604,7 +605,7 @@ fn seed_slot(
     req: AdmitReq,
     sched: &mut BatchScheduler<Qwen35BatchAdapter>,
     bindings: &mut [Option<SlotBinding>],
-    slot_samplers: &mut HashMap<usize, (GenParams, Rng)>,
+    slot_samplers: &SlotSamplers,
     slot_truncated: &mut HashMap<usize, bool>,
 ) {
     let prompt_tokens = req.prompt_tokens;
@@ -617,7 +618,10 @@ fn seed_slot(
     });
     let params = req.params.clone();
     sched.submit(req.prompt, max_new);
-    slot_samplers.insert(idx, (params.clone(), Rng::new(seed)));
+    slot_samplers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(idx, (params.clone(), Rng::new(seed)));
     slot_truncated.insert(idx, req.truncated);
     bindings[idx] = Some(SlotBinding {
         out: req.out,
@@ -638,7 +642,7 @@ fn finish_slot(
     bindings: &mut [Option<SlotBinding>],
     sched: &mut BatchScheduler<Qwen35BatchAdapter>,
     in_flight: &AtomicUsize,
-    slot_samplers: &mut HashMap<usize, (GenParams, Rng)>,
+    slot_samplers: &SlotSamplers,
     slot_emitted_toks: &mut HashMap<usize, usize>,
     slot_truncated: &mut HashMap<usize, bool>,
     tokenizer: &Arc<Mutex<tokenizers::Tokenizer>>,
@@ -679,7 +683,10 @@ fn finish_slot(
     sched.slots_mut()[idx].reset();
     use qwen35_batch::model::BatchModel;
     let _ = sched.model_mut().reset_slot(idx);
-    slot_samplers.remove(&idx);
+    slot_samplers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&idx);
     slot_emitted_toks.remove(&idx);
     in_flight.fetch_sub(1, Ordering::Relaxed);
 }
@@ -689,7 +696,7 @@ fn free_slot(
     bindings: &mut [Option<SlotBinding>],
     sched: &mut BatchScheduler<Qwen35BatchAdapter>,
     in_flight: &AtomicUsize,
-    slot_samplers: &mut HashMap<usize, (GenParams, Rng)>,
+    slot_samplers: &SlotSamplers,
     slot_emitted_toks: &mut HashMap<usize, usize>,
     slot_truncated: &mut HashMap<usize, bool>,
 ) {
@@ -697,7 +704,10 @@ fn free_slot(
         sched.slots_mut()[idx].reset();
         use qwen35_batch::model::BatchModel;
         let _ = sched.model_mut().reset_slot(idx);
-        slot_samplers.remove(&idx);
+        slot_samplers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&idx);
         slot_emitted_toks.remove(&idx);
         slot_truncated.remove(&idx);
         in_flight.fetch_sub(1, Ordering::Relaxed);
@@ -709,7 +719,7 @@ fn free_slot(
 // ────────────────────────────────────────────────────────────────────────────
 
 struct IndexedSampler {
-    params: HashMap<usize, (GenParams, Rng)>,
+    params: SlotSamplers,
 }
 
 impl ForkSampler for IndexedSampler {
@@ -718,7 +728,8 @@ impl ForkSampler for IndexedSampler {
     }
 
     fn sample_indexed(&mut self, slot_idx: usize, generated: &[u32], logits: &[f32]) -> u32 {
-        match self.params.get_mut(&slot_idx) {
+        let mut params = self.params.lock().unwrap_or_else(|e| e.into_inner());
+        match params.get_mut(&slot_idx) {
             Some((p, rng)) => sampler::sample(
                 logits,
                 p.temperature,
@@ -789,29 +800,46 @@ mod tests {
     }
 
     #[test]
-    fn indexed_sampler_uses_per_slot_params() {
-        let mut params = HashMap::new();
-        params.insert(
+    fn indexed_sampler_advances_rng_across_steps() {
+        let params = GenParams {
+            top_k: 4,
+            top_p: 1.0,
+            ..Default::default()
+        };
+        let shared = Arc::new(Mutex::new(HashMap::from([(
             0,
-            (
-                GenParams {
-                    top_k: 1,
-                    ..Default::default()
-                },
-                Rng::new(1),
-            ),
-        );
-        let mut s = IndexedSampler { params };
-        let logits = vec![0.1, 0.9, 0.2, 5.0];
-        for _ in 0..4 {
-            assert_eq!(s.sample_indexed(0, &[], &logits), 3);
-        }
+            (params.clone(), Rng::new(123)),
+        )])));
+        let mut indexed = IndexedSampler { params: shared };
+        let logits = vec![0.0; 4];
+        let actual: Vec<u32> = (0..8)
+            .map(|_| indexed.sample_indexed(0, &[], &logits))
+            .collect();
+
+        let mut expected_rng = Rng::new(123);
+        let expected: Vec<u32> = (0..8)
+            .map(|_| {
+                sampler::sample(
+                    &logits,
+                    params.temperature,
+                    params.top_k,
+                    params.top_p,
+                    params.min_p,
+                    params.presence_penalty,
+                    params.repetition_penalty,
+                    &[],
+                    &mut expected_rng,
+                )
+            })
+            .collect();
+        assert!(expected.windows(2).any(|pair| pair[0] != pair[1]));
+        assert_eq!(actual, expected);
     }
 
     #[test]
     fn indexed_sampler_fallback_greedy_when_no_params() {
         let mut s = IndexedSampler {
-            params: HashMap::new(),
+            params: Arc::new(Mutex::new(HashMap::new())),
         };
         let logits = vec![0.1, 0.9, 0.2, 5.0];
         assert_eq!(s.sample_indexed(99, &[], &logits), 3);
