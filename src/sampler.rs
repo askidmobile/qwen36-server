@@ -56,6 +56,12 @@ pub fn sample(
     generated: &[u32],
     rng: &mut Rng,
 ) -> u32 {
+    if temperature <= 1e-5
+        && presence_penalty == 0.0
+        && (repetition_penalty == 0.0 || repetition_penalty == 1.0)
+    {
+        return argmax(logits);
+    }
     let mut logits = logits.to_vec();
 
     // Penalties по уже встречавшимся токенам (OpenAI-семантика).
