@@ -134,6 +134,7 @@ def audit_reports(
         for name in names
     }
     seen_sources: Counter[str] = Counter()
+    source_operations: dict[str, list[str]] = defaultdict(list)
     seen_outputs: dict[str, str] = {}
     reports: list[dict[str, Any]] = []
 
@@ -163,6 +164,7 @@ def audit_reports(
             report_outputs.add(output_name)
             component_sources.add(source_name)
             seen_sources[source_name] += 1
+            source_operations[source_name].append(row["operation"])
         expected_sources = set(source["tensors"][expected_component])
         if component_sources != expected_sources:
             missing = sorted(expected_sources - component_sources)
@@ -190,11 +192,15 @@ def audit_reports(
 
     expected_all = set(source_components)
     seen_all = set(seen_sources)
-    duplicates = sorted(name for name, count in seen_sources.items() if count > 1)
-    if seen_all != expected_all or duplicates:
+    duplicate_identity = sorted(
+        source_name
+        for source_name, operations in source_operations.items()
+        if len(operations) > 1 and all(operation == "identity" for operation in operations)
+    )
+    if seen_all != expected_all or duplicate_identity:
         raise AuditError(
             f"aggregate source coverage mismatch: missing={sorted(expected_all - seen_all)[:8]}, "
-            f"unknown={sorted(seen_all - expected_all)[:8]}, duplicate={duplicates[:8]}"
+            f"unknown={sorted(seen_all - expected_all)[:8]}, duplicate_identity={duplicate_identity[:8]}"
         )
     return reports
 

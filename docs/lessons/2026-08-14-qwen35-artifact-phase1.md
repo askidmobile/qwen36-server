@@ -20,7 +20,7 @@ Deterministic multimodal fixtures initially changed SHA-256 on every generation 
 - Apply converter patch with `git apply --directory=conversion`; hard-reset pinned checkout before each preparation, then verify exact HEAD.
 - Run Windows CUDA build after `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat`.
 - Insert minimal EXIF APP1 orientation segment directly, then verify decoder sees `RightTop`.
-- Keep source inventory audit independent from model conversion: exact public index proves `426 + 297 + 15 = 738`; physical output audit runs after artifacts exist.
+- Keep source inventory audit independent from model conversion: exact public index proves `426 + 297 + 15 = 738`; physical output audit runs after artifacts exist. One source may yield multiple outputs only through an explicit transform (`model.visual.patch_embed.proj.weight` yields two temporal slices); duplicate identity mappings still fail.
 
 ## References
 
