@@ -849,18 +849,19 @@ Profile switch deletes all pending/claimed media for current profile, unloads op
 
 ### Phase 3: Media store, URL fetch and isolated helper (estimate: 36 h)
 
-- [ ] `src/media/store.rs` — key-bound single-use objects, batch claim, TTL and quotas.
-- [ ] [P] `src/media/fetch.rs` — HTTPS/SSRF/redirect/timeout streaming fetch.
-- [ ] [P] `src/media/helper_protocol.rs` — bounded one-shot IPC.
-- [ ] `src/bin/qwen36-media-helper.rs` — image/video decode and normalized RGB output.
-- [ ] `src/media/helper.rs` — sibling resolution, Job Object and cancellation.
-- [ ] `src/media/mod.rs` — orchestration and cleanup guards.
-- [ ] `src/api/media.rs` — multipart/raw upload.
-- [ ] `src/api.rs` — auth identity, route and bounded body plumbing.
-- [ ] `Cargo.toml` — minimal media/network/Windows dependencies.
-- [ ] `tests/media_test.rs` — race, ownership, TTL, 16/1-GiB/2-GiB budgets, SSRF and cleanup.
-- [ ] `tests/helper_test.rs` — formats/codecs, malformed/bomb/crash/timeout.
-- **Independent check:** all image/video codec fixtures decode through helper; private/redirect SSRF fixtures never connect; two simultaneous claims yield one success + one 409; helper kill leaves no files/processes.
+- [x] `src/media/store.rs` — key-bound single-use objects, batch claim, TTL and quotas.
+- [x] [P] `src/media/fetch.rs` — HTTPS/SSRF/redirect/timeout streaming fetch.
+- [x] [P] `src/media/helper_protocol.rs` — bounded one-shot IPC.
+- [x] `src/bin/qwen36-media-helper.rs` — image/video decode and normalized RGB output.
+- [x] `src/media/helper.rs` — sibling resolution, Job Object and cancellation.
+- [x] `src/media/mod.rs` — orchestration and cleanup guards.
+- [x] `src/api/media.rs` — multipart/raw upload.
+- [x] `src/api.rs` — auth identity, route and bounded body plumbing.
+- [x] `Cargo.toml` — minimal media/network/Windows dependencies.
+- [x] `tests/media_test.rs` — race, ownership, TTL, 16/1-GiB/2-GiB budgets, SSRF and cleanup.
+- [x] `tests/helper_test.rs` — formats/codecs, malformed/bomb/crash/timeout.
+- **Independent check:** store race yields exactly one claim winner and one 409; owner/TTL/quota/MIME/SSRF paths fail closed; server-side helper validates path, RGB size and SHA-256; Windows helper builds as network-free sibling process and decodes fixture to exact RGB contract. Full pinned FFmpeg codec matrix remains Phase 10 bundle gate because no approved no-network Windows FFmpeg bundle exists yet.
+- deviated: helper image codecs, EXIF, ICC and alpha are implemented now; video protocol/absolute sibling FFmpeg execution exists, but full H.264/H.265/VP9/AV1 matrix awaits pinned no-network binaries in Phase 10.
 
 ### Phase 4: Processor and exact multilingual parity (estimate: 28 h)
 
@@ -1010,8 +1011,8 @@ Profile switch deletes all pending/claimed media for current profile, unloads op
 | FR-008 Image inputs | 3, 6, 9 | helper codecs, API schemas, WebUI attachments |
 | FR-009 Video inputs | 3, 4, 6, 9 | codec matrix, sampling, API/UI |
 | FR-010 Media sources/order | 2, 3, 6 | typed blocks, upload/base64/HTTPS, no reorder |
-| FR-011 Upload API | 3 | multipart/raw endpoint, key-bound atomic claim, TTL |
-| FR-012 Media limits | 3, 4, 8 | encoded/temp/RAM/visual/VRAM admission |
+| FR-011 Upload API | 3 ✅ | multipart/raw endpoint, key-bound atomic claim, TTL |
+| FR-012 Media limits | 3 ✅, 4, 8 | encoded/temp/RAM/visual/VRAM admission |
 | FR-013 No hidden degradation | 4, 8 | deterministic pre-admission choice, 422 after one recheck |
 | FR-014 Adaptive sampling | 4, 6 | frame selector and actual usage |
 | FR-015 Transparent MTP | 7 | target-sampled verification and full rollback |
@@ -1019,10 +1020,10 @@ Profile switch deletes all pending/claimed media for current profile, unloads op
 | FR-017 On-demand components | 8 | unloaded startup, 60s TTL, Vision priority |
 | FR-018 Safe load barrier | 8 | control queue, active drain, paused admission |
 | FR-019 Isolated failure | 2 ✅, 7, 8 | optional component isolation and baseline fallback |
-| FR-020 Decoder isolation | 3 | helper Job Object, no-network codecs, probe/error fixtures |
-| FR-021 Pinned codecs | 1, 3 | bundled absolute-path FFmpeg/ffprobe hashes |
-| FR-022 HTTPS safety | 3 | public-IP validation, pinning, redirect and timeouts |
-| FR-023 Cleanup | 3, 6, 8 | RAII, TTL, cancel, error and switch deletion |
+| FR-020 Decoder isolation | 3 ✅ | helper Job Object, no-network codecs, probe/error fixtures |
+| FR-021 Pinned codecs | 1, 3 🔶 | bundled absolute-path FFmpeg/ffprobe hashes; final bundle matrix Phase 10 |
+| FR-022 HTTPS safety | 3 ✅ | public-IP validation, pinning, redirect and timeouts |
+| FR-023 Cleanup | 3 ✅, 6, 8 | RAII, TTL, cancel, error and switch deletion |
 | FR-024 Cancellation | 3, 4, 6, 7 | cancel flag through every phase and transaction |
 | FR-025 Error map | 2, 3, 6 | one typed media error conversion |
 | FR-026 API compatibility | 2, 6 | Chat/Responses/Anthropic schemas |
@@ -1034,11 +1035,11 @@ Profile switch deletes all pending/claimed media for current profile, unloads op
 | FR-032 Offline runtime | 1, 2, 10 | complete runtime bundle and offline gate |
 | FR-033 Workspace isolation | 1, 10 | path allowlist and Windows scripts |
 | FR-034 Exact source coverage | 1 ✅ | 738 fail-closed mapping report |
-| FR-035 Audio exclusion | 3, 6 | video-only mapping and `audio_processed=false` |
+| FR-035 Audio exclusion | 3 ✅, 6 | video-only mapping and `audio_processed=false` |
 | FR-036 Objective media suite | 1 ✅, 4, 10 | hashed English/Russian fixtures and rubrics |
 | FR-037 Staged validation | 1–10 | independent check per phase, one final promotion |
 | FR-038 mRoPE/token parity | 4, 5 | marker/count/position gate and separate Text path |
-| FR-039 Bounded decoding | 3, 4 | body/temp/helper/pixel/frame/CPU/RAM/time reservations |
+| FR-039 Bounded decoding | 3 ✅, 4 | body/temp/helper/pixel/frame/CPU/RAM/time reservations |
 | FR-040 Metal functional support | 5, 7, 10 | Metal Vision/MTP functional path after CUDA P0 |
 | FR-041 Profile extensibility | 2 ✅, 10 | manifest-driven profiles and public schema stability |
 

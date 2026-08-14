@@ -115,12 +115,12 @@ models:                 D:\Models\yttri
 
 **Acceptance criteria:**
 
-- [ ] Given authenticated multipart или raw-body upload с `Content-Type`, when вызывается `POST /v1/media`, then сервер возвращает одноразовый media ID, привязанный к API-ключу.
+- [x] Given authenticated multipart или raw-body upload с `Content-Type`, when вызывается `POST /v1/media`, then сервер возвращает одноразовый media ID, привязанный к API-ключу.
 - [ ] Given media ID, when он впервые использован в inference request, then он становится недействительным и media bytes удаляются после завершения, отмены или ошибки.
-- [ ] Given неиспользованный media ID, when проходит 15 минут, then media удаляется и ID перестаёт приниматься.
-- [ ] Given media ID другого API-ключа, when клиент пытается его использовать, then request отклоняется без раскрытия наличия объекта.
-- [ ] Given два одновременных claims одного media ID, when они конкурируют, then первый atomic claim получает объект, второй получает `409 Conflict`, а claimed ID не возвращается в available state после cancellation.
-- [ ] Given 16 pending uploads, 1 GiB занято на temp disk или 2 GiB decoded media RAM, when новый request превышает соответствующий global budget, then он отклоняется до записи/декодирования с `429` или `507`.
+- [x] Given неиспользованный media ID, when проходит 15 минут, then media удаляется и ID перестаёт приниматься.
+- [x] Given media ID другого API-ключа, when клиент пытается его использовать, then request отклоняется без раскрытия наличия объекта.
+- [x] Given два одновременных claims одного media ID, when они конкурируют, then первый atomic claim получает объект, второй получает `409 Conflict`, а claimed ID не возвращается в available state после cancellation.
+- [x] Given 16 pending uploads, 1 GiB занято на temp disk или 2 GiB decoded media RAM, when новый request превышает соответствующий global budget, then он отклоняется до записи/декодирования с `429` или `507`.
 
 ### Scenario 5: HTTPS media URL (P0)
 
@@ -129,8 +129,8 @@ models:                 D:\Models\yttri
 **Acceptance criteria:**
 
 - [ ] Given публичный HTTPS URL, when resource укладывается в type/size/time limits, фактический format подтверждён magic bytes/decoder probe и MIME совпадает, then media загружается и обрабатывается.
-- [ ] Given loopback, private, link-local, reserved или metadata destination, when URL или redirect разрешается, then download отклоняется до соединения с запрещённым адресом.
-- [ ] Given redirects, when их больше 3 или новый destination не проходит ту же проверку, then download прекращается.
+- [x] Given loopback, private, link-local, reserved или metadata destination, when URL или redirect разрешается, then download отклоняется до соединения с запрещённым адресом.
+- [x] Given redirects, when их больше 3 или новый destination не проходит ту же проверку, then download прекращается.
 - [ ] Given connect time больше 5 секунд или total time больше 30 секунд, when timeout срабатывает, then request получает HTTP 408 и временные данные удаляются.
 
 ### Scenario 6: Прозрачный MTP decode (P0)

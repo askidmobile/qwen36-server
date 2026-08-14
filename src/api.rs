@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod anthropic;
+pub mod media;
 pub mod openai;
 pub mod responses;
 
@@ -23,6 +24,7 @@ use crate::engine_types::Engine;
 #[derive(Clone)]
 pub struct AppState {
     pub engine: Arc<dyn Engine>,
+    pub media: Arc<crate::media::MediaService>,
     pub api_keys: Arc<[crate::config::ApiKey]>,
     /// Тот же engine, но конкретный тип — для admin switch.
     pub switcher: Arc<crate::engine_swap::SwappableEngine>,
@@ -33,6 +35,9 @@ pub struct AppState {
     /// CUDA device handle (для mempool trim при switch; None на macOS/CPU).
     pub cuda_device: Option<candle_core::Device>,
 }
+
+#[derive(Debug, Clone)]
+pub struct ApiKeyIdentity(pub crate::media::OwnerDigest);
 
 #[derive(Serialize)]
 pub struct ErrorBody {
@@ -67,6 +72,10 @@ pub fn internal_error(message: impl Into<String>) -> Response {
     api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", message)
 }
 
+pub fn media_error(error: crate::media::MediaError) -> Response {
+    api_error(error.status(), error.api_kind(), error.safe_message())
+}
+
 fn api_key_matches(candidate: &str, configured: &str) -> bool {
     let candidate = candidate.as_bytes();
     let configured = configured.as_bytes();
@@ -78,25 +87,27 @@ fn api_key_matches(candidate: &str, configured: &str) -> bool {
     diff == 0
 }
 
-async fn auth(State(state): State<AppState>, req: Request<Body>, next: Next) -> Response {
-    let ok = req
+async fn auth(State(state): State<AppState>, mut req: Request<Body>, next: Next) -> Response {
+    let candidate = req
         .headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|key| {
-            state.api_keys.iter().fold(false, |matched, entry| {
-                matched | api_key_matches(key, &entry.key)
-            })
-        })
-        .unwrap_or(false);
-    if !ok {
+        .and_then(|v| v.strip_prefix("Bearer "));
+    let identity = candidate.and_then(|key| {
+        let mut matched = false;
+        for entry in state.api_keys.iter() {
+            matched |= api_key_matches(key, &entry.key);
+        }
+        matched.then(|| ApiKeyIdentity(crate::media::OwnerDigest::from_key(key)))
+    });
+    let Some(identity) = identity else {
         return api_error(
             StatusCode::UNAUTHORIZED,
             "authentication_error",
             "invalid or missing API key",
         );
-    }
+    };
+    req.extensions_mut().insert(identity);
     next.run(req).await
 }
 
@@ -108,6 +119,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/responses", axum::routing::post(responses::responses))
         .route("/messages", axum::routing::post(anthropic::messages))
+        .route("/media", axum::routing::post(media::upload))
         .route("/models", axum::routing::get(openai::list_models))
         .route(
             "/available_models",

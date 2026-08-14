@@ -313,6 +313,8 @@ async fn do_switch(
     req_slots: usize,
 ) -> anyhow::Result<()> {
     // 1. VRAM-план для новой модели (dynamic: ctx до native, бюджет в движок).
+    // Pending/claimed media belongs to old profile and must never survive switch.
+    state.media.store.purge_all();
     let fp = vram_plan::footprint_from_gguf(&path)?;
     let (ctx, slots, kv_budget_mib, kv_per_tok_mib) = match vram_plan::total_vram_mib() {
         Some(total) => {
@@ -380,6 +382,7 @@ async fn do_switch(
             kv_budget_mib,
             kv_per_tok_mib,
             prefix_cache_mib: 0,
+            media_temp: std::env::temp_dir().join("qwen36-media"),
         };
         Arc::new(crate::engine::CandleEngine::load(&cfg)?)
     };

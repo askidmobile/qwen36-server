@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Acquire', 'AuditSource', 'PrepareConverter')]
+    [ValidateSet('Acquire', 'AuditSource', 'PrepareConverter', 'VerifyCodecs')]
     [string]$Action = 'Acquire',
     [string]$Workspace = 'D:\Projects\yttri-inference',
     [string]$ModelRoot = 'D:\Models\yttri\qwen3.5-4b',
@@ -126,6 +126,29 @@ function Prepare-Converter {
     }
 }
 
+function Verify-Codecs {
+    $ffmpeg = Assert-UnderRoot (Join-Path $ToolsRoot 'ffmpeg\ffmpeg.exe') @($Workspace)
+    $ffprobe = Assert-UnderRoot (Join-Path $ToolsRoot 'ffmpeg\ffprobe.exe') @($Workspace)
+    foreach ($tool in @($ffmpeg, $ffprobe)) {
+        if (-not (Test-Path -LiteralPath $tool -PathType Leaf)) { throw "Missing pinned codec tool: $tool" }
+    }
+    $protocols = & $ffmpeg -hide_banner -protocols 2>&1
+    if ($LASTEXITCODE -ne 0) { throw 'ffmpeg -protocols failed' }
+    $network = @('http', 'https', 'tcp', 'udp', 'tls', 'srt', 'rtmp')
+    foreach ($protocol in $network) {
+        if ($protocols -match "(?m)^\s+$([regex]::Escape($protocol))\s*$") {
+            throw "FFmpeg network protocol enabled: $protocol"
+        }
+    }
+    $record = [ordered]@{
+        network_disabled = $true
+        ffmpeg = [ordered]@{bytes=(Get-Item $ffmpeg).Length;sha256=(Get-FileHash -Algorithm SHA256 $ffmpeg).Hash.ToLowerInvariant()}
+        ffprobe = [ordered]@{bytes=(Get-Item $ffprobe).Length;sha256=(Get-FileHash -Algorithm SHA256 $ffprobe).Hash.ToLowerInvariant()}
+    }
+    New-Item -ItemType Directory -Force -Path $ReportsRoot | Out-Null
+    $record | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 -LiteralPath (Join-Path $ReportsRoot 'codecs.json')
+}
+
 function Audit-Source {
     New-Item -ItemType Directory -Force -Path $ReportsRoot | Out-Null
     $driver = Assert-UnderRoot (Join-Path $ProjectSource 'tools\qwen35-artifacts.py') @($Workspace)
@@ -138,6 +161,7 @@ switch ($Action) {
     'Acquire' { Acquire-Source; Audit-Source }
     'AuditSource' { Audit-Source }
     'PrepareConverter' { Prepare-Converter }
+    'VerifyCodecs' { Verify-Codecs }
 }
 
 Write-Host "qwen35_artifacts: $Action PASS"

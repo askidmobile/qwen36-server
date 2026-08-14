@@ -46,6 +46,8 @@ pub struct Config {
     pub kv_per_tok_mib: f64,
     /// Бюджет prefix cache (MiB). 0 = выключен (`QWEN36_PREFIX_CACHE_MIB`, default 0 (выключен: primed admit восстанавливает snapshot против stale state)).
     pub prefix_cache_mib: usize,
+    /// Временный media root (`QWEN36_MEDIA_TEMP`). Limits фиксированы release contract.
+    pub media_temp: PathBuf,
 }
 
 impl Config {
@@ -99,6 +101,9 @@ impl Config {
             kv_budget_mib: 0.0,
             kv_per_tok_mib: 0.0,
             prefix_cache_mib,
+            media_temp: std::env::var("QWEN36_MEDIA_TEMP")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| std::env::temp_dir().join("qwen36-media")),
         };
         cfg.apply_vram_plan()?;
         Ok(cfg)
@@ -231,6 +236,7 @@ mod tests {
         env::remove_var("QWEN36_PORT");
         env::remove_var("QWEN36_CTX");
         env::remove_var("QWEN36_SLOTS");
+        env::remove_var("QWEN36_MEDIA_TEMP");
         let c = Config::from_env().unwrap();
         assert!(c.profile.is_none());
         assert!(c.resolved_profile.is_none());

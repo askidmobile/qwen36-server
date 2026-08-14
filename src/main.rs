@@ -21,6 +21,16 @@ const CHAT_HTML: &str = include_str!("../web/index.html");
 async fn main() -> Result<()> {
     let cfg = Config::load()?;
     let profile = cfg.resolved_profile.clone();
+    let media = Arc::new(qwen36_server::media::MediaService::new(
+        qwen36_server::media::MediaConfig {
+            temp_root: cfg.media_temp.clone(),
+            ..Default::default()
+        },
+    )?);
+    qwen36_server::media::MediaStore::spawn_reaper(
+        media.store.clone(),
+        std::time::Duration::from_secs(60),
+    );
     eprintln!(
         "[qwen36] api keys: {} ({})",
         cfg.api_keys.len(),
@@ -80,6 +90,7 @@ async fn main() -> Result<()> {
     ));
     let state = AppState {
         engine: switcher.clone(),
+        media,
         switcher,
         api_keys: cfg.api_keys.clone().into(),
         models_dir,

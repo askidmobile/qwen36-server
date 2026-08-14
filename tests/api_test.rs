@@ -57,8 +57,18 @@ fn app(deltas: Vec<&str>) -> axum::Router {
         8192,
         4,
     ));
+    let media_root =
+        std::env::temp_dir().join(format!("qwen36-api-media-{}", uuid::Uuid::new_v4()));
+    let media = Arc::new(
+        qwen36_server::media::MediaService::new(qwen36_server::media::MediaConfig {
+            temp_root: media_root,
+            ..Default::default()
+        })
+        .unwrap(),
+    );
     build_router(AppState {
         engine: switcher.clone(),
+        media,
         switcher,
         api_keys: vec![
             ApiKey {
@@ -83,6 +93,15 @@ fn authed(req: Request<Body>) -> Request<Body> {
         .headers
         .insert("authorization", "Bearer test-key".parse().unwrap());
     Request::from_parts(parts, body)
+}
+
+fn raw_req(method: &str, uri: &str, content_type: &str, body: Vec<u8>) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", content_type)
+        .body(Body::from(body))
+        .unwrap()
 }
 
 fn json_req(method: &str, uri: &str, body: serde_json::Value) -> Request<Body> {
@@ -111,6 +130,42 @@ async fn unauthorized_without_key() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     let body = body_string(resp).await;
     assert!(body.contains("authentication_error"));
+}
+
+#[tokio::test]
+async fn media_upload_requires_auth_and_returns_owner_bound_id() {
+    let bytes = b"\x89PNG\r\n\x1a\nfixture".to_vec();
+    let resp = app(vec![])
+        .oneshot(raw_req("POST", "/v1/media", "image/png", bytes.clone()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    let resp = app(vec![])
+        .oneshot(authed(raw_req("POST", "/v1/media", "image/png", bytes)))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let value: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
+    assert_eq!(value["object"], "media");
+    assert_eq!(value["kind"], "image");
+    assert_eq!(value["expires_in"], 900);
+    assert_eq!(value["id"].as_str().unwrap().len(), 32);
+}
+
+#[tokio::test]
+async fn media_upload_rejects_mime_spoof() {
+    let resp = app(vec![])
+        .oneshot(authed(raw_req(
+            "POST",
+            "/v1/media",
+            "video/mp4",
+            b"\x89PNG\r\n\x1a\nfixture".to_vec(),
+        )))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(body_string(resp).await.contains("invalid_request_error"));
 }
 
 #[tokio::test]
