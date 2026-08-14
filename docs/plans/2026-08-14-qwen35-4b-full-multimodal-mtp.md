@@ -865,13 +865,14 @@ Profile switch deletes all pending/claimed media for current profile, unloads op
 
 ### Phase 4: Processor and exact multilingual parity (estimate: 28 h)
 
-- [ ] `qwen35-batch/src/real/multimodal.rs` — resize, normalize, patch packing, sampling, timestamps, markers, positions.
-- [ ] `qwen35-batch/src/real/tokenizer.rs` — official mixed-content ChatML.
-- [ ] `qwen35-batch/Cargo.toml` — RGB resize primitive.
-- [ ] `qwen35-batch/tests/multimodal_processor.rs` — golden tensors and edge cases.
-- [ ] `qwen35-batch/src/bin/qwen35_multimodal_probe.rs` — deterministic probe output.
-- [ ] `tools/qwen35-artifacts.py` — invoke pinned Transformers reference and compare hashes/tolerance.
-- **Independent check:** on identical decoded RGB frames, English and Russian fixtures match reference shapes, patches ≤`1e-5`, visual counts, marker order, T/H/W positions and decode delta exactly.
+- [x] `qwen35-batch/src/real/multimodal.rs` — resize, normalize, patch packing, sampling, timestamps, markers, positions.
+- [x] `qwen35-batch/src/real/tokenizer.rs` — official mixed-content ChatML.
+- [x] `qwen35-batch/Cargo.toml` — RGB resize primitive.
+- [x] `qwen35-batch/tests/multimodal_processor.rs` — golden tensors and edge cases.
+- [x] `qwen35-batch/src/bin/qwen35_multimodal_probe.rs` — deterministic probe output.
+- [x] `tools/qwen35-artifacts.py` — invoke pinned Transformers reference and compare hashes/tolerance.
+- **Independent check:** pinned Transformers `00e8e49...` on `yttri-win` and Rust probe match exactly for English OCR, Russian OCR and four-frame video: image `1,474,560` patch values each, video `2,949,120`, max abs `0.0`; shapes, grids, visual counts, token IDs, marker/type order, T/H/W positions and decode delta exact. Rust golden tests `6/6`, tokenizer text non-regression `3/3`, Metal all-target check pass. No CUDA/GPU process, server restart or `current` change.
+- deviated: pinned reference lives in `tools/qwen35-processor-reference.py`; `qwen35-artifacts.py` remains fail-closed comparator/audit driver instead of importing Torch/Transformers into artifact audit process.
 
 ### Phase 5: Vision Q8 runtime and multimodal prefill (estimate: 40 h)
 
@@ -1007,14 +1008,14 @@ Profile switch deletes all pending/claimed media for current profile, unloads op
 | FR-004 Provenance | 1, 2 ✅ | converter report, hashes, manifest, gate refs |
 | FR-005 Atomic publication | 2 ✅, 10 | `MoveFileExW` pointer replacement and rollback |
 | FR-006 Candle runtime | 5, 7 | native Vision/MTP in `qwen35-batch`; llama.cpp build/reference only |
-| FR-007 Processor parity | 3, 4 | normalized decoded RGB, exact processor golden suite |
+| FR-007 Processor parity | 3 ✅, 4 ✅ | normalized decoded RGB, exact processor golden suite |
 | FR-008 Image inputs | 3, 6, 9 | helper codecs, API schemas, WebUI attachments |
-| FR-009 Video inputs | 3, 4, 6, 9 | codec matrix, sampling, API/UI |
+| FR-009 Video inputs | 3 🔶, 4 ✅, 6, 9 | codec matrix, sampling, API/UI |
 | FR-010 Media sources/order | 2, 3, 6 | typed blocks, upload/base64/HTTPS, no reorder |
 | FR-011 Upload API | 3 ✅ | multipart/raw endpoint, key-bound atomic claim, TTL |
-| FR-012 Media limits | 3 ✅, 4, 8 | encoded/temp/RAM/visual/VRAM admission |
-| FR-013 No hidden degradation | 4, 8 | deterministic pre-admission choice, 422 after one recheck |
-| FR-014 Adaptive sampling | 4, 6 | frame selector and actual usage |
+| FR-012 Media limits | 3 ✅, 4 🔶, 8 | encoded/temp/RAM/visual/VRAM admission |
+| FR-013 No hidden degradation | 4 🔶, 8 | deterministic pre-admission choice, 422 after one recheck |
+| FR-014 Adaptive sampling | 4 🔶, 6 | frame selector and actual usage |
 | FR-015 Transparent MTP | 7 | target-sampled verification and full rollback |
 | FR-016 Batched MTP | 7 | B=1..4 transaction scheduler and mixed fallback |
 | FR-017 On-demand components | 8 | unloaded startup, 60s TTL, Vision priority |
@@ -1036,10 +1037,10 @@ Profile switch deletes all pending/claimed media for current profile, unloads op
 | FR-033 Workspace isolation | 1, 10 | path allowlist and Windows scripts |
 | FR-034 Exact source coverage | 1 ✅ | 738 fail-closed mapping report |
 | FR-035 Audio exclusion | 3 ✅, 6 | video-only mapping and `audio_processed=false` |
-| FR-036 Objective media suite | 1 ✅, 4, 10 | hashed English/Russian fixtures and rubrics |
+| FR-036 Objective media suite | 1 ✅, 4 ✅, 10 | hashed English/Russian fixtures and rubrics |
 | FR-037 Staged validation | 1–10 | independent check per phase, one final promotion |
-| FR-038 mRoPE/token parity | 4, 5 | marker/count/position gate and separate Text path |
-| FR-039 Bounded decoding | 3 ✅, 4 | body/temp/helper/pixel/frame/CPU/RAM/time reservations |
+| FR-038 mRoPE/token parity | 4 ✅, 5 | marker/count/position gate and separate Text path |
+| FR-039 Bounded decoding | 3 ✅, 4 🔶 | body/temp/helper/pixel/frame/CPU/RAM/time reservations |
 | FR-040 Metal functional support | 5, 7, 10 | Metal Vision/MTP functional path after CUDA P0 |
 | FR-041 Profile extensibility | 2 ✅, 10 | manifest-driven profiles and public schema stability |
 
