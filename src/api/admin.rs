@@ -47,6 +47,38 @@ fn is_split_part(name: &str) -> bool {
 }
 
 /// Рекурсивный сбор *.gguf (глубина ≤ 3 от корня).
+fn scan_profiles(dir: &Path, depth: usize, out: &mut Vec<Value>) {
+    if depth > 3 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            scan_profiles(&path, depth + 1, out);
+        } else if path.file_name().and_then(|name| name.to_str()) == Some("profile.json") {
+            match crate::profile::ResolvedProfile::load(&path) {
+                Ok(profile) => out.push(json!({
+                    "kind": "profile",
+                    "id": profile.manifest.profile_id,
+                    "release_version": profile.manifest.release_version,
+                    "path": path.to_string_lossy(),
+                    "capabilities": profile.capabilities(),
+                    "components": {"vision": profile.vision, "mtp": profile.mtp},
+                })),
+                Err(error) => out.push(json!({
+                    "kind": "profile",
+                    "path": path.to_string_lossy(),
+                    "valid": false,
+                    "error": format!("{error:#}"),
+                })),
+            }
+        }
+    }
+}
+
 fn scan_gguf(dir: &Path, depth: usize, out: &mut Vec<Value>) {
     if depth > 3 {
         return;
@@ -146,6 +178,9 @@ pub async fn available_models(State(state): State<AppState>) -> Json<Value> {
     let mut out = Vec::new();
     scan_gguf(&state.models_dir, 0, &mut out);
     out.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    let mut profiles = Vec::new();
+    scan_profiles(&state.models_dir, 0, &mut profiles);
+    profiles.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
     let (cur, ctx, slots) = state
         .switcher
         .current
@@ -158,6 +193,14 @@ pub async fn available_models(State(state): State<AppState>) -> Json<Value> {
         "loading": state.switcher.loading.load(Ordering::Relaxed),
         "last_error": state.switcher.last_error.read().map(|s| s.clone()).unwrap_or_default(),
         "models": out,
+        "profiles": profiles,
+        "active_profile": state.profile.as_ref().map(|profile| json!({
+            "id": profile.manifest.profile_id,
+            "release_version": profile.manifest.release_version,
+            "manifest": profile.manifest_path,
+            "capabilities": profile.capabilities(),
+            "components": {"vision": profile.vision, "mtp": profile.mtp},
+        })),
     }))
 }
 
@@ -326,6 +369,8 @@ async fn do_switch(
         // single-slot через Config-like структуру нет — используем CandleEngine
         // с минимальным Config.
         let cfg = crate::config::Config {
+            profile: None,
+            resolved_profile: None,
             model: path.clone(),
             host: String::new(),
             port: 0,

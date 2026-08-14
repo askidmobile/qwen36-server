@@ -84,7 +84,7 @@ models:                 D:\Models\yttri
 
 - [ ] Given опубликованный profile, when сервер загружает модель, then text Q4_K_M доступен немедленно, а Vision Q8_0 и MTP Q8_0 обозначены как on-demand components.
 - [ ] Given profile без Vision или MTP, when он загружен, then text API работает, `/v1/models` сообщает отсутствующие capabilities, media отклоняется до inference, MTP заменяется обычным decode.
-- [ ] Given повреждённый, неполный или несовместимый manifest/artifact, when начинается загрузка, then component не используется и text availability не теряется.
+- [x] Given повреждённый, неполный или несовместимый manifest/artifact, when начинается загрузка, then component не используется и text availability не теряется.
 
 ### Scenario 2: Изображения во всех API (P0)
 
@@ -178,8 +178,8 @@ models:                 D:\Models\yttri
 - [x] Given official source index из 738 tensors, when converter строит artifacts, then fail-closed mapping inventory учитывает все 426 language, 297 Vision и 15 MTP source tensors; отсутствующий или неизвестный tensor блокирует set.
 - [ ] Given converter без нужного Vision/MTP mapping, when используется project patch, then manifest фиксирует exact converter fork commit и mapping version.
 - [ ] Given Vision/MTP quantization, when physical tensors записываются, then Q8_0 применяется только к eligible matrix/conv weights, а norms, biases, scales и profile-marked sensitive tensors сохраняют BF16/F32 dtype.
-- [ ] Given artifact set, when любой mandatory gate не прошёл, then `current` не меняется.
-- [ ] Given все mandatory gates passed, when set публикуется, then `current` атомарно указывает на новую versioned directory, а предыдущая версия остаётся доступной для rollback.
+- [x] Given artifact set, when любой mandatory gate не прошёл, then `current` не меняется.
+- [x] Given все mandatory gates passed, when set публикуется, then `current` атомарно указывает на новую versioned directory, а предыдущая версия остаётся доступной для rollback.
 - [ ] Given опубликованный set и отключённая сеть, when server запускается, then configs, processor, FFmpeg и model components доступны локально.
 
 ### Scenario 10: Hot-switch validated profiles (P1)

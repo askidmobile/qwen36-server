@@ -5,6 +5,7 @@ pub mod config;
 pub mod engine;
 pub mod engine_swap;
 pub mod prefix_cache;
+pub mod profile;
 pub mod sampler;
 pub mod vram_plan;
 

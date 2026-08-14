@@ -72,6 +72,7 @@ fn app(deltas: Vec<&str>) -> axum::Router {
         ]
         .into(),
         models_dir: std::path::PathBuf::from("."),
+        profile: None,
         cuda_device: None,
     })
 }
@@ -193,6 +194,11 @@ async fn models_list_format() {
     assert_eq!(v["data"][0]["quant"], "Q2_K_XL");
     assert_eq!(v["data"][0]["slots"], 4);
     assert_eq!(v["data"][0]["modes"][0], "thinking");
+    assert_eq!(v["data"][0]["capabilities"]["text"], true);
+    assert_eq!(v["data"][0]["capabilities"]["vision"], false);
+    assert_eq!(v["data"][0]["capabilities"]["video"], false);
+    assert_eq!(v["data"][0]["capabilities"]["mtp"]["available"], false);
+    assert!(v["data"][0]["profile"].is_null());
 }
 
 #[tokio::test]

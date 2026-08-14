@@ -365,6 +365,16 @@ pub async fn list_models(State(state): State<AppState>) -> Response {
     .await
     .unwrap_or((0, 0));
     let d = crate::engine_types::GenParams::default();
+    let profile = state.profile.as_ref();
+    let capabilities = profile.map(|profile| profile.capabilities()).unwrap_or(
+        crate::profile::EffectiveCapabilities {
+            text: true,
+            vision: false,
+            video: false,
+            mtp: false,
+            native_context: native_ctx,
+        },
+    );
     Json(json!({
         "object": "list",
         "data": [{
@@ -378,18 +388,31 @@ pub async fn list_models(State(state): State<AppState>) -> Response {
             "slots": info.slots,
             "modes": info.modes,
             // паспорт модели
-            "native_context_length": native_ctx,
+            "native_context_length": capabilities.native_context,
             "file_size_mib": size_mib,
             "path": path.to_string_lossy(),
             // возможности для агентов
             "capabilities": {
                 "streaming": true,
                 "tools": true,
-                "vision": false,
+                "text": capabilities.text,
+                "vision": capabilities.vision,
+                "video": capabilities.video,
+                "mtp": {"available": capabilities.mtp, "default_enabled": false},
                 "thinking": true,
                 "apis": ["chat_completions", "responses", "messages"],
             },
             // дефолты сэмплинга (если клиент не задаёт)
+            "profile": profile.map(|profile| json!({
+                "id": profile.manifest.profile_id,
+                "release_version": profile.manifest.release_version,
+                "source_revision": profile.manifest.source.revision,
+                "text_quant": profile.manifest.artifacts.text.quant,
+                "vision_quant": profile.manifest.artifacts.vision.as_ref().map(|artifact| &artifact.quant),
+                "mtp_quant": profile.manifest.artifacts.mtp.as_ref().map(|artifact| &artifact.quant),
+                "components": {"vision": profile.vision, "mtp": profile.mtp},
+                "media_limits": profile.manifest.limits,
+            })),
             "sampling_defaults": {
                 "temperature": d.temperature,
                 "top_p": d.top_p,

@@ -837,15 +837,15 @@ Profile switch deletes all pending/claimed media for current profile, unloads op
 
 ### Phase 2: Profile manifest and atomic release foundation (estimate: 18 h)
 
-- [ ] `src/profile.rs` — manifest/current pointer loader and validator.
-- [ ] `src/config.rs` — profile config plus legacy text-only fallback.
-- [ ] `src/main.rs` — profile-driven startup.
-- [ ] `scripts/qwen35_release.ps1` — immutable staging, atomic pointer, rollback.
-- [ ] `scripts/qwen35_run_current.ps1` — resolve pointer and launch version-matched runtime siblings.
-- [ ] `scripts/run_windows.bat` — stable scheduled-task entry point.
-- [ ] `tests/profile_test.rs` — corrupt optional component isolation and mandatory Text rejection.
-- [ ] `src/api/admin.rs` — list validated profiles without loading weights.
-- **Independent check:** synthetic bundle switches `current` atomically; corrupt Vision reports absent/error while authenticated text smoke remains 200; failed gate cannot alter pointer.
+- [x] `src/profile.rs` — manifest/current pointer loader and validator.
+- [x] `src/config.rs` — profile config plus legacy text-only fallback.
+- [x] `src/main.rs` — profile-driven startup.
+- [x] `scripts/qwen35_release.ps1` — immutable staging, atomic pointer, rollback.
+- [x] `scripts/qwen35_run_current.ps1` — resolve pointer and launch version-matched runtime siblings.
+- [x] `scripts/run_windows.bat` — stable scheduled-task entry point.
+- [x] `tests/profile_test.rs` — corrupt optional component isolation and mandatory Text rejection.
+- [x] `src/api/admin.rs` — list validated profiles without loading weights.
+- **Independent check:** synthetic Windows bundle published and rolled back `current` through write-through `MoveFileExW`; failed mandatory gate left pointer byte-identical. Rust suite proves corrupt/missing Vision/MTP become unavailable while Text profile remains valid; legacy authenticated `/v1/models` text smoke remains 200 and capability truth stays text-only.
 
 ### Phase 3: Media store, URL fetch and isolated helper (estimate: 36 h)
 
@@ -1000,11 +1000,11 @@ Profile switch deletes all pending/claimed media for current profile, unloads op
 
 | Requirement | Phase | Tasks |
 |---|---:|---|
-| FR-001 Unified release | 2, 10 | immutable bundle, mandatory gate aggregation, atomic `current` |
+| FR-001 Unified release | 2 ✅, 10 | immutable bundle, mandatory gate aggregation, atomic `current` |
 | FR-002 Pinned source | 1 | pinned download and source hash inventory |
 | FR-003 Artifact profile | 1, 5, 7 | Text Q4_K_M, mixed Vision/MTP Q8_0 loaders and dtype audit |
-| FR-004 Provenance | 1, 2 | converter report, hashes, manifest, gate refs |
-| FR-005 Atomic publication | 2, 10 | `MoveFileExW` pointer replacement and rollback |
+| FR-004 Provenance | 1, 2 ✅ | converter report, hashes, manifest, gate refs |
+| FR-005 Atomic publication | 2 ✅, 10 | `MoveFileExW` pointer replacement and rollback |
 | FR-006 Candle runtime | 5, 7 | native Vision/MTP in `qwen35-batch`; llama.cpp build/reference only |
 | FR-007 Processor parity | 3, 4 | normalized decoded RGB, exact processor golden suite |
 | FR-008 Image inputs | 3, 6, 9 | helper codecs, API schemas, WebUI attachments |
@@ -1018,7 +1018,7 @@ Profile switch deletes all pending/claimed media for current profile, unloads op
 | FR-016 Batched MTP | 7 | B=1..4 transaction scheduler and mixed fallback |
 | FR-017 On-demand components | 8 | unloaded startup, 60s TTL, Vision priority |
 | FR-018 Safe load barrier | 8 | control queue, active drain, paused admission |
-| FR-019 Isolated failure | 2, 7, 8 | optional component isolation and baseline fallback |
+| FR-019 Isolated failure | 2 ✅, 7, 8 | optional component isolation and baseline fallback |
 | FR-020 Decoder isolation | 3 | helper Job Object, no-network codecs, probe/error fixtures |
 | FR-021 Pinned codecs | 1, 3 | bundled absolute-path FFmpeg/ffprobe hashes |
 | FR-022 HTTPS safety | 3 | public-IP validation, pinning, redirect and timeouts |
@@ -1027,8 +1027,8 @@ Profile switch deletes all pending/claimed media for current profile, unloads op
 | FR-025 Error map | 2, 3, 6 | one typed media error conversion |
 | FR-026 API compatibility | 2, 6 | Chat/Responses/Anthropic schemas |
 | FR-027 Streaming usage | 2, 6 | unchanged deltas and final MediaUsage |
-| FR-028 Capability metadata | 2, 8, 10 | manifest truth and component state |
-| FR-029 Capability fallback | 2, 6, 8 | text-only synthetic profile and pre-inference rejection |
+| FR-028 Capability metadata | 2 ✅, 8, 10 | manifest truth and component state |
+| FR-029 Capability fallback | 2 ✅, 6, 8 | text-only synthetic profile and pre-inference rejection |
 | FR-030 Stateless WebUI | 9 | tab-memory bytes, persistent placeholders, accessibility |
 | FR-031 Text output | 2, 6 | media only as input; existing text output protocol |
 | FR-032 Offline runtime | 1, 2, 10 | complete runtime bundle and offline gate |
@@ -1040,7 +1040,7 @@ Profile switch deletes all pending/claimed media for current profile, unloads op
 | FR-038 mRoPE/token parity | 4, 5 | marker/count/position gate and separate Text path |
 | FR-039 Bounded decoding | 3, 4 | body/temp/helper/pixel/frame/CPU/RAM/time reservations |
 | FR-040 Metal functional support | 5, 7, 10 | Metal Vision/MTP functional path after CUDA P0 |
-| FR-041 Profile extensibility | 2, 10 | manifest-driven profiles and public schema stability |
+| FR-041 Profile extensibility | 2 ✅, 10 | manifest-driven profiles and public schema stability |
 
 ## Complexity & principle deviations
 

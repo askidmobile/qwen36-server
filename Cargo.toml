@@ -23,6 +23,7 @@ uuid = { version = "1", features = ["v4"] }
 candle-core = { path = "../candle-fork-qwen35-batch/candle-core" }
 tokenizers = { version = "0.22.0", default-features = false, features = ["onig"] }
 memmap2 = "0.9.3"
+sha2 = "0.10"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

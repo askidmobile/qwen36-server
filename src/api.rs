@@ -28,6 +28,8 @@ pub struct AppState {
     pub switcher: Arc<crate::engine_swap::SwappableEngine>,
     /// Корень сканирования GGUF (QWEN36_MODELS_DIR или директория модели).
     pub models_dir: std::path::PathBuf,
+    /// Validated profile metadata; None для legacy `QWEN36_MODEL`.
+    pub profile: Option<Arc<crate::profile::ResolvedProfile>>,
     /// CUDA device handle (для mempool trim при switch; None на macOS/CPU).
     pub cuda_device: Option<candle_core::Device>,
 }

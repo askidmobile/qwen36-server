@@ -24,7 +24,11 @@ impl std::fmt::Debug for ApiKey {
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Путь к GGUF (`QWEN36_MODEL`).
+    /// Manifest/current pointer (`QWEN36_PROFILE`), если задан.
+    pub profile: Option<PathBuf>,
+    /// Один раз validated profile; исключает повторное хеширование artifacts.
+    pub resolved_profile: Option<std::sync::Arc<crate::profile::ResolvedProfile>>,
+    /// Путь к GGUF (`QWEN36_MODEL`) или Text artifact resolved profile.
     pub model: PathBuf,
     /// Host (`QWEN36_HOST`, default 0.0.0.0).
     pub host: String,
@@ -62,10 +66,31 @@ impl Config {
         if prefix_cache_mib != 0 {
             anyhow::bail!("prefix cache temporarily disabled (QWEN36_PREFIX_CACHE_MIB must be 0)");
         }
-        let mut cfg = Self {
-            model: std::env::var("QWEN36_MODEL")
+        let profile = std::env::var("QWEN36_PROFILE").ok().map(PathBuf::from);
+        let resolved_profile = profile
+            .as_deref()
+            .map(crate::profile::ResolvedProfile::load)
+            .transpose()
+            .with_context(|| {
+                format!(
+                    "QWEN36_PROFILE {}",
+                    profile
+                        .as_deref()
+                        .unwrap_or_else(|| Path::new(""))
+                        .display()
+                )
+            })?
+            .map(std::sync::Arc::new);
+        let model = match &resolved_profile {
+            Some(profile) => profile.text_path.clone(),
+            None => std::env::var("QWEN36_MODEL")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from("models/qwen36-27b-q2_k_xl.gguf")),
+        };
+        let mut cfg = Self {
+            profile,
+            resolved_profile,
+            model,
             host: std::env::var("QWEN36_HOST").unwrap_or_else(|_| "0.0.0.0".into()),
             port: parse_env("QWEN36_PORT", 8080u16)?,
             api_keys,
@@ -200,12 +225,15 @@ mod tests {
             "QWEN36_API_KEYS",
             r#"[{"key":"k1","name":"primary"},{"key":"k2","name":"backup"}]"#,
         );
+        env::remove_var("QWEN36_PROFILE");
         env::remove_var("QWEN36_MODEL");
         env::remove_var("QWEN36_HOST");
         env::remove_var("QWEN36_PORT");
         env::remove_var("QWEN36_CTX");
         env::remove_var("QWEN36_SLOTS");
         let c = Config::from_env().unwrap();
+        assert!(c.profile.is_none());
+        assert!(c.resolved_profile.is_none());
         assert_eq!(c.api_keys.len(), 2);
         assert_eq!(c.api_keys[0].name, "primary");
         assert_eq!(c.model, PathBuf::from("models/qwen36-27b-q2_k_xl.gguf"));

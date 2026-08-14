@@ -20,6 +20,7 @@ const CHAT_HTML: &str = include_str!("../web/index.html");
 #[tokio::main]
 async fn main() -> Result<()> {
     let cfg = Config::load()?;
+    let profile = cfg.resolved_profile.clone();
     eprintln!(
         "[qwen36] api keys: {} ({})",
         cfg.api_keys.len(),
@@ -30,8 +31,8 @@ async fn main() -> Result<()> {
             .join(", ")
     );
     eprintln!(
-        "[qwen36] model={:?} ctx={} slots={} listen={}:{}",
-        cfg.model, cfg.ctx, cfg.slots, cfg.host, cfg.port
+        "[qwen36] model={:?} profile={:?} ctx={} slots={} listen={}:{}",
+        cfg.model, cfg.profile, cfg.ctx, cfg.slots, cfg.host, cfg.port
     );
 
     let engine: Arc<dyn Engine> = if cfg.slots > 1 {
@@ -82,6 +83,7 @@ async fn main() -> Result<()> {
         switcher,
         api_keys: cfg.api_keys.clone().into(),
         models_dir,
+        profile,
         cuda_device,
     };
     let app =
