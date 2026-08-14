@@ -1,0 +1,299 @@
+{
+  "fixtures": [
+    {
+      "bytes": 20692,
+      "category": "ocr",
+      "file": "en/ocr.png",
+      "id": "en-ocr",
+      "kind": "image",
+      "language": "en",
+      "oracle": {
+        "type": "exact_text",
+        "value": "INVOICE A-17\nTOTAL 42.50 USD\nOPTION B"
+      },
+      "prompt": "Transcribe all text exactly.",
+      "sha256": "831279dfedc48b3f0812182fc3efa8e1197e6836c9816adf4e41fd53144e1104"
+    },
+    {
+      "bytes": 13993,
+      "category": "chart",
+      "file": "en/chart.png",
+      "id": "en-chart",
+      "kind": "image",
+      "language": "en",
+      "oracle": {
+        "fields": {
+          "quarter": "Q3",
+          "value": "30"
+        },
+        "type": "exact_fields"
+      },
+      "prompt": "Which quarter has the highest value? Answer with quarter and value.",
+      "sha256": "1bba10dd0ae2bb1166324f09d4ebb81225c6df91fa184b205e9ad5bd2aefaa04"
+    },
+    {
+      "bytes": 18737,
+      "category": "spatial",
+      "file": "en/spatial.png",
+      "id": "en-spatial",
+      "kind": "image",
+      "language": "en",
+      "oracle": {
+        "forbidden": [
+          "left"
+        ],
+        "required": [
+          "right"
+        ],
+        "type": "required_forbidden"
+      },
+      "prompt": "Where is the blue square relative to the red circle?",
+      "sha256": "ce2cc29ad76006811ae1bf693e6abf1c032945bc6235a4a7c6fea895732e2836"
+    },
+    {
+      "bytes": 21326,
+      "category": "multi_image",
+      "file": "en/multi-a.png",
+      "group": "en-multi",
+      "id": "en-multi-a",
+      "kind": "image",
+      "language": "en",
+      "oracle": {
+        "type": "exact_option",
+        "value": "A"
+      },
+      "prompt": "Which image contains a circle?",
+      "sha256": "f42750df36e1fdf277788d3c73ba2f01f214645407a69026240f91ccf9b844b9"
+    },
+    {
+      "bytes": 8822,
+      "category": "multi_image",
+      "file": "en/multi-b.png",
+      "group": "en-multi",
+      "id": "en-multi-b",
+      "kind": "image",
+      "language": "en",
+      "sha256": "9b43a82c2a5850df20b30840b661a194828cd895e477fae1d92366da24966a8b"
+    },
+    {
+      "bytes": 17738,
+      "category": "ocr",
+      "file": "ru/ocr.png",
+      "id": "ru-ocr",
+      "kind": "image",
+      "language": "ru",
+      "oracle": {
+        "type": "exact_text",
+        "value": "СЧЁТ № Й-17\nИТОГО 42,50 ₽\nВАРИАНТ Б"
+      },
+      "prompt": "Перепиши весь текст без изменений.",
+      "sha256": "1f253c3874c3dbbf16c2588df9d61e102cd11c9f53e1797b348af3ab80bd352d"
+    },
+    {
+      "bytes": 12688,
+      "category": "chart",
+      "file": "ru/chart.png",
+      "id": "ru-chart",
+      "kind": "image",
+      "language": "ru",
+      "oracle": {
+        "fields": {
+          "quarter": "3 квартал",
+          "value": "30"
+        },
+        "type": "exact_fields"
+      },
+      "prompt": "Какой квартал имеет наибольшее значение? Ответь кварталом и числом.",
+      "sha256": "6d35b3abbb4066d81ff1d3c9120465ad99ae65829cab0662f7263f50d603a356"
+    },
+    {
+      "bytes": 18196,
+      "category": "spatial",
+      "file": "ru/spatial.png",
+      "id": "ru-spatial",
+      "kind": "image",
+      "language": "ru",
+      "oracle": {
+        "forbidden": [
+          "слева"
+        ],
+        "required": [
+          "справа"
+        ],
+        "type": "required_forbidden"
+      },
+      "prompt": "Где синий квадрат относительно красного круга?",
+      "sha256": "fe71fd794611673626c9bb77d173563305bb437b6d3dc4de8031ade3403ab414"
+    },
+    {
+      "bytes": 25308,
+      "category": "multi_image",
+      "file": "ru/multi-a.png",
+      "group": "ru-multi",
+      "id": "ru-multi-a",
+      "kind": "image",
+      "language": "ru",
+      "oracle": {
+        "type": "exact_option",
+        "value": "А"
+      },
+      "prompt": "На каком изображении круг? Ответь буквой.",
+      "sha256": "6a794d6c193012d241ca83536a2d01cb1bf86edaac9a6899f66e1c605a40de39"
+    },
+    {
+      "bytes": 12079,
+      "category": "multi_image",
+      "file": "ru/multi-b.png",
+      "group": "ru-multi",
+      "id": "ru-multi-b",
+      "kind": "image",
+      "language": "ru",
+      "sha256": "c6fa048cd2edaae06bdc82bc6e9349a37eb7148ad95275f5f7481be671c4a49d"
+    },
+    {
+      "bytes": 27899,
+      "category": "caption",
+      "file": "shared/caption.png",
+      "id": "mixed-caption",
+      "kind": "image",
+      "language": "mixed",
+      "oracle": {
+        "forbidden": [
+          "circle",
+          "blue"
+        ],
+        "required": [
+          "yellow",
+          "triangle"
+        ],
+        "type": "required_forbidden"
+      },
+      "prompt": "Briefly describe this image / Кратко опиши изображение.",
+      "sha256": "004dfad726182064b527fa5f3024908fcf9e7f2550fdc91362bc26a3270ef177"
+    },
+    {
+      "bytes": 139,
+      "category": "alpha",
+      "file": "shared/alpha.png",
+      "id": "mixed-alpha",
+      "kind": "image",
+      "language": "mixed",
+      "oracle": {
+        "forbidden": [
+          "transparent"
+        ],
+        "required": [
+          "red",
+          "pink"
+        ],
+        "type": "required_forbidden"
+      },
+      "prompt": "Describe the visible color after alpha compositing on white.",
+      "sha256": "34ed99469af918bd5f0f26f70f6ae731d381385e84e5ded34766a087f25f4acf"
+    },
+    {
+      "bytes": 914,
+      "category": "icc",
+      "file": "shared/display-p3.png",
+      "id": "mixed-icc",
+      "kind": "image",
+      "language": "mixed",
+      "oracle": {
+        "forbidden": [
+          "red",
+          "blue"
+        ],
+        "required": [
+          "green"
+        ],
+        "type": "required_forbidden"
+      },
+      "prompt": "Name the dominant color after conversion to sRGB.",
+      "sha256": "a1ea37c89c5dd7dd7f0a3ea70fc9b531662b099ad1ac02ba7cce73256043c753"
+    },
+    {
+      "bytes": 5446,
+      "category": "exif",
+      "file": "shared/orientation.jpg",
+      "id": "mixed-orientation",
+      "kind": "image",
+      "language": "mixed",
+      "oracle": {
+        "type": "exact_boolean",
+        "value": true
+      },
+      "prompt": "Is the text upright after orientation handling?",
+      "sha256": "8f1cf375fa3038d22fc5a06dadbe8ccb712efdf61495f83a903fd7ccb5c5fe2a"
+    },
+    {
+      "bytes": 2774,
+      "category": "gif_static",
+      "file": "shared/static.gif",
+      "id": "mixed-static-gif",
+      "kind": "image",
+      "language": "mixed",
+      "oracle": {
+        "type": "exact_kind",
+        "value": "image"
+      },
+      "sha256": "2d0852dadb6c4317ef1c0b5a4ee802bd586faa20444db114c6563491bac1dac7"
+    },
+    {
+      "bytes": 17281,
+      "category": "gif_animated",
+      "file": "shared/animated.gif",
+      "id": "mixed-animated-gif",
+      "kind": "video",
+      "language": "mixed",
+      "oracle": {
+        "type": "exact_kind",
+        "value": "video"
+      },
+      "sha256": "c3322823e7754815a6305ce339ad4b3625746db4b04d3d41f6a674857e7130ee"
+    },
+    {
+      "bytes": 1839,
+      "category": "temporal",
+      "file": "en/temporal.mp4",
+      "id": "en-video",
+      "kind": "video",
+      "language": "en",
+      "oracle": {
+        "type": "exact_sequence",
+        "value": [
+          "red",
+          "blue"
+        ]
+      },
+      "prompt": "Which color appears first and which appears second?",
+      "sha256": "f648c91cdc7c02e5135c5f2985ece5d2c05c613a01640122cb83c0325fc36606"
+    },
+    {
+      "bytes": 1839,
+      "category": "temporal",
+      "file": "ru/temporal.mp4",
+      "id": "ru-video",
+      "kind": "video",
+      "language": "ru",
+      "oracle": {
+        "type": "exact_sequence",
+        "value": [
+          "красный",
+          "синий"
+        ]
+      },
+      "prompt": "Какой цвет появляется первым, а какой вторым?",
+      "sha256": "f648c91cdc7c02e5135c5f2985ece5d2c05c613a01640122cb83c0325fc36606"
+    }
+  ],
+  "generator_sha256": "c85b460361b5705370fd1f141e52153583c67095a752fec9ad3bc4d426747e3d",
+  "schema_version": "qwen35-multimodal-fixtures-v1",
+  "tools": {
+    "ffmpeg": "ffmpeg version 8.0 Copyright (c) 2000-2025 the FFmpeg developers",
+    "font_file": "Arial.ttf",
+    "font_sha256": "525979822591a3447cfc49d943d6f7683508e25543407871c0ed8fed05fd2bd9",
+    "icc_file": "Display P3.icc",
+    "icc_sha256": "0ff6958f98684c61f6bbdce1368ddeaf3873baf84545baba482e920d92a914c0",
+    "imagemagick": "Version: ImageMagick 7.1.2-8 Q16-HDRI aarch64 23412 https://imagemagick.org"
+  }
+}

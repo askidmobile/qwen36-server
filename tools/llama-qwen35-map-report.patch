@@ -1,0 +1,108 @@
+--- conversion/base.py
++++ conversion/base.py
+@@ -6,6 +6,7 @@
+ import ast
+ import logging
+ import contextlib
++import csv
+ import json
+ import os
+ import re
+@@ -188,6 +189,11 @@
+ 
+         # Mistral specific
+         self.disable_mistral_community_chat_template = disable_mistral_community_chat_template
++
++        report_path = os.environ.get("LLAMA_QWEN35_MAP_REPORT")
++        self._map_report_path = Path(report_path) if report_path else None
++        self._map_report_rows: list[dict[str, str]] = []
++        self._map_report_outputs: dict[str, str] = {}
+ 
+     @classmethod
+     def add_prefix_to_filename(cls, path: Path, prefix: str) -> Path:
+@@ -205,6 +211,7 @@
+ 
+     def index_tensors(self, remote_hf_model_id: str | None = None) -> dict[str, Callable[[], Tensor]]:
+         tensors: dict[str, Callable[[], Tensor]] = {}
++        self._source_tensor_names: dict[str, str] = {}
+ 
+         if remote_hf_model_id is not None:
+             is_safetensors = True
+@@ -215,7 +222,10 @@
+                 data_gen = lambda r=remote_tensor: LazyTorchTensor.from_remote_tensor(r)  # noqa: E731
+                 if titem := self.filter_tensors((name, data_gen)):
+                     tname, tgen = titem
++                    if tname in tensors:
++                        raise ValueError(f"duplicate filtered tensor name {tname!r}: {self._source_tensor_names[tname]!r} and {name!r}")
+                     tensors[tname] = tgen
++                    self._source_tensor_names[tname] = name
+ 
+             return tensors
+ 
+@@ -276,7 +286,10 @@
+                             data_gen = lambda data=data_torch: data  # noqa: E731
+                     if titem := self.filter_tensors((name, data_gen)):
+                         tname, tgen = titem
++                        if tname in tensors:
++                            raise ValueError(f"duplicate filtered tensor name {tname!r}: {self._source_tensor_names[tname]!r} and {name!r}")
+                         tensors[tname] = tgen
++                        self._source_tensor_names[tname] = name
+ 
+         # verify tensor name presence and identify potentially missing files
+         if len(tensor_names_from_index) > 0:
+@@ -985,7 +998,36 @@
+                 logger.info(f"{f'%-{max_name_len}s' % f'{new_name},'} {old_dtype} --> {data_qtype.name}, shape = {shape_str}")
+ 
+                 self.gguf_writer.add_tensor(new_name, data, raw_dtype=data_qtype)
++                source_name = self._source_tensor_names.get(name, name)
++                operation = "identity" if source_name == new_name else "map_or_transform"
++                self._record_map_output(source_name, new_name, operation, data, data_qtype)
++
++        self._write_map_report()
++
++    def _record_map_output(self, source_name: str, output_name: str, operation: str, data: np.ndarray, data_qtype: gguf.GGMLQuantizationType) -> None:
++        if self._map_report_path is None:
++            return
++        prior = self._map_report_outputs.get(output_name)
++        if prior is not None:
++            raise ValueError(f"duplicate physical output tensor {output_name!r}: {prior!r} and {source_name!r}")
++        self._map_report_outputs[output_name] = source_name
++        self._map_report_rows.append({
++            "source": source_name,
++            "output": output_name,
++            "operation": operation,
++            "shape": "x".join(map(str, data.shape)),
++            "dtype": data_qtype.name,
++        })
+ 
++    def _write_map_report(self) -> None:
++        if self._map_report_path is None:
++            return
++        self._map_report_path.parent.mkdir(parents=True, exist_ok=True)
++        with open(self._map_report_path, "w", newline="", encoding="utf-8") as handle:
++            writer = csv.DictWriter(handle, fieldnames=("source", "output", "operation", "shape", "dtype"))
++            writer.writeheader()
++            writer.writerows(self._map_report_rows)
++
+     def set_type(self):
+         self.gguf_writer.add_type(gguf.GGUFType.MODEL)
+ 
+--- conversion/qwen.py
++++ conversion/qwen.py
+@@ -1,6 +1,7 @@
+ from __future__ import annotations
+ 
+ import json
++import os
+ 
+ from typing import Any, Callable, Iterable, TYPE_CHECKING
+ 
+@@ -332,6 +333,8 @@
+             elif len(parts) == 3 and parts[1] in remapper:
+                 name = f"model.layers.{cls._original_block_count}.{remapper[parts[1]]}.{parts[2]}"
+         elif cls.mtp_only:
++            if os.environ.get("LLAMA_QWEN35_EXTERNAL_SHARED_MTP") == "1":
++                return None
+             keep = name in (
+                 "model.embed_tokens.weight", "model.norm.weight", "lm_head.weight",
+                 "embed_tokens.weight", "norm.weight",
