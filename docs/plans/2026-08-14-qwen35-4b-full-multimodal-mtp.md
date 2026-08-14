@@ -832,7 +832,7 @@ Profile switch deletes all pending/claimed media for current profile, unloads op
 - [x] `scripts/qwen35_artifacts.ps1` — pinned source/tool acquisition under allowed roots.
 - [x] `qwen35-batch/src/bin/qwen36_inspect.rs` — component JSON inventory.
 - [x] `qwen35-batch/tests/model_profile.rs` — tokenizer ID and inventory contract tests.
-- **Independent check:** pinned acquisition and source audit completed in `D:\Projects\yttri-inference`; report says `426 + 297 + 15 = 738`, pinned converter HEAD and patch verified, canonical Text inventory reports 426 tensors and exact tokenizer IDs. Full Text/Vision/MTP artifact generation remains Phase 10 final clean build and cannot update `current` before all gates.
+- **Independent check:** pinned full source acquisition (two safetensors shards plus configs) and source audit completed in `D:\Projects\yttri-inference`; report says `426 + 297 + 15 = 738`, pinned converter HEAD and patch verified, canonical Text inventory reports 426 tensors and exact tokenizer IDs. Full Text/Vision/MTP artifact generation remains Phase 10 final clean build and cannot update `current` before all gates.
 - deviated: Phase 1 generated and audited deterministic source/component inventories, not full staged model artifacts; heavy three-artifact conversion belongs to final reproducible build after runtime loaders exist.
 
 ### Phase 2: Profile manifest and atomic release foundation (estimate: 18 h)
