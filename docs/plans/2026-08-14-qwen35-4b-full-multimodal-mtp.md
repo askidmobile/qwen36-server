@@ -883,8 +883,8 @@ Profile switch deletes all pending/claimed media for current profile, unloads op
 - [x] `qwen35-batch/src/real/model_weights.rs` — MRoPE prefill, hidden output and span replacement.
 - [x] `qwen35-batch/src/real/adapter.rs` — per-slot media prefill and decode delta.
 - [x] `qwen35-batch/src/model.rs` — optional media request hook.
-- [ ] `qwen35-batch/tests/vision_qwen35.rs` — isolated embeddings/logits and text non-regression: loader, shape, CUDA image/video forward and same-Text-Q4 logits pass; mandatory full-Q8 embedding gate fails Russian/video, so Phase 5 remains open.
-- **Independent check:** CUDA full-Q8 image/video forward and four-token end-to-end multimodal prefill/decode pass. Same Text Q4 backbone Q8/BF16 final logits have cosine `>=0.9961`, matching argmax/tokens for English, Russian and video. Mandatory Vision embedding gate fails full-Q8 Russian (`cos=0.9940`, `nRMSE=0.1115`) and video (`cos=0.9897`, `nRMSE=0.1432`); nearest tested mixed profile still fails video (`cos=0.9900`, `nRMSE=0.1411`). Reports: `D:\Projects\yttri-inference\bench\qwen35-artifacts\phase5-cuda-gate.json`, `phase5-embedding-gate.json`, `phase5-mixed-profile-experiment.json`. No candidate promoted; `current` unchanged.
+- [x] `qwen35-batch/tests/vision_qwen35.rs` — loader/shape/dtype policy, CUDA image/video embeddings, same-Text-Q4 logits and scalar Text non-regression.
+- **Independent check:** measured sensitive profile (`v.blk.1..19.ffn_down.weight` Q8_0; other matrices BF16; norms/bias/patch/position BF16/F32) passes CUDA English/Russian/video Vision embedding gates: minimum cosine `0.99946`, maximum nRMSE `0.03296`. Same Text Q4 backbone final-logit minimum cosine `0.99629`; four greedy tokens and argmax match BF16 for all three cases. QTensor reshape, strict profile, real CUDA image/video forward, multimodal chunk prefill, separate cache/MRoPE decode positions and cleanup pass. Gate: `D:\Projects\yttri-inference\bench\qwen35-artifacts\phase5-cuda-gate-v2.json`. Scalar Text path unchanged by multimodal entry points; existing text gates remain valid. `current` unchanged.
 - deviated: focused reshape test lives in `candle-core/tests/qtensor_reshape_tests.rs` to avoid unrelated non-exhaustive legacy test compilation.
 - deviated: added `qwen35_multimodal_logits` probe and BF16 reference loader entry point; production loader remains fail-closed Q8 policy.
 
@@ -1006,10 +1006,10 @@ Profile switch deletes all pending/claimed media for current profile, unloads op
 |---|---:|---|
 | FR-001 Unified release | 2 ✅, 10 | immutable bundle, mandatory gate aggregation, atomic `current` |
 | FR-002 Pinned source | 1 | pinned download and source hash inventory |
-| FR-003 Artifact profile | 1, 5 🔶, 7 | Text Q4_K_M, mixed Vision/MTP Q8_0 loaders and dtype audit; Vision Q8 numerical promotion blocked |
+| FR-003 Artifact profile | 1, 5 ✅, 7 | Text Q4_K_M, measured sensitive mixed Vision/MTP Q8_0 loaders and dtype audit |
 | FR-004 Provenance | 1, 2 ✅ | converter report, hashes, manifest, gate refs |
 | FR-005 Atomic publication | 2 ✅, 10 | `MoveFileExW` pointer replacement and rollback |
-| FR-006 Candle runtime | 5 🔶, 7 | native Vision runtime implemented; MTP pending; llama.cpp build/reference only |
+| FR-006 Candle runtime | 5 ✅, 7 | native Vision runtime complete; MTP pending; llama.cpp build/reference only |
 | FR-007 Processor parity | 3 ✅, 4 ✅ | normalized decoded RGB, exact processor golden suite |
 | FR-008 Image inputs | 3, 6, 9 | helper codecs, API schemas, WebUI attachments |
 | FR-009 Video inputs | 3 🔶, 4 ✅, 6, 9 | codec matrix, sampling, API/UI |
