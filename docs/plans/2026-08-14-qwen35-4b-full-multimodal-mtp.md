@@ -935,8 +935,9 @@ Profile switch deletes all pending/claimed media for current profile, unloads op
 
 ### Phase 9: Accessible multimodal WebUI (estimate: 16 h)
 
-- [ ] `web/index.html` — memory-only attachments, upload/re-upload, previews, URL, drop/paste, status and usage.
-- [ ] `tests/webui_accessibility.md` — keyboard and screen-reader acceptance script.
+- [x] `web/index.html` — memory-only attachments, upload/re-upload, previews, URL, drop/paste, status and usage.
+- [x] `tests/webui_accessibility.md` — keyboard and screen-reader acceptance script.
+- **Independent check:** keyboard-only flow can add/remove/send image and video; screen reader announces progress/errors; follow-up reuploads bytes; reload stores only `[Изображение]`/`[Видео]`.
 - [ ] `tests/webui_state_test.js` — persistence boundary self-check where available.
 - **Independent check:** keyboard-only flow can add/remove/send image and video; screen reader announces progress/errors; follow-up reuploads bytes; reload stores only `[Изображение]`/`[Видео]`.
 
@@ -1037,7 +1038,7 @@ Profile switch deletes all pending/claimed media for current profile, unloads op
 | FR-027 Streaming usage | 2, 6 ✅ | unchanged deltas and final MediaUsage |
 | FR-028 Capability metadata | 2 ✅, 8, 10 | manifest truth and component state |
 | FR-029 Capability fallback | 2 ✅, 6, 8 | text-only synthetic profile and pre-inference rejection |
-| FR-030 Stateless WebUI | 9 | tab-memory bytes, persistent placeholders, accessibility |
+| FR-030 Stateless WebUI | 9 ✅ | tab-memory bytes, persistent placeholders, accessibility |
 | FR-031 Text output | 2, 6 ✅ | media only as input; existing text output protocol |
 | FR-032 Offline runtime | 1, 2, 10 | complete runtime bundle and offline gate |
 | FR-033 Workspace isolation | 1, 10 | path allowlist and Windows scripts |
