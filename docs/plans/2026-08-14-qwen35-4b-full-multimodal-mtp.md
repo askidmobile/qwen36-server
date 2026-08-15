@@ -876,15 +876,17 @@ Profile switch deletes all pending/claimed media for current profile, unloads op
 
 ### Phase 5: Vision Q8 runtime and multimodal prefill (estimate: 40 h)
 
-- [ ] `candle-core/src/quantized/mod.rs` — checked QTensor reshape.
-- [ ] `candle-core/tests/quantized_tests.rs` — Q8 reshape/matmul self-check.
-- [ ] `qwen35-batch/src/real/vision.rs` — mixed Q8 Vision model.
-- [ ] `qwen35-batch/src/real/model_profile.rs` — Vision artifact validator.
-- [ ] `qwen35-batch/src/real/model_weights.rs` — MRoPE prefill, hidden output and span replacement.
-- [ ] `qwen35-batch/src/real/adapter.rs` — per-slot media prefill and decode delta.
-- [ ] `qwen35-batch/src/model.rs` — optional media request hook.
-- [ ] `qwen35-batch/tests/vision_qwen35.rs` — isolated embeddings/logits and text non-regression.
-- **Independent check:** BF16 Vision and Q8 Vision with same Text Q4 backbone pass cosine/nRMSE/logit/margin gates; scalar Text full logits remain unchanged; image and video prompt produce valid text on CUDA.
+- [x] `candle-core/src/quantized/mod.rs` — checked QTensor reshape.
+- [x] `candle-core/tests/qtensor_reshape_tests.rs` — Q8 reshape/matmul self-check.
+- [x] `qwen35-batch/src/real/vision.rs` — mixed Q8 Vision model.
+- [x] `qwen35-batch/src/real/model_profile.rs` — Vision artifact validator.
+- [x] `qwen35-batch/src/real/model_weights.rs` — MRoPE prefill, hidden output and span replacement.
+- [x] `qwen35-batch/src/real/adapter.rs` — per-slot media prefill and decode delta.
+- [x] `qwen35-batch/src/model.rs` — optional media request hook.
+- [ ] `qwen35-batch/tests/vision_qwen35.rs` — isolated embeddings/logits and text non-regression: loader, shape, CUDA image/video forward and same-Text-Q4 logits pass; mandatory full-Q8 embedding gate fails Russian/video, so Phase 5 remains open.
+- **Independent check:** CUDA full-Q8 image/video forward and four-token end-to-end multimodal prefill/decode pass. Same Text Q4 backbone Q8/BF16 final logits have cosine `>=0.9961`, matching argmax/tokens for English, Russian and video. Mandatory Vision embedding gate fails full-Q8 Russian (`cos=0.9940`, `nRMSE=0.1115`) and video (`cos=0.9897`, `nRMSE=0.1432`); nearest tested mixed profile still fails video (`cos=0.9900`, `nRMSE=0.1411`). Reports: `D:\Projects\yttri-inference\bench\qwen35-artifacts\phase5-cuda-gate.json`, `phase5-embedding-gate.json`, `phase5-mixed-profile-experiment.json`. No candidate promoted; `current` unchanged.
+- deviated: focused reshape test lives in `candle-core/tests/qtensor_reshape_tests.rs` to avoid unrelated non-exhaustive legacy test compilation.
+- deviated: added `qwen35_multimodal_logits` probe and BF16 reference loader entry point; production loader remains fail-closed Q8 policy.
 
 ### Phase 6: Three APIs, usage and cancellation (estimate: 24 h)
 
@@ -1004,10 +1006,10 @@ Profile switch deletes all pending/claimed media for current profile, unloads op
 |---|---:|---|
 | FR-001 Unified release | 2 ✅, 10 | immutable bundle, mandatory gate aggregation, atomic `current` |
 | FR-002 Pinned source | 1 | pinned download and source hash inventory |
-| FR-003 Artifact profile | 1, 5, 7 | Text Q4_K_M, mixed Vision/MTP Q8_0 loaders and dtype audit |
+| FR-003 Artifact profile | 1, 5 🔶, 7 | Text Q4_K_M, mixed Vision/MTP Q8_0 loaders and dtype audit; Vision Q8 numerical promotion blocked |
 | FR-004 Provenance | 1, 2 ✅ | converter report, hashes, manifest, gate refs |
 | FR-005 Atomic publication | 2 ✅, 10 | `MoveFileExW` pointer replacement and rollback |
-| FR-006 Candle runtime | 5, 7 | native Vision/MTP in `qwen35-batch`; llama.cpp build/reference only |
+| FR-006 Candle runtime | 5 🔶, 7 | native Vision runtime implemented; MTP pending; llama.cpp build/reference only |
 | FR-007 Processor parity | 3 ✅, 4 ✅ | normalized decoded RGB, exact processor golden suite |
 | FR-008 Image inputs | 3, 6, 9 | helper codecs, API schemas, WebUI attachments |
 | FR-009 Video inputs | 3 🔶, 4 ✅, 6, 9 | codec matrix, sampling, API/UI |
@@ -1039,7 +1041,7 @@ Profile switch deletes all pending/claimed media for current profile, unloads op
 | FR-035 Audio exclusion | 3 ✅, 6 | video-only mapping and `audio_processed=false` |
 | FR-036 Objective media suite | 1 ✅, 4 ✅, 10 | hashed English/Russian fixtures and rubrics |
 | FR-037 Staged validation | 1–10 | independent check per phase, one final promotion |
-| FR-038 mRoPE/token parity | 4 ✅, 5 | marker/count/position gate and separate Text path |
+| FR-038 mRoPE/token parity | 4 ✅, 5 ✅ | marker/count/position gate, separate cache/RoPE decode positions and scalar Text path |
 | FR-039 Bounded decoding | 3 ✅, 4 🔶 | body/temp/helper/pixel/frame/CPU/RAM/time reservations |
 | FR-040 Metal functional support | 5, 7, 10 | Metal Vision/MTP functional path after CUDA P0 |
 | FR-041 Profile extensibility | 2 ✅, 10 | manifest-driven profiles and public schema stability |
