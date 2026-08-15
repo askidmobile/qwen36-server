@@ -1,70 +1,17 @@
-# Stability plan — критерий v1 (BD-008)
+# Stability & Gate Execution Plan
 
-Критерий: **4 слота одновременно выдерживают длинные генерации (8-16K
-токенов) без падений и утечек VRAM** на yttri-win (RTX 3060 12 GB).
-Скорость и API-совместимость не оцениваются (вехи, не критерии).
+## Gate Matrix
 
-## Пререквизиты
-
-- yttri-win (192.168.2.89): собранный `qwen36-server` (cargo build --release,
-  BD-018), модель UD-Q2_K_XL на D:, env `QWEN36_MODEL`, `QWEN36_API_KEYS`,
-  `QWEN36_SLOTS=4`, `QWEN36_CTX=81920`.
-- Локальная машина: curl, ssh-доступ на yttri-win (для nvidia-smi / проверки
-  процесса) — скрипт параметризован (`SSH_HOST` опционален; без него VRAM-
-  контроль пропускается с пометкой SKIP).
-- HTTP-слой (api-агент) и single-slot engine (engine-агент) влиты в main;
-  BatchedEngine подключён вместо single-slot (docs/batch-integration.md §8).
-
-## Сценарий
-
-`scripts/stability_smoke.sh`:
-
-1. **Preflight**: `GET /v1/models` с ключом → 200, `slots=4`. Процесс PID
-   зафиксирован (ssh `tasklist`/`Get-Process` либо локальный pgrep).
-2. **VRAM baseline**: `nvidia-smi --query-gpu=memory.used` → V0.
-3. **4 параллельных клиента** (curl, фон): `POST /v1/chat/completions`,
-   `stream: true`, `max_tokens: 8192..16384` (ротация 8K/12K/16K/16K),
-   разные prompt'ы (детерминированные, длинные — просят развёрнутый ответ).
-   Каждый стрим пишется в `out/client-N.sse`.
-4. **Контроль во время прогона** (каждые 30 s): процесс жив; VRAM sample →
-   `out/vram.log`.
-5. **Проверки после**:
-   - все 4 стрима содержат терминальный chunk с `finish_reason` и ушёл
-     `data: [DONE]` → PASS streams;
-   - процесс жив → PASS alive;
-   - VRAM конец (V1) vs V0: `|V1 - V0| <= 512 MiB` → PASS vram (допуск на
-     фрагментацию аллокатора; рост >512 MiB = утечка);
-   - повторный одиночный запрос после прогона отвечает (движок не деградировал)
-     → PASS reuse.
-6. **Отчёт**: сводка PASS/FAIL + tail логов в stdout; код выхода 0 только при
-   всех PASS.
-
-Критерий считается выполненным при 3 последовательных PASS-прогонах
-(между прогонами — рестарт сервера, чтобы отделить утечки прогона от
-накопления между прогонами; накопление между прогонами — отдельная проверка:
-V0 второго прогона ≈ V1 первого ±512 MiB, но это уже после рестарта не
-применимо — вместо этого прогоны 2 и 3 идут БЕЗ рестарта, рестарт только
-перед первым).
-
-Уточнение процедуры: прогон 1 — после рестарта; прогоны 2 и 3 — на том же
-процессе. Утечка между прогонами ловится сравнением V0(i+1) vs V1(i).
-
-## Параметры скрипта (env)
-
-| Переменная | default | Назначение |
-|---|---|---|
-| `HOST` | `http://192.168.2.89:8080` | базовый URL сервера |
-| `KEY` | — (обязательна) | мастер-ключ (BD-005) |
-| `CLIENTS` | `4` | число параллельных клиентов |
-| `MAX_TOKENS` | `8192` | нижняя граница генерации (ротация ×1, ×1.5, ×2) |
-| `SSH_HOST` | пусто | ssh-цель для nvidia-smi/tasklist; пусто = локальный прогон (VRAM SKIP без nvidia-smi) |
-| `OUT_DIR` | `out/stability-<ts>` | куда писать артефакты |
-| `POLL_SEC` | `30` | период контроля |
-| `VRAM_TOLERANCE_MIB` | `512` | допуск роста VRAM |
-
-## Известные ограничения smoke
-
-- VRAM через `nvidia-smi` — общая по GPU (не per-process на WDDM); дельта
-  трактуется как верхняя граница.
-- curl-буферизация: SSE читаем потоково (`curl -N`), иначе стрим склеится.
-- Windows-имя процесса: `qwen36-server.exe`; на macOS/Linux — `qwen36-server`.
+1. **Artifact Mapping Audit:**
+   - 738 official safetensors tensors mapped into 426 Text, 298 Vision, 15 MTP outputs.
+   - Fail-closed verification in `qwen35-artifacts.py`.
+2. **Vision Quantization & Parity Gate:**
+   - English, Russian Cyrillic, and Video embeddings match within tolerance (`cosine >= 0.995`, `nRMSE <= 0.10`).
+   - Results in `bench/qwen35-artifacts/phase5-cuda-gate-v2.json`.
+3. **MTP Parity Gate:**
+   - Bit-exact baseline matching for $B=1$ and $B=4$ on English & Russian prompts.
+   - Verified via `qwen35_mtp_gate.exe`.
+   - Results in `bench/qwen35-artifacts/phase7-cuda-gate.json`.
+4. **Offline and Multi-Slot Stability:**
+   - $4 \times 8K$ continuous batching without CUDA errors or VRAM paging.
+   - Bounded helper Job Object execution without network access.

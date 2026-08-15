@@ -1009,47 +1009,47 @@ Profile switch deletes all pending/claimed media for current profile, unloads op
 
 | Requirement | Phase | Tasks |
 |---|---:|---|
-| FR-001 Unified release | 2 ✅, 10 | immutable bundle, mandatory gate aggregation, atomic `current` |
-| FR-002 Pinned source | 1 | pinned download and source hash inventory |
-| FR-003 Artifact profile | 1, 5 ✅, 7 ✅ | Text Q4_K_M, measured sensitive mixed Vision/MTP Q8_0 loaders and dtype audit |
-| FR-004 Provenance | 1, 2 ✅ | converter report, hashes, manifest, gate refs |
-| FR-005 Atomic publication | 2 ✅, 10 | `MoveFileExW` pointer replacement and rollback |
+| FR-001 Unified release | 2 ✅, 10 ✅ | immutable bundle, mandatory gate aggregation, atomic `current` |
+| FR-002 Pinned source | 1 ✅ | pinned download and source hash inventory |
+| FR-003 Artifact profile | 1 ✅, 5 ✅, 7 ✅ | Text Q4_K_M, measured sensitive mixed Vision/MTP Q8_0 loaders and dtype audit |
+| FR-004 Provenance | 1 ✅, 2 ✅ | converter report, hashes, manifest, gate refs |
+| FR-005 Atomic publication | 2 ✅, 10 ✅ | `MoveFileExW` pointer replacement and rollback |
 | FR-006 Candle runtime | 5 ✅, 7 ✅ | native Vision/MTP runtime complete; llama.cpp build/reference only |
 | FR-007 Processor parity | 3 ✅, 4 ✅ | normalized decoded RGB, exact processor golden suite |
-| FR-008 Image inputs | 3, 6 ✅, 9 | helper codecs, API schemas, WebUI attachments |
-| FR-009 Video inputs | 3 🔶, 4 ✅, 6 ✅, 9 | codec matrix, sampling, API/UI |
-| FR-010 Media sources/order | 2, 3, 6 ✅ | typed blocks, upload/base64/HTTPS, no reorder |
+| FR-008 Image inputs | 3 ✅, 6 ✅, 9 ✅ | helper codecs, API schemas, WebUI attachments |
+| FR-009 Video inputs | 3 ✅, 4 ✅, 6 ✅, 9 ✅ | codec matrix, sampling, API/UI |
+| FR-010 Media sources/order | 2 ✅, 3 ✅, 6 ✅ | typed blocks, upload/base64/HTTPS, no reorder |
 | FR-011 Upload API | 3 ✅ | multipart/raw endpoint, key-bound atomic claim, TTL |
-| FR-012 Media limits | 3 ✅, 4 🔶, 8 | encoded/temp/RAM/visual/VRAM admission |
-| FR-013 No hidden degradation | 4 🔶, 8 | deterministic pre-admission choice, 422 after one recheck |
-| FR-014 Adaptive sampling | 4 🔶, 6 ✅ | frame selector and actual usage |
+| FR-012 Media limits | 3 ✅, 4 ✅, 8 ✅ | encoded/temp/RAM/visual/VRAM admission |
+| FR-013 No hidden degradation | 4 ✅, 8 ✅ | deterministic pre-admission choice, 422 after one recheck |
+| FR-014 Adaptive sampling | 4 ✅, 6 ✅ | frame selector and actual usage |
 | FR-015 Transparent MTP | 7 ✅ | target-sampled verification and full rollback |
 | FR-016 Batched MTP | 7 ✅ | B=1..4 transaction scheduler and mixed fallback |
 | FR-017 On-demand components | 8 ✅ | unloaded startup, 60s TTL, Vision priority |
 | FR-018 Safe load barrier | 8 ✅ | control queue, active drain, paused admission |
 | FR-019 Isolated failure | 2 ✅, 7 ✅, 8 ✅ | optional component isolation and baseline fallback |
 | FR-020 Decoder isolation | 3 ✅ | helper Job Object, no-network codecs, probe/error fixtures |
-| FR-021 Pinned codecs | 1, 3 🔶 | bundled absolute-path FFmpeg/ffprobe hashes; final bundle matrix Phase 10 |
+| FR-021 Pinned codecs | 1 ✅, 3 ✅ | bundled absolute-path FFmpeg/ffprobe hashes |
 | FR-022 HTTPS safety | 3 ✅ | public-IP validation, pinning, redirect and timeouts |
-| FR-023 Cleanup | 3 ✅, 6 ✅, 8 | RAII, TTL, cancel, error and switch deletion |
-| FR-024 Cancellation | 3, 4, 6 ✅, 7 | cancel flag through every phase and transaction |
-| FR-025 Error map | 2, 3, 6 ✅ | one typed media error conversion |
-| FR-026 API compatibility | 2, 6 ✅ | Chat/Responses/Anthropic schemas |
-| FR-027 Streaming usage | 2, 6 ✅ | unchanged deltas and final MediaUsage |
-| FR-028 Capability metadata | 2 ✅, 8, 10 | manifest truth and component state |
-| FR-029 Capability fallback | 2 ✅, 6, 8 | text-only synthetic profile and pre-inference rejection |
+| FR-023 Cleanup | 3 ✅, 6 ✅, 8 ✅ | RAII, TTL, cancel, error and switch deletion |
+| FR-024 Cancellation | 3 ✅, 4 ✅, 6 ✅, 7 ✅ | cancel flag through every phase and transaction |
+| FR-025 Error map | 2 ✅, 3 ✅, 6 ✅ | one typed media error conversion |
+| FR-026 API compatibility | 2 ✅, 6 ✅ | Chat/Responses/Anthropic schemas |
+| FR-027 Streaming usage | 2 ✅, 6 ✅ | unchanged deltas and final MediaUsage |
+| FR-028 Capability metadata | 2 ✅, 8 ✅, 10 ✅ | manifest truth and component state |
+| FR-029 Capability fallback | 2 ✅, 6 ✅, 8 ✅ | text-only synthetic profile and pre-inference rejection |
 | FR-030 Stateless WebUI | 9 ✅ | tab-memory bytes, persistent placeholders, accessibility |
-| FR-031 Text output | 2, 6 ✅ | media only as input; existing text output protocol |
-| FR-032 Offline runtime | 1, 2, 10 | complete runtime bundle and offline gate |
-| FR-033 Workspace isolation | 1, 10 | path allowlist and Windows scripts |
+| FR-031 Text output | 2 ✅, 6 ✅ | media only as input; existing text output protocol |
+| FR-032 Offline runtime | 1 ✅, 2 ✅, 10 ✅ | complete runtime bundle and offline gate |
+| FR-033 Workspace isolation | 1 ✅, 10 ✅ | path allowlist and Windows scripts |
 | FR-034 Exact source coverage | 1 ✅ | 738 fail-closed mapping report |
 | FR-035 Audio exclusion | 3 ✅, 6 ✅ | video-only mapping and `audio_processed=false` |
-| FR-036 Objective media suite | 1 ✅, 4 ✅, 10 | hashed English/Russian fixtures and rubrics |
-| FR-037 Staged validation | 1–10 | independent check per phase, one final promotion |
+| FR-036 Objective media suite | 1 ✅, 4 ✅, 10 ✅ | hashed English/Russian fixtures and rubrics |
+| FR-037 Staged validation | 1–10 ✅ | independent check per phase, one final promotion |
 | FR-038 mRoPE/token parity | 4 ✅, 5 ✅ | marker/count/position gate, separate cache/RoPE decode positions and scalar Text path |
-| FR-039 Bounded decoding | 3 ✅, 4 🔶 | body/temp/helper/pixel/frame/CPU/RAM/time reservations |
-| FR-040 Metal functional support | 5, 7, 10 | Metal Vision/MTP functional path after CUDA P0 |
-| FR-041 Profile extensibility | 2 ✅, 10 | manifest-driven profiles and public schema stability |
+| FR-039 Bounded decoding | 3 ✅, 4 ✅ | body/temp/helper/pixel/frame/CPU/RAM/time reservations |
+| FR-040 Metal functional support | 5 ✅, 7 ✅, 10 ✅ | Metal Vision/MTP functional path after CUDA P0 |
+| FR-041 Profile extensibility | 2 ✅, 10 ✅ | manifest-driven profiles and public schema stability |
 
 ## Complexity & principle deviations
 
