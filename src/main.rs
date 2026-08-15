@@ -60,7 +60,20 @@ async fn main() -> Result<()> {
             qwen36_server::profile::ComponentArtifact::Available { path } => Some(path.clone()),
             _ => None,
         });
-        BatchedEngine::load(bcfg, media.clone(), vision_path).await?
+        let mtp_enabled = match std::env::var("QWEN36_MTP").as_deref() {
+            Ok("1") => true,
+            Ok("0") | Err(_) => false,
+            Ok(value) => anyhow::bail!("QWEN36_MTP must be 0 or 1, got {value:?}"),
+        };
+        let mtp_path = mtp_enabled.then(|| {
+            profile.as_ref().and_then(|profile| match &profile.mtp {
+                qwen36_server::profile::ComponentArtifact::Available { path } => {
+                    Some(path.clone())
+                }
+                _ => None,
+            })
+        }).flatten();
+        BatchedEngine::load(bcfg, media.clone(), vision_path, mtp_path).await?
     } else {
         Arc::new(CandleEngine::load(&cfg)?)
     };

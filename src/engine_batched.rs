@@ -15,7 +15,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail};
-use qwen35_batch::model::{MultimodalPrefill, Sampler as ForkSampler};
+use qwen35_batch::model::{
+    MultimodalPrefill, Sampler as ForkSampler, SamplerCheckpoint,
+};
 use qwen35_batch::real::multimodal::{build_position_plan, MediaKind as PackedMediaKind};
 use qwen35_batch::real::tokenizer::{self, ChatContent, ChatMsg, MultimodalChatMsg};
 use qwen35_batch::real::Qwen35BatchAdapter;
@@ -132,6 +134,7 @@ impl BatchedEngine {
         cfg: BatchConfig,
         media: Arc<crate::media::MediaService>,
         vision_path: Option<std::path::PathBuf>,
+        mtp_path: Option<std::path::PathBuf>,
     ) -> anyhow::Result<Arc<Self>> {
         // Форк имеет DECODE_BATCH_CAPACITY=4: больше слотов → panic при seed_slot_batched.
         if cfg.slots > MAX_SLOTS {
@@ -155,11 +158,15 @@ impl BatchedEngine {
             let p = cfg.model_path.clone();
             let slots = cfg.slots;
             let vision_path = vision_path.clone();
+            let mtp_path = mtp_path.clone();
             move || {
                 let mut adapter =
                     Qwen35BatchAdapter::load(std::path::Path::new(&p), adapter_device, slots)?;
                 if let Some(path) = vision_path {
                     adapter.load_vision(&path)?;
+                }
+                if let Some(path) = mtp_path {
+                    adapter.load_mtp(&path)?;
                 }
                 Ok::<_, anyhow::Error>(adapter)
             }
@@ -828,7 +835,18 @@ fn finish_slot(
                 completion_tokens: b.completion_tokens,
                 truncated,
                 media: b.usage.clone(),
-                ..Default::default()
+                mtp: sched
+                    .speculative_metrics(idx)
+                    .map(|metrics| crate::engine_types::MtpUsage {
+                        enabled: metrics.enabled,
+                        used: metrics.used,
+                        drafted: metrics.drafted,
+                        accepted: metrics.accepted,
+                        fallback_category: metrics
+                            .fallback
+                            .map(|category| category.as_str().to_string()),
+                    })
+                    .unwrap_or_default(),
             },
         });
     } else {
@@ -879,6 +897,32 @@ struct IndexedSampler {
 impl ForkSampler for IndexedSampler {
     fn sample(&mut self, _logits: &[f32]) -> u32 {
         0 // не используется — scheduler всегда sample_indexed
+    }
+
+    fn checkpoint(&self, slot_idx: usize) -> SamplerCheckpoint {
+        let checkpoint = self
+            .params
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&slot_idx)
+            .cloned();
+        Box::new(checkpoint)
+    }
+
+    fn restore(&mut self, slot_idx: usize, checkpoint: SamplerCheckpoint) -> anyhow::Result<()> {
+        let checkpoint = checkpoint
+            .downcast::<Option<(GenParams, Rng)>>()
+            .map_err(|_| anyhow!("sampler checkpoint type mismatch"))?;
+        let mut params = self.params.lock().unwrap_or_else(|error| error.into_inner());
+        match *checkpoint {
+            Some(state) => {
+                params.insert(slot_idx, state);
+            }
+            None => {
+                params.remove(&slot_idx);
+            }
+        }
+        Ok(())
     }
 
     fn sample_indexed(&mut self, slot_idx: usize, generated: &[u32], logits: &[f32]) -> u32 {
@@ -938,7 +982,7 @@ mod tests {
     #[tokio::test]
     async fn load_rejects_slots_above_fork_capacity_before_model_load() {
         let media = Arc::new(crate::media::MediaService::new(Default::default()).unwrap());
-        let err = match BatchedEngine::load(test_config(MAX_SLOTS + 1, 0), media, None).await {
+        let err = match BatchedEngine::load(test_config(MAX_SLOTS + 1, 0), media, None, None).await {
             Ok(_) => panic!("slots above capacity must be rejected"),
             Err(err) => err.to_string(),
         };
@@ -948,7 +992,7 @@ mod tests {
     #[tokio::test]
     async fn load_rejects_prefix_cache_before_model_load() {
         let media = Arc::new(crate::media::MediaService::new(Default::default()).unwrap());
-        let err = match BatchedEngine::load(test_config(1, 1), media, None).await {
+        let err = match BatchedEngine::load(test_config(1, 1), media, None, None).await {
             Ok(_) => panic!("prefix cache must be rejected"),
             Err(err) => err.to_string(),
         };

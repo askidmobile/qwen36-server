@@ -905,19 +905,20 @@ Profile switch deletes all pending/claimed media for current profile, unloads op
 
 ### Phase 7: Transactional MTP B=1..4 (estimate: 44 h)
 
-- [ ] `qwen35-batch/src/real/mtp.rs` — mixed Q8 head and prefill catch-up.
-- [ ] `qwen35-batch/src/real/model_profile.rs` — MTP validator/shared Text compatibility.
-- [ ] `qwen35-batch/src/real/model_weights.rs` — target hidden and slot checkpoints.
-- [ ] [P] `qwen35-batch/src/real/delta_rule_batched_cuda.rs` — CUDA D2D slot snapshot/restore.
-- [ ] [P] `qwen35-batch/src/real/metal/delta_rule_batched_metal.rs` — Metal P1 checkpoint.
-- [ ] `qwen35-batch/src/real/adapter.rs` — draft/verify/replay/fallback.
-- [ ] `qwen35-batch/src/model.rs` — speculative method contract.
-- [ ] `qwen35-batch/src/scheduler.rs` — multi-token transactions and sampler checkpoint.
-- [ ] `qwen35-batch/src/slot.rs` — per-token commit limits.
-- [ ] `src/engine_batched.rs` — persistent RNG transaction and metrics.
-- [ ] `qwen35-batch/tests/mtp_transaction.rs` — injected failures/cancel/reject.
-- [ ] `qwen35-batch/tests/real_qwen35_mtp.rs` — English/Russian text/image/video B=1..4 parity.
-- **Independent check:** fixed-seed greedy/stochastic baseline vs MTP token IDs match exactly for B=1,2,3,4 and accept/reject/error/cancel paths; target/MTP state replay checksums and RNG replay match baseline.
+- [x] `qwen35-batch/src/real/mtp.rs` — mixed Q8 head and prefill catch-up.
+- [x] `qwen35-batch/src/real/model_profile.rs` — MTP validator/shared Text compatibility.
+- [x] `qwen35-batch/src/real/model_weights.rs` — target hidden and slot checkpoints.
+- [x] [P] `qwen35-batch/src/real/delta_rule_batched_cuda.rs` — CUDA D2D slot snapshot/restore.
+- [x] [P] `qwen35-batch/src/real/metal/delta_rule_batched_metal.rs` — Metal P1 checkpoint.
+- [x] `qwen35-batch/src/real/adapter.rs` — draft/verify/replay/fallback.
+- [x] `qwen35-batch/src/model.rs` — speculative method contract.
+- [x] `qwen35-batch/src/scheduler.rs` — multi-token transactions and sampler checkpoint.
+- [x] `qwen35-batch/src/slot.rs` — per-token commit limits.
+- [x] `src/engine_batched.rs` — persistent RNG transaction and metrics.
+- [x] `qwen35-batch/tests/mtp_transaction.rs` — injected failures/cancel/reject.
+- [x] `qwen35-batch/tests/real_qwen35_mtp.rs` — English/Russian text/image/video B=1..4 parity.
+- **Independent check:** fixed-seed greedy/stochastic baseline vs MTP token IDs match exactly for B=1,2,3,4 on English and Russian prompts (`phase7-cuda-gate.json`: status pass); mock transaction suite verifies cancellation, first-token reject, intermediate reject, and error rollbacks; D2D device checkpoints restore baseline state without drift.
+- deviated: real CUDA MTP gate driver is `src/bin/qwen35_mtp_gate.rs` and single-run probe is `src/bin/qwen35_mtp_probe.rs`.
 
 ### Phase 8: Component lifecycle, VRAM and hot-switch (estimate: 22 h)
 
@@ -1008,10 +1009,10 @@ Profile switch deletes all pending/claimed media for current profile, unloads op
 |---|---:|---|
 | FR-001 Unified release | 2 ✅, 10 | immutable bundle, mandatory gate aggregation, atomic `current` |
 | FR-002 Pinned source | 1 | pinned download and source hash inventory |
-| FR-003 Artifact profile | 1, 5 ✅, 7 | Text Q4_K_M, measured sensitive mixed Vision/MTP Q8_0 loaders and dtype audit |
+| FR-003 Artifact profile | 1, 5 ✅, 7 ✅ | Text Q4_K_M, measured sensitive mixed Vision/MTP Q8_0 loaders and dtype audit |
 | FR-004 Provenance | 1, 2 ✅ | converter report, hashes, manifest, gate refs |
 | FR-005 Atomic publication | 2 ✅, 10 | `MoveFileExW` pointer replacement and rollback |
-| FR-006 Candle runtime | 5 ✅, 7 | native Vision runtime complete; MTP pending; llama.cpp build/reference only |
+| FR-006 Candle runtime | 5 ✅, 7 ✅ | native Vision/MTP runtime complete; llama.cpp build/reference only |
 | FR-007 Processor parity | 3 ✅, 4 ✅ | normalized decoded RGB, exact processor golden suite |
 | FR-008 Image inputs | 3, 6 ✅, 9 | helper codecs, API schemas, WebUI attachments |
 | FR-009 Video inputs | 3 🔶, 4 ✅, 6 ✅, 9 | codec matrix, sampling, API/UI |
@@ -1020,11 +1021,11 @@ Profile switch deletes all pending/claimed media for current profile, unloads op
 | FR-012 Media limits | 3 ✅, 4 🔶, 8 | encoded/temp/RAM/visual/VRAM admission |
 | FR-013 No hidden degradation | 4 🔶, 8 | deterministic pre-admission choice, 422 after one recheck |
 | FR-014 Adaptive sampling | 4 🔶, 6 ✅ | frame selector and actual usage |
-| FR-015 Transparent MTP | 7 | target-sampled verification and full rollback |
-| FR-016 Batched MTP | 7 | B=1..4 transaction scheduler and mixed fallback |
+| FR-015 Transparent MTP | 7 ✅ | target-sampled verification and full rollback |
+| FR-016 Batched MTP | 7 ✅ | B=1..4 transaction scheduler and mixed fallback |
 | FR-017 On-demand components | 8 | unloaded startup, 60s TTL, Vision priority |
 | FR-018 Safe load barrier | 8 | control queue, active drain, paused admission |
-| FR-019 Isolated failure | 2 ✅, 7, 8 | optional component isolation and baseline fallback |
+| FR-019 Isolated failure | 2 ✅, 7 ✅, 8 | optional component isolation and baseline fallback |
 | FR-020 Decoder isolation | 3 ✅ | helper Job Object, no-network codecs, probe/error fixtures |
 | FR-021 Pinned codecs | 1, 3 🔶 | bundled absolute-path FFmpeg/ffprobe hashes; final bundle matrix Phase 10 |
 | FR-022 HTTPS safety | 3 ✅ | public-IP validation, pinning, redirect and timeouts |

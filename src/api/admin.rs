@@ -369,6 +369,7 @@ async fn do_switch(
             },
             state.media.clone(),
             None,
+            None,
         )
         .await?
     } else {

@@ -42,6 +42,7 @@ async fn real_cuda_image_runs_through_media_scheduler_and_usage() -> anyhow::Res
         },
         media,
         Some(PathBuf::from(vision)),
+        None,
     )
     .await?;
     let mut rx = engine
