@@ -702,11 +702,135 @@ $("newchat").onclick = () => {
   renderChatList(); renderMessages();
   $("input").focus();
 };
-$("apikey").addEventListener("change", () => { store.key = $("apikey").value.trim(); loadModels(); });
 $("keysave").onclick = () => {
   store.key = $("keyformkey").value.trim();
   $("apikey").value = store.key;
   loadModels();
+  loadAvailableModels();
+};
+
+$("apikey").addEventListener("change", () => {
+  store.key = $("apikey").value.trim();
+  loadModels();
+  loadAvailableModels();
+});
+
+let modelSwitching = false;
+let ctxMatrix = null;
+const CTX_RUNGS = [2048, 4096, 6144, 8192, 12288, 16384, 24576, 32768, 49152, 65536, 81920, 98304, 131072, 196608, 262144];
+
+async function loadCtxMatrix() {
+  ctxMatrix = null;
+  const path = $("modelsel").value;
+  if (!path) return;
+  try {
+    const r = await api("/v1/ctx_matrix?path=" + encodeURIComponent(path));
+    if (r.ok) ctxMatrix = await r.json();
+  } catch (e) {}
+  rebuildCtxOptions();
+}
+
+function rebuildCtxOptions() {
+  const slots = parseInt($("slotssel").value, 10) || 4;
+  const sel = $("ctxsel");
+  sel.innerHTML = "";
+  const cur = parseInt(sel.dataset.current || "0", 10);
+  const native = (ctxMatrix && ctxMatrix.native_ctx) || 262144;
+  const budget = (ctxMatrix && ctxMatrix.kv_budget_mib) || 0;
+  const perTok = (ctxMatrix && ctxMatrix.kv_per_tok_mib) || 0;
+  for (const c of CTX_RUNGS) {
+    if (c > native) break;
+    const o = document.createElement("option");
+    o.value = c;
+    let label = (c / 1024) + "K контекст";
+    if (budget > 0 && perTok > 0) {
+      const full = Math.min(slots, Math.floor(budget / (perTok * c)));
+      label += full >= slots ? " · все слоты" : full > 0 ? " · ~" + full + " полных" : " · очередь";
+    }
+    o.textContent = label;
+    if (c === cur || (!cur && c === 8192)) o.selected = true;
+    sel.append(o);
+  }
+}
+
+$("slotssel").onchange = rebuildCtxOptions;
+$("modelsel").onchange = loadCtxMatrix;
+
+async function loadAvailableModels() {
+  try {
+    const r = await api("/v1/available_models");
+    if (!r.ok) return;
+    const j = await r.json();
+    const sel = $("modelsel");
+    sel.innerHTML = "";
+    for (const m of j.models || []) {
+      const o = document.createElement("option");
+      o.value = m.path;
+      o.textContent = m.name + " (" + m.size_mib + " MiB)";
+      if (j.current && m.path === j.current.path) o.selected = true;
+      sel.append(o);
+    }
+    if (j.current && j.current.path && ![...sel.options].some(o => o.value === j.current.path)) {
+      const o = document.createElement("option");
+      o.value = j.current.path;
+      o.textContent = j.current.path.split(/[\\/]/).pop() + " (текущая)";
+      o.selected = true;
+      sel.append(o);
+    }
+    const slotssel = $("slotssel");
+    if (!slotssel.options.length) {
+      for (const s of [4, 3, 2, 1]) {
+        const o = document.createElement("option");
+        o.value = s;
+        o.textContent = s + " слота";
+        slotssel.append(o);
+      }
+    }
+    if (j.current) {
+      if (j.current.ctx) $("ctxsel").dataset.current = j.current.ctx;
+      if (j.current.slots) slotssel.value = j.current.slots;
+    }
+    loadCtxMatrix();
+    if (j.loading) watchModelSwitch();
+  } catch (e) {}
+}
+
+async function watchModelSwitch() {
+  if (modelSwitching) return;
+  modelSwitching = true;
+  $("applymodel").disabled = true;
+  $("send").disabled = true;
+  $("modelinfo").textContent = "переключение модели…";
+  for (;;) {
+    await new Promise(r => setTimeout(r, 4000));
+    try {
+      const r = await api("/v1/available_models");
+      if (!r.ok) continue;
+      const j = await r.json();
+      if (!j.loading) {
+        modelSwitching = false;
+        $("applymodel").disabled = false;
+        $("send").disabled = false;
+        loadModels();
+        loadAvailableModels();
+        break;
+      }
+    } catch (e) {}
+  }
+}
+
+$("applymodel").onclick = async () => {
+  const path = $("modelsel").value;
+  const ctx = parseInt($("ctxsel").value, 10);
+  const slots = parseInt($("slotssel").value, 10);
+  if (!path || !Number.isFinite(ctx)) return;
+  $("ctxsel").dataset.current = ctx;
+  const r = await api("/v1/switch_model", {
+    method: "POST",
+    body: JSON.stringify({ path, ctx, slots }),
+  });
+  if (r.ok) watchModelSwitch();
+  else $("modelinfo").textContent = "switch: HTTP " + r.status;
 };
 
 $("apikey").value = store.key;
@@ -717,6 +841,7 @@ else if (!getChat()) store.current = store.chats[0].id;
 renderChatList();
 renderMessages();
 loadModels();
+loadAvailableModels();
 </script>
 </body>
 </html>
