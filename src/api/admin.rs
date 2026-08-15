@@ -356,16 +356,20 @@ async fn do_switch(
         path.display()
     );
     let engine: Arc<dyn crate::engine::Engine> = if slots > 1 {
-        BatchedEngine::load(BatchConfig {
-            model_path: path.to_string_lossy().into_owned(),
-            slots,
-            max_queue: 64,
-            req_timeout: std::time::Duration::from_secs(3600),
-            context_length: ctx,
-            kv_budget_mib,
-            kv_per_tok_mib,
-            prefix_cache_mib: 0,
-        })
+        BatchedEngine::load(
+            BatchConfig {
+                model_path: path.to_string_lossy().into_owned(),
+                slots,
+                max_queue: 64,
+                req_timeout: std::time::Duration::from_secs(3600),
+                context_length: ctx,
+                kv_budget_mib,
+                kv_per_tok_mib,
+                prefix_cache_mib: 0,
+            },
+            state.media.clone(),
+            None,
+        )
         .await?
     } else {
         // single-slot через Config-like структуру нет — используем CandleEngine

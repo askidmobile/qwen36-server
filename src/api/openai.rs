@@ -1,5 +1,5 @@
 use axum::{
-    extract::State,
+    extract::{Extension, State},
     response::{sse::Event, IntoResponse, Response},
     Json,
 };
@@ -7,9 +7,11 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::api::{
-    bad_request, generate_collect, internal_error, parse_tool_calls, sse_response, AppState,
+    bad_request, engine_error, generate_collect, parse_tool_calls, prepare_inference_request,
+    sse_response, ApiKeyIdentity, AppState,
 };
-use crate::engine_types::{ChatMessage, GenParams, StreamEvent};
+use crate::engine_types::{ChatMessage, ContentBlock, GenParams, StreamEvent};
+use crate::media::MediaKind;
 
 #[derive(Deserialize)]
 pub struct ChatCompletionRequest {
@@ -51,27 +53,39 @@ struct OaiMessage {
     content: Option<OaiContent>,
 }
 
-fn flatten_content(m: &OaiMessage) -> Result<String, Response> {
+fn parse_content(m: &OaiMessage) -> Result<Vec<ContentBlock>, Response> {
     match &m.content {
-        None => Ok(String::new()),
-        Some(OaiContent::Text(t)) => Ok(t.clone()),
-        Some(OaiContent::Parts(parts)) => {
-            let mut out = String::new();
-            for p in parts {
-                match p.get("type").and_then(|t| t.as_str()) {
-                    Some("text") => {
-                        if let Some(t) = p.get("text").and_then(|t| t.as_str()) {
-                            out.push_str(t);
-                        }
-                    }
-                    Some("image_url") | Some("image") | Some("video") => {
-                        return Err(bad_request("vision not supported")); // BD-004
-                    }
-                    _ => {}
+        None => Ok(vec![]),
+        Some(OaiContent::Text(text)) => Ok(vec![super::content::text(text)]),
+        Some(OaiContent::Parts(parts)) => parts
+            .iter()
+            .map(|part| match part.get("type").and_then(Value::as_str) {
+                Some("text") => part
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(super::content::text)
+                    .ok_or_else(|| bad_request("text block requires text")),
+                Some("image_url") | Some("image") => {
+                    let nested = part.get("image_url").unwrap_or(part);
+                    super::content::media(
+                        nested,
+                        MediaKind::Image,
+                        &["url"],
+                        part.get("media_id").and_then(Value::as_str),
+                    )
                 }
-            }
-            Ok(out)
-        }
+                Some("video_url") | Some("video") => {
+                    let nested = part.get("video_url").unwrap_or(part);
+                    super::content::media(
+                        nested,
+                        MediaKind::Video,
+                        &["url"],
+                        part.get("media_id").and_then(Value::as_str),
+                    )
+                }
+                _ => Err(bad_request("unsupported content block type")),
+            })
+            .collect(),
     }
 }
 
@@ -124,7 +138,7 @@ fn build_messages(req: &ChatCompletionRequest) -> Result<Vec<ChatMessage>, Respo
         .map(|m| {
             Ok(ChatMessage {
                 role: m.role.clone(),
-                content: flatten_content(m)?,
+                content: parse_content(m)?,
             })
         })
         .collect()
@@ -149,12 +163,19 @@ fn oai_tool_calls(calls: &[(String, String)]) -> Value {
 
 pub async fn chat_completions(
     State(state): State<AppState>,
+    Extension(owner): Extension<ApiKeyIdentity>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> Response {
     let messages = match build_messages(&req) {
         Ok(m) => m,
         Err(r) => return r,
     };
+    if messages
+        .iter()
+        .any(|message| message.role == "system" && message.has_media())
+    {
+        return bad_request("system messages cannot contain media");
+    }
     let params = to_gen_params(&req);
     if params.max_tokens == 0 {
         return bad_request("max_tokens must be greater than 0");
@@ -181,14 +202,18 @@ pub async fn chat_completions(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
+    let request = match prepare_inference_request(&state, messages, params, &owner).await {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
     if req.stream {
         // tools в запросе → буферизуем текст (иначе <tool_call> разметка
         // утекает в SSE-поток раньше парсинга — аудит 2026-08-10).
         let has_tools = req.tools.as_ref().map(|t| !t.is_null()).unwrap_or(false);
-        return stream_chat(state, messages, params, include_usage, has_tools).await;
+        return stream_chat(state, request, include_usage, has_tools).await;
     }
 
-    let out = match generate_collect(state.engine.as_ref(), messages, params).await {
+    let out = match generate_collect(state.engine.as_ref(), request).await {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -213,10 +238,12 @@ pub async fn chat_completions(
             "finish_reason": finish,
         }],
         "usage": {
-            "prompt_tokens": out.prompt_tokens,
-            "completion_tokens": out.completion_tokens,
-            "total_tokens": out.prompt_tokens + out.completion_tokens,
-            "truncated": out.truncated,
+            "prompt_tokens": out.usage.prompt_tokens,
+            "completion_tokens": out.usage.completion_tokens,
+            "total_tokens": out.usage.prompt_tokens + out.usage.completion_tokens,
+            "truncated": out.usage.truncated,
+            "media": out.usage.media,
+            "mtp": out.usage.mtp,
         },
     }))
     .into_response()
@@ -242,21 +269,21 @@ fn chunk(id: &str, model: &str, delta: Value, finish: Option<&str>) -> String {
 
 async fn stream_chat(
     state: AppState,
-    messages: Vec<ChatMessage>,
-    params: GenParams,
+    request: crate::engine_types::InferenceRequest,
     include_usage: bool,
     has_tools: bool,
 ) -> Response {
     let id = format!("chatcmpl-{}", uuid::Uuid::new_v4().simple());
     let model = state.engine.model_info().id;
-    let rx = match state.engine.generate(messages, params).await {
+    let cancel = request.cancel.clone();
+    let rx = match state.engine.generate(request).await {
         Ok(r) => r,
-        Err(e) => return internal_error(e.to_string()),
+        Err(e) => return engine_error(e),
     };
 
     let mut first = true;
     let mut acc = String::new();
-    sse_response(rx, move |ev, out| match ev {
+    sse_response(rx, cancel, move |ev, out| match ev {
         StreamEvent::Delta(d) => {
             if first {
                 first = false;
@@ -275,9 +302,7 @@ async fn stream_chat(
         }
         StreamEvent::Done {
             finish_reason,
-            prompt_tokens,
-            completion_tokens,
-            truncated,
+            usage,
         } => {
             if first {
                 first = false;
@@ -321,10 +346,12 @@ async fn stream_chat(
                             "created": now_unix(), "model": model,
                             "choices": [],
                             "usage": {
-                                "prompt_tokens": prompt_tokens,
-                                "completion_tokens": completion_tokens,
-                                "total_tokens": prompt_tokens + completion_tokens,
-                                "truncated": truncated,
+                                "prompt_tokens": usage.prompt_tokens,
+                                "completion_tokens": usage.completion_tokens,
+                                "total_tokens": usage.prompt_tokens + usage.completion_tokens,
+                                "truncated": usage.truncated,
+                                "media": usage.media,
+                                "mtp": usage.mtp,
                             },
                         })
                         .to_string(),

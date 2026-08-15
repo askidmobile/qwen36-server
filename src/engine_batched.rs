@@ -15,8 +15,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail};
-use qwen35_batch::model::Sampler as ForkSampler;
-use qwen35_batch::real::tokenizer::{self, ChatMsg};
+use qwen35_batch::model::{MultimodalPrefill, Sampler as ForkSampler};
+use qwen35_batch::real::multimodal::{build_position_plan, MediaKind as PackedMediaKind};
+use qwen35_batch::real::tokenizer::{self, ChatContent, ChatMsg, MultimodalChatMsg};
 use qwen35_batch::real::Qwen35BatchAdapter;
 use qwen35_batch::scheduler::{BatchScheduler, StepOutcome};
 use qwen35_batch::slot::SlotStatus;
@@ -26,7 +27,11 @@ use crate::engine::{
     floor_char_boundary, model_id_from_filename, quant_from_filename, select_device, trim_messages,
     FindAny,
 };
-use crate::engine_types::{ChatMessage, Engine, GenParams, ModelInfo, StreamEvent};
+use crate::engine_types::{
+    ChatMessage, Engine, GenParams, GenerationUsage, InferenceRequest, MediaUsage, ModelInfo,
+    StreamEvent,
+};
+use crate::media::prepare::{PreparedContentBlock, PreparedLease};
 use crate::sampler::{self, Rng};
 
 /// Макс. слотов = DECODE_BATCH_CAPACITY форка.
@@ -80,6 +85,14 @@ struct AdmitReq {
     truncated: bool,
     prompt_tokens: usize,
     out: mpsc::Sender<StreamEvent>,
+    cancel: crate::engine_types::CancelFlag,
+    media: Option<MultimodalAdmission>,
+}
+
+struct MultimodalAdmission {
+    payload: MultimodalPrefill,
+    usage: MediaUsage,
+    lease: PreparedLease,
 }
 
 enum IngestMsg {
@@ -99,6 +112,9 @@ struct SlotBinding {
     stop_hit: bool,
     cancelled: bool,
     last_progress: Instant,
+    usage: MediaUsage,
+    _media_lease: Option<PreparedLease>,
+    cancel: crate::engine_types::CancelFlag,
 }
 
 pub struct BatchedEngine {
@@ -107,10 +123,16 @@ pub struct BatchedEngine {
     max_queue: usize,
     in_flight: Arc<AtomicUsize>,
     tokenizer: Arc<Mutex<tokenizers::Tokenizer>>,
+    media: Arc<crate::media::MediaService>,
+    vision_path: Option<std::path::PathBuf>,
 }
 
 impl BatchedEngine {
-    pub async fn load(cfg: BatchConfig) -> anyhow::Result<Arc<Self>> {
+    pub async fn load(
+        cfg: BatchConfig,
+        media: Arc<crate::media::MediaService>,
+        vision_path: Option<std::path::PathBuf>,
+    ) -> anyhow::Result<Arc<Self>> {
         // Форк имеет DECODE_BATCH_CAPACITY=4: больше слотов → panic при seed_slot_batched.
         if cfg.slots > MAX_SLOTS {
             anyhow::bail!(
@@ -132,7 +154,15 @@ impl BatchedEngine {
         let adapter = tokio::task::spawn_blocking({
             let p = cfg.model_path.clone();
             let slots = cfg.slots;
-            move || Qwen35BatchAdapter::load(std::path::Path::new(&p), adapter_device, slots)
+            let vision_path = vision_path.clone();
+            move || {
+                let mut adapter =
+                    Qwen35BatchAdapter::load(std::path::Path::new(&p), adapter_device, slots)?;
+                if let Some(path) = vision_path {
+                    adapter.load_vision(&path)?;
+                }
+                Ok::<_, anyhow::Error>(adapter)
+            }
         })
         .await??;
         #[cfg(feature = "cuda")]
@@ -157,6 +187,8 @@ impl BatchedEngine {
             max_queue: cfg.max_queue,
             in_flight: Arc::new(AtomicUsize::new(0)),
             tokenizer: Arc::new(Mutex::new(tokenizer)),
+            media,
+            vision_path,
         });
 
         let tokenizer = engine.tokenizer.clone();
@@ -176,15 +208,117 @@ impl BatchedEngine {
 impl Engine for BatchedEngine {
     async fn generate(
         &self,
-        messages: Vec<ChatMessage>,
-        mut params: GenParams,
+        request: InferenceRequest,
     ) -> anyhow::Result<mpsc::Receiver<StreamEvent>> {
+        let InferenceRequest {
+            messages,
+            mut params,
+            owner,
+            cancel,
+        } = request;
+        let has_media = messages.iter().any(ChatMessage::has_media);
+        if has_media && self.vision_path.is_none() {
+            return Err(crate::media::MediaError::new(
+                crate::media::MediaErrorKind::ComponentUnavailable,
+                "Vision component is unavailable",
+            )
+            .into());
+        }
         if self.in_flight.load(Ordering::Relaxed) >= self.max_queue + MAX_SLOTS {
             bail!("queue full (QWEN36_MAX_QUEUE)");
         }
 
-        // TODO-F2: sliding window (BD-017) + build_chatml_text + encode_no_think.
-        let (prompt, prompt_tokens, truncated) = {
+        let prepared = if has_media {
+            Some(
+                crate::media::prepare::prepare(
+                    &messages,
+                    owner,
+                    &cancel,
+                    &self.media,
+                    self.info.context_length,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+
+        let (prompt, prompt_tokens, truncated, media) = if let Some(prepared) = prepared {
+            let (prepared_messages, usage, lease) = prepared.into_parts();
+            let tok = self
+                .tokenizer
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let mut image_grids = Vec::new();
+            let mut video_grids = Vec::new();
+            let mut media_grids = Vec::new();
+            let mut patch_values = Vec::new();
+            let mut content_storage = Vec::with_capacity(prepared_messages.len());
+            for message in &prepared_messages {
+                let mut content = Vec::with_capacity(message.content.len());
+                for block in &message.content {
+                    match block {
+                        PreparedContentBlock::Text(text) => content.push(ChatContent::Text(text)),
+                        PreparedContentBlock::Media(media) => {
+                            let grid = media.grid;
+                            media_grids.push([grid.t, grid.h, grid.w]);
+                            patch_values.extend_from_slice(&media.patches);
+                            match media.kind {
+                                PackedMediaKind::Image => {
+                                    image_grids.push(grid);
+                                    content.push(ChatContent::Image {
+                                        visual_tokens: media.visual_tokens()?,
+                                    });
+                                }
+                                PackedMediaKind::Video => {
+                                    video_grids.push(grid);
+                                    content.push(ChatContent::Video {
+                                        frame_tokens: media.frame_tokens()?,
+                                        timestamps: &media.timestamps,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                content_storage.push(content);
+            }
+            let mixed: Vec<MultimodalChatMsg<'_>> = prepared_messages
+                .iter()
+                .zip(&content_storage)
+                .map(|(message, content)| MultimodalChatMsg {
+                    role: &message.role,
+                    content,
+                })
+                .collect();
+            let text = tokenizer::build_chatml_multimodal(&mixed)?;
+            let encoded = tokenizer::encode_multimodal_no_think(&tok, &text)?;
+            let position =
+                build_position_plan(&encoded.mm_token_types, &image_grids, &video_grids)?;
+            params.clamp_to_context(encoded.ids.len(), self.info.context_length)?;
+            let patch_width = 3 * 2 * 16 * 16;
+            let patch_rows = patch_values.len() / patch_width;
+            let prompt_tokens = encoded.ids.len();
+            (
+                encoded.ids.clone(),
+                prompt_tokens,
+                false,
+                Some(MultimodalAdmission {
+                    payload: MultimodalPrefill {
+                        token_ids: encoded.ids,
+                        media_grids,
+                        patch_values,
+                        patch_rows,
+                        patch_width,
+                        mm_token_types: encoded.mm_token_types,
+                        rope_positions: position.rope_positions,
+                        decode_rope_delta: position.decode_rope_delta,
+                    },
+                    usage,
+                    lease,
+                }),
+            )
+        } else {
             let tok = self.tokenizer.lock().unwrap_or_else(|e| e.into_inner());
             let budget = self
                 .info
@@ -192,23 +326,22 @@ impl Engine for BatchedEngine {
                 .saturating_sub(params.max_tokens)
                 .saturating_sub(TRIM_MARGIN);
             let count = |m: &ChatMessage| -> usize {
-                let chunk = format!("<|im_start|>{}\n{}\n<|im_end|>\n", m.role, m.content);
+                let chunk = format!("<|im_start|>{}\n{}\n<|im_end|>\n", m.role, m.text_content());
                 tok.encode(chunk, false)
                     .map(|e| e.get_ids().len())
                     .unwrap_or(0)
             };
             let (kept, was_trimmed) = trim_messages(&messages, budget, count);
-            let msgs: Vec<ChatMsg> = kept
+            let msgs_text: Vec<(&str, String)> = kept
                 .iter()
-                .map(|m| ChatMsg {
-                    role: &m.role,
-                    content: &m.content,
-                })
+                .map(|m| (m.role.as_str(), m.text_content()))
+                .collect();
+            let msgs: Vec<ChatMsg> = msgs_text
+                .iter()
+                .map(|(role, content)| ChatMsg { role, content })
                 .collect();
             let text = tokenizer::build_chatml_text(&msgs);
             let ids = if params.thinking {
-                // Каноничный Qwen-шаблон: assistant\n<think>\n — модель
-                // продолжает уже ОТКРЫТЫЙ think-блок.
                 let mut ids = tok
                     .encode(text, false)
                     .map(|e| e.get_ids().to_vec())
@@ -224,9 +357,9 @@ impl Engine for BatchedEngine {
                 tokenizer::encode_no_think(&tok, &text)?
             };
             let n = ids.len();
-            (ids, n, was_trimmed)
+            params.clamp_to_context(n, self.info.context_length)?;
+            (ids, n, was_trimmed, None)
         };
-        params.clamp_to_context(prompt_tokens, self.info.context_length)?;
 
         let (out_tx, out_rx) = mpsc::channel(SLOT_CHAN_CAP);
         self.in_flight.fetch_add(1, Ordering::Relaxed);
@@ -236,6 +369,8 @@ impl Engine for BatchedEngine {
             truncated,
             prompt_tokens,
             out: out_tx,
+            cancel,
+            media,
         };
         self.tx_ingest
             .send(IngestMsg::Admit(req))
@@ -323,7 +458,7 @@ fn dispatch_loop(
 
         // Клиент мог отключиться во время очереди/prefill, до первой Delta.
         for b in bindings.iter_mut().flatten() {
-            if b.out.is_closed() {
+            if b.out.is_closed() || b.cancel.is_cancelled() {
                 b.cancelled = true;
             }
         }
@@ -618,6 +753,18 @@ fn seed_slot(
     });
     let params = req.params.clone();
     sched.submit(req.prompt, max_new);
+    let (usage, media_lease) = match req.media {
+        Some(media) => {
+            use qwen35_batch::model::BatchModel;
+            if let Err(error) = sched.model_mut().install_multimodal(idx, media.payload) {
+                let _ = req.out.try_send(StreamEvent::Error(error.to_string()));
+                sched.slots_mut()[idx].reset();
+                return;
+            }
+            (media.usage, Some(media.lease))
+        }
+        None => (MediaUsage::default(), None),
+    };
     slot_samplers
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -632,6 +779,9 @@ fn seed_slot(
         stop_hit: false,
         cancelled: false,
         last_progress: Instant::now(),
+        usage,
+        _media_lease: media_lease,
+        cancel: req.cancel,
     });
 }
 
@@ -673,9 +823,13 @@ fn finish_slot(
         let truncated = slot_truncated.remove(&idx).unwrap_or(false);
         let _ = b.out.try_send(StreamEvent::Done {
             finish_reason: finish_reason.into(),
-            prompt_tokens: b.prompt_tokens,
-            completion_tokens: b.completion_tokens,
-            truncated,
+            usage: GenerationUsage {
+                prompt_tokens: b.prompt_tokens,
+                completion_tokens: b.completion_tokens,
+                truncated,
+                media: b.usage.clone(),
+                ..Default::default()
+            },
         });
     } else {
         slot_truncated.remove(&idx);
@@ -783,7 +937,8 @@ mod tests {
 
     #[tokio::test]
     async fn load_rejects_slots_above_fork_capacity_before_model_load() {
-        let err = match BatchedEngine::load(test_config(MAX_SLOTS + 1, 0)).await {
+        let media = Arc::new(crate::media::MediaService::new(Default::default()).unwrap());
+        let err = match BatchedEngine::load(test_config(MAX_SLOTS + 1, 0), media, None).await {
             Ok(_) => panic!("slots above capacity must be rejected"),
             Err(err) => err.to_string(),
         };
@@ -792,7 +947,8 @@ mod tests {
 
     #[tokio::test]
     async fn load_rejects_prefix_cache_before_model_load() {
-        let err = match BatchedEngine::load(test_config(1, 1)).await {
+        let media = Arc::new(crate::media::MediaService::new(Default::default()).unwrap());
+        let err = match BatchedEngine::load(test_config(1, 1), media, None).await {
             Ok(_) => panic!("prefix cache must be rejected"),
             Err(err) => err.to_string(),
         };

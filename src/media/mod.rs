@@ -1,6 +1,7 @@
 pub mod fetch;
 pub mod helper;
 pub mod helper_protocol;
+pub mod prepare;
 pub mod store;
 
 use axum::http::StatusCode;
@@ -10,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub use store::{ClaimedMedia, MediaStore, StoredMedia};
+pub use store::{ClaimedMedia, DecodedReservation, MediaStore, StoredMedia};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct OwnerDigest([u8; 32]);
@@ -143,8 +144,11 @@ pub struct MediaService {
 }
 
 impl MediaService {
-    pub fn new(config: MediaConfig) -> Result<Self, MediaError> {
+    pub fn new(mut config: MediaConfig) -> Result<Self, MediaError> {
         let store = Arc::new(MediaStore::new(config.clone())?);
+        config.temp_root = config.temp_root.canonicalize().map_err(|_| {
+            MediaError::new(MediaErrorKind::Internal, "cannot canonicalize media store")
+        })?;
         store.cleanup_orphans();
         Ok(Self { store, config })
     }

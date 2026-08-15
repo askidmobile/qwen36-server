@@ -4,7 +4,9 @@ use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use qwen36_server::api::{build_router, AppState};
 use qwen36_server::config::ApiKey;
-use qwen36_server::engine_types::{ChatMessage, Engine, GenParams, ModelInfo, StreamEvent};
+use qwen36_server::engine_types::{
+    Engine, GenerationUsage, InferenceRequest, ModelInfo, StreamEvent,
+};
 use tower::ServiceExt;
 
 struct MockEngine {
@@ -15,8 +17,7 @@ struct MockEngine {
 impl Engine for MockEngine {
     async fn generate(
         &self,
-        _messages: Vec<ChatMessage>,
-        _params: GenParams,
+        _request: InferenceRequest,
     ) -> anyhow::Result<tokio::sync::mpsc::Receiver<StreamEvent>> {
         let (tx, rx) = tokio::sync::mpsc::channel(8);
         let deltas = self.deltas.clone();
@@ -27,9 +28,11 @@ impl Engine for MockEngine {
             let _ = tx
                 .send(StreamEvent::Done {
                     finish_reason: "stop".into(),
-                    prompt_tokens: 10,
-                    completion_tokens: 3,
-                    truncated: false,
+                    usage: GenerationUsage {
+                        prompt_tokens: 10,
+                        completion_tokens: 3,
+                        ..Default::default()
+                    },
                 })
                 .await;
         });
@@ -325,7 +328,7 @@ async fn chat_completions_tool_calls() {
 }
 
 #[tokio::test]
-async fn image_content_rejected() {
+async fn insecure_image_url_rejected() {
     let resp = app(vec![])
         .oneshot(authed(json_req(
             "POST",

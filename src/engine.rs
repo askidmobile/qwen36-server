@@ -5,6 +5,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
@@ -95,10 +96,129 @@ impl GenParams {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MediaSource {
+    DataUrl {
+        declared_mime: String,
+        base64: String,
+    },
+    HttpsUrl {
+        url: String,
+    },
+    UploadId {
+        id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContentBlock {
+    Text {
+        text: String,
+    },
+    Media {
+        kind: crate::media::MediaKind,
+        source: MediaSource,
+    },
+}
+
+#[derive(Debug, Clone)]
 pub struct ChatMessage {
     pub role: String, // system|user|assistant|tool
-    pub content: String,
+    pub content: Vec<ContentBlock>,
+}
+
+impl ChatMessage {
+    pub fn text(role: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            content: vec![ContentBlock::Text { text: text.into() }],
+        }
+    }
+
+    pub fn text_content(&self) -> String {
+        self.content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                ContentBlock::Media { .. } => None,
+            })
+            .collect()
+    }
+
+    pub fn has_media(&self) -> bool {
+        self.content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Media { .. }))
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct MediaUsage {
+    pub image_count: usize,
+    pub video_count: usize,
+    pub sampled_frames: usize,
+    pub visual_tokens: usize,
+    pub effective_fps: Option<f64>,
+    pub audio_processed: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct MtpUsage {
+    pub enabled: bool,
+    pub used: bool,
+    pub drafted: usize,
+    pub accepted: usize,
+    pub fallback_category: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct GenerationUsage {
+    pub prompt_tokens: usize,
+    pub completion_tokens: usize,
+    pub truncated: bool,
+    pub media: MediaUsage,
+    pub mtp: MtpUsage,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CancelFlag(Arc<AtomicBool>);
+
+impl CancelFlag {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+
+    pub fn guard(&self) -> CancelOnDrop {
+        CancelOnDrop(Some(self.clone()))
+    }
+}
+
+pub struct CancelOnDrop(Option<CancelFlag>);
+
+impl CancelOnDrop {
+    pub fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if let Some(flag) = &self.0 {
+            flag.cancel();
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct InferenceRequest {
+    pub messages: Vec<ChatMessage>,
+    pub params: GenParams,
+    pub owner: crate::media::OwnerDigest,
+    pub cancel: CancelFlag,
 }
 
 #[derive(Debug)]
@@ -107,9 +227,7 @@ pub enum StreamEvent {
     Delta(String),
     Done {
         finish_reason: String, // "stop" | "length"
-        prompt_tokens: usize,
-        completion_tokens: usize,
-        truncated: bool,
+        usage: GenerationUsage,
     },
     Error(String),
 }
@@ -126,11 +244,7 @@ pub struct ModelInfo {
 #[async_trait::async_trait]
 pub trait Engine: Send + Sync {
     /// Стриминговая генерация по chat-сообщениям. sliding window внутри (BD-017).
-    async fn generate(
-        &self,
-        messages: Vec<ChatMessage>,
-        params: GenParams,
-    ) -> Result<mpsc::Receiver<StreamEvent>>;
+    async fn generate(&self, request: InferenceRequest) -> Result<mpsc::Receiver<StreamEvent>>;
     fn model_info(&self) -> ModelInfo;
 }
 
@@ -184,11 +298,20 @@ impl CandleEngine {
 
 #[async_trait::async_trait]
 impl Engine for CandleEngine {
-    async fn generate(
-        &self,
-        messages: Vec<ChatMessage>,
-        mut params: GenParams,
-    ) -> Result<mpsc::Receiver<StreamEvent>> {
+    async fn generate(&self, request: InferenceRequest) -> Result<mpsc::Receiver<StreamEvent>> {
+        if request.messages.iter().any(ChatMessage::has_media) {
+            return Err(crate::media::MediaError::new(
+                crate::media::MediaErrorKind::ComponentUnavailable,
+                "multimodal requests require batched engine",
+            )
+            .into());
+        }
+        let InferenceRequest {
+            messages,
+            mut params,
+            cancel,
+            ..
+        } = request;
         // Sliding window (BD-017): system сохраняется, режутся старые пары.
         // Оценка: токены каждого сообщения отдельно (BPE-границы дают погрешность
         // ~1-2 токена на сообщение) — покрыта запасом TRIM_MARGIN.
@@ -202,7 +325,7 @@ impl Engine for CandleEngine {
         {
             let st = self.state.lock().expect("engine mutex");
             let count = |m: &ChatMessage| -> usize {
-                let chunk = format!("<|im_start|>{}\n{}<|im_end|>\n", m.role, m.content);
+                let chunk = format!("<|im_start|>{}\n{}<|im_end|>\n", m.role, m.text_content());
                 st.tokenizer
                     .encode(chunk, false)
                     .map(|e| e.get_ids().len())
@@ -210,12 +333,13 @@ impl Engine for CandleEngine {
             };
             let (kept, was_trimmed) = trim_messages(&messages, budget, count);
             truncated = was_trimmed;
-            let msgs: Vec<ChatMsg> = kept
+            let msgs_text: Vec<(&str, String)> = kept
                 .iter()
-                .map(|m| ChatMsg {
-                    role: &m.role,
-                    content: &m.content,
-                })
+                .map(|m| (m.role.as_str(), m.text_content()))
+                .collect();
+            let msgs: Vec<ChatMsg> = msgs_text
+                .iter()
+                .map(|(role, content)| ChatMsg { role, content })
                 .collect();
             let text = tokenizer::build_chatml_text(&msgs);
             prompt_ids = if params.thinking {
@@ -247,7 +371,16 @@ impl Engine for CandleEngine {
         let eos = self.eos;
         // Инференс блокирующий и долгий — в blocking-пул, канал стримит наружу.
         tokio::task::spawn_blocking(move || {
-            run_generation(state, prompt_ids, prompt_tokens, params, eos, truncated, tx);
+            run_generation(
+                state,
+                prompt_ids,
+                prompt_tokens,
+                params,
+                eos,
+                truncated,
+                cancel,
+                tx,
+            );
         });
         Ok(rx)
     }
@@ -271,14 +404,18 @@ fn run_generation(
     params: GenParams,
     eos: u32,
     truncated: bool,
+    cancel: CancelFlag,
     tx: mpsc::Sender<StreamEvent>,
 ) {
     let finish = move |reason: &str, completion: usize, tx: &mpsc::Sender<StreamEvent>| {
         let _ = tx.blocking_send(StreamEvent::Done {
             finish_reason: reason.into(),
-            prompt_tokens,
-            completion_tokens: completion,
-            truncated,
+            usage: GenerationUsage {
+                prompt_tokens,
+                completion_tokens: completion,
+                truncated,
+                ..Default::default()
+            },
         });
     };
 
@@ -321,6 +458,9 @@ fn run_generation(
         }
 
         for next_pos in (prompt_ids.len()..).take(params.max_tokens) {
+            if cancel.is_cancelled() || tx.is_closed() {
+                return Ok(());
+            }
             let tok = sampler::sample(
                 &logits,
                 params.temperature,
@@ -561,10 +701,7 @@ mod tests {
     use super::*;
 
     fn msg(role: &str, content: &str) -> ChatMessage {
-        ChatMessage {
-            role: role.into(),
-            content: content.into(),
-        }
+        ChatMessage::text(role, content)
     }
 
     #[test]
@@ -608,7 +745,7 @@ mod tests {
     #[test]
     fn trim_noop_when_fits() {
         let m = vec![msg("system", "s"), msg("user", "hello")];
-        let (out, truncated) = trim_messages(&m, 1000, |m| m.content.len());
+        let (out, truncated) = trim_messages(&m, 1000, |m| m.text_content().len());
         assert!(!truncated);
         assert_eq!(out.len(), 2);
     }
@@ -624,10 +761,10 @@ mod tests {
             msg("assistant", "a2--------"),
             msg("user", "u3--------"),
         ];
-        let (out, truncated) = trim_messages(&m, 20, |m| m.content.len());
+        let (out, truncated) = trim_messages(&m, 20, |m| m.text_content().len());
         assert!(truncated);
         assert_eq!(out[0].role, "system");
-        assert_eq!(out.last().unwrap().content, "u3--------");
+        assert_eq!(out.last().unwrap().text_content(), "u3--------");
         // 6 + 10 = 16 <= 20; пара (u2,a2) тоже должна быть срезана (16+20>20? нет: 6+10+20=36>20 при проверке до реза u2/a2)
         assert_eq!(out.len(), 2);
     }
@@ -635,7 +772,7 @@ mod tests {
     #[test]
     fn trim_keeps_last_message_even_over_budget() {
         let m = vec![msg("system", "s"), msg("user", "x".repeat(100).as_str())];
-        let (out, truncated) = trim_messages(&m, 10, |m| m.content.len());
+        let (out, truncated) = trim_messages(&m, 10, |m| m.text_content().len());
         assert!(!truncated); // history не удалялась
         assert_eq!(out.len(), 2); // system + последний user
     }

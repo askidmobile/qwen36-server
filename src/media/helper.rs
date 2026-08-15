@@ -198,6 +198,10 @@ fn assign_job_limits(
 #[cfg(windows)]
 struct JobHandle(windows_sys::Win32::Foundation::HANDLE);
 
+// Windows HANDLE ownership may move with async helper future; only Drop closes it.
+#[cfg(windows)]
+unsafe impl Send for JobHandle {}
+
 #[cfg(windows)]
 impl Drop for JobHandle {
     fn drop(&mut self) {

@@ -1,5 +1,5 @@
 use axum::{
-    extract::State,
+    extract::{Extension, State},
     response::{sse::Event, IntoResponse, Response},
     Json,
 };
@@ -7,9 +7,11 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::api::{
-    bad_request, generate_collect, internal_error, parse_tool_calls, sse_response, AppState,
+    bad_request, engine_error, generate_collect, parse_tool_calls, prepare_inference_request,
+    sse_response, ApiKeyIdentity, AppState,
 };
-use crate::engine_types::{ChatMessage, GenParams, StreamEvent};
+use crate::engine_types::{ChatMessage, ContentBlock, GenParams, StreamEvent};
+use crate::media::MediaKind;
 
 #[derive(Deserialize)]
 pub struct MessagesRequest {
@@ -42,42 +44,37 @@ struct AntMessage {
     content: AntContent,
 }
 
-fn flatten_blocks(m: &AntMessage) -> Result<String, Response> {
+fn parse_blocks(m: &AntMessage) -> Result<Vec<ContentBlock>, Response> {
     match &m.content {
-        AntContent::Text(t) => Ok(t.clone()),
-        AntContent::Blocks(blocks) => {
-            let mut out = String::new();
-            for b in blocks {
-                match b.get("type").and_then(|t| t.as_str()) {
-                    Some("text") => {
-                        if let Some(t) = b.get("text").and_then(|t| t.as_str()) {
-                            out.push_str(t);
-                        }
-                    }
-                    Some("image") | Some("document") | Some("video") => {
-                        return Err(bad_request("vision not supported")); // BD-004
-                    }
-                    // tool_result и прочее — берём текстовое представление
-                    Some("tool_result") => {
-                        if let Some(c) = b.get("content") {
-                            match c {
-                                Value::String(s) => out.push_str(s),
-                                Value::Array(parts) => {
-                                    for p in parts {
-                                        if let Some(t) = p.get("text").and_then(|t| t.as_str()) {
-                                            out.push_str(t);
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    _ => {}
+        AntContent::Text(text) => Ok(vec![super::content::text(text)]),
+        AntContent::Blocks(blocks) => blocks
+            .iter()
+            .map(|block| match block.get("type").and_then(Value::as_str) {
+                Some("text") => block
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(super::content::text)
+                    .ok_or_else(|| bad_request("text block requires text")),
+                Some("image") => super::content::anthropic_media(block, MediaKind::Image),
+                Some("input_video") | Some("video") => {
+                    super::content::anthropic_media(block, MediaKind::Video)
                 }
-            }
-            Ok(out)
-        }
+                Some("tool_result") => Ok(super::content::text(tool_result_text(block))),
+                Some("document") => Err(bad_request("document content is unsupported")),
+                _ => Err(bad_request("unsupported content block type")),
+            })
+            .collect(),
+    }
+}
+
+fn tool_result_text(block: &Value) -> String {
+    match block.get("content") {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .collect(),
+        _ => String::new(),
     }
 }
 
@@ -144,7 +141,11 @@ fn build_content_blocks(text: &str, calls: &[(String, String)]) -> Vec<Value> {
     blocks
 }
 
-pub async fn messages(State(state): State<AppState>, Json(req): Json<MessagesRequest>) -> Response {
+pub async fn messages(
+    State(state): State<AppState>,
+    Extension(owner): Extension<ApiKeyIdentity>,
+    Json(req): Json<MessagesRequest>,
+) -> Response {
     let Some(max_tokens) = req.max_tokens else {
         return bad_request("max_tokens is required");
     };
@@ -156,14 +157,11 @@ pub async fn messages(State(state): State<AppState>, Json(req): Json<MessagesReq
     if let Some(sys) = &req.system {
         let s = system_text(sys);
         if !s.is_empty() {
-            msgs.push(ChatMessage {
-                role: "system".into(),
-                content: s,
-            });
+            msgs.push(ChatMessage::text("system", s));
         }
     }
     for m in &req.messages {
-        let content = match flatten_blocks(m) {
+        let content = match parse_blocks(m) {
             Ok(c) => c,
             Err(r) => return r,
         };
@@ -171,6 +169,13 @@ pub async fn messages(State(state): State<AppState>, Json(req): Json<MessagesReq
             role: m.role.clone(),
             content,
         });
+    }
+
+    if msgs
+        .iter()
+        .any(|message| message.role == "system" && message.has_media())
+    {
+        return bad_request("system messages cannot contain media");
     }
 
     let mut params = GenParams {
@@ -189,9 +194,13 @@ pub async fn messages(State(state): State<AppState>, Json(req): Json<MessagesReq
 
     let id = format!("msg_{}", uuid::Uuid::new_v4().simple());
     let model = state.engine.model_info().id;
+    let request = match prepare_inference_request(&state, msgs, params, &owner).await {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
 
     if !req.stream {
-        let out = match generate_collect(state.engine.as_ref(), msgs, params).await {
+        let out = match generate_collect(state.engine.as_ref(), request).await {
             Ok(o) => o,
             Err(r) => return r,
         };
@@ -206,18 +215,21 @@ pub async fn messages(State(state): State<AppState>, Json(req): Json<MessagesReq
             "stop_reason": map_stop_reason(&out.finish_reason, !calls.is_empty()),
             "stop_sequence": null,
             "usage": {
-                "input_tokens": out.prompt_tokens,
-                "output_tokens": out.completion_tokens,
-                "truncated": out.truncated,
+                "input_tokens": out.usage.prompt_tokens,
+                "output_tokens": out.usage.completion_tokens,
+                "truncated": out.usage.truncated,
+                "media": out.usage.media,
+                "mtp": out.usage.mtp,
             },
         }))
         .into_response();
     }
 
     let has_tools = req.tools.as_ref().map(|t| !t.is_null()).unwrap_or(false);
-    let rx = match state.engine.generate(msgs, params).await {
+    let cancel = request.cancel.clone();
+    let rx = match state.engine.generate(request).await {
         Ok(r) => r,
-        Err(e) => return internal_error(e.to_string()),
+        Err(e) => return engine_error(e),
     };
 
     let mut acc = String::new();
@@ -232,7 +244,7 @@ pub async fn messages(State(state): State<AppState>, Json(req): Json<MessagesReq
     })
     .to_string();
 
-    sse_response(rx, move |ev, out| match ev {
+    sse_response(rx, cancel, move |ev, out| match ev {
         StreamEvent::Delta(d) => {
             if !started {
                 started = true;
@@ -263,9 +275,7 @@ pub async fn messages(State(state): State<AppState>, Json(req): Json<MessagesReq
         }
         StreamEvent::Done {
             finish_reason,
-            prompt_tokens,
-            completion_tokens,
-            truncated,
+            usage,
         } => {
             if !started {
                 started = true;
@@ -327,8 +337,11 @@ pub async fn messages(State(state): State<AppState>, Json(req): Json<MessagesReq
                     json!({"type": "message_delta",
                        "delta": {"stop_reason": map_stop_reason(&finish_reason, !calls.is_empty()),
                                   "stop_sequence": null},
-                       "usage": {"input_tokens": prompt_tokens, "output_tokens": completion_tokens,
-                                  "truncated": truncated}})
+                       "usage": {"input_tokens": usage.prompt_tokens,
+                                  "output_tokens": usage.completion_tokens,
+                                  "truncated": usage.truncated,
+                                  "media": usage.media,
+                                  "mtp": usage.mtp}})
                     .to_string(),
                 ),
             );

@@ -145,11 +145,22 @@ fn decode_video(request: &DecodeRequest) -> anyhow::Result<DecodeResult> {
         .and_then(|v| v.parse::<f64>().ok())
         .unwrap_or(0.0);
     anyhow::ensure!(fps.is_finite() && duration.is_finite());
-    let indices = if request.frame_indices.is_empty() {
-        vec![0]
-    } else {
-        request.frame_indices.clone()
-    };
+    if request.frame_indices.is_empty() {
+        return Ok(DecodeResult {
+            protocol_version: PROTOCOL_VERSION,
+            kind: MediaKind::Video,
+            detected_format: "video".into(),
+            codec: stream["codec_name"].as_str().map(str::to_string),
+            width,
+            height,
+            duration_ms: Some((duration.max(0.0) * 1000.0).round() as u64),
+            source_fps: Some(fps),
+            static_gif: false,
+            frames: vec![],
+            audio_processed: false,
+        });
+    }
+    let indices = request.frame_indices.clone();
     validate_dimensions(request, width, height, indices.len())?;
     let filter = indices
         .iter()

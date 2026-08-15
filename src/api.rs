@@ -1,12 +1,13 @@
 pub mod admin;
 pub mod anthropic;
+pub(crate) mod content;
 pub mod media;
 pub mod openai;
 pub mod responses;
 
 use axum::{
     body::Body,
-    extract::{Request, State},
+    extract::{DefaultBodyLimit, Request, State},
     http::StatusCode,
     middleware::Next,
     response::{
@@ -112,6 +113,9 @@ async fn auth(State(state): State<AppState>, mut req: Request<Body>, next: Next)
 }
 
 pub fn build_router(state: AppState) -> Router {
+    // One video data URL plus bounded JSON overhead. Per-media encoded limits
+    // still apply during typed source preparation.
+    const MAX_V1_BODY: usize = 4 * 200 * 1024 * 1024 / 3 + 1024 * 1024;
     let v1 = Router::new()
         .route(
             "/chat/completions",
@@ -131,7 +135,8 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/ctx_matrix", axum::routing::get(admin::ctx_matrix))
         .route("/switch_model", axum::routing::post(admin::switch_model))
-        .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth));
+        .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth))
+        .layer(DefaultBodyLimit::max(MAX_V1_BODY));
 
     Router::new().nest("/v1", v1).with_state(state)
 }
@@ -139,6 +144,7 @@ pub fn build_router(state: AppState) -> Router {
 /// SSE-ответ из потока engine-событий. `map` превращает StreamEvent в 0+ SSE-событий.
 pub fn sse_response<F>(
     rx: tokio::sync::mpsc::Receiver<crate::engine_types::StreamEvent>,
+    cancel: crate::engine_types::CancelFlag,
     mut map: F,
 ) -> Response
 where
@@ -146,6 +152,7 @@ where
 {
     let (tx, out_rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
+        let guard = cancel.guard();
         let mut rx = rx;
         let mut buf: Vec<Event> = Vec::new();
         loop {
@@ -163,6 +170,7 @@ where
                 break;
             }
         }
+        guard.disarm();
     });
     Sse::new(tokio_stream::wrappers::ReceiverStream::new(out_rx))
         .keep_alive(KeepAlive::default())
@@ -173,39 +181,63 @@ where
 pub struct GenOutcome {
     pub text: String,
     pub finish_reason: String,
-    pub prompt_tokens: usize,
-    pub completion_tokens: usize,
-    pub truncated: bool,
+    pub usage: crate::engine_types::GenerationUsage,
+}
+
+pub async fn prepare_inference_request(
+    _state: &AppState,
+    messages: Vec<crate::engine_types::ChatMessage>,
+    params: crate::engine_types::GenParams,
+    owner: &ApiKeyIdentity,
+) -> Result<crate::engine_types::InferenceRequest, Response> {
+    Ok(inference_request(messages, params, owner))
+}
+
+pub fn inference_request(
+    messages: Vec<crate::engine_types::ChatMessage>,
+    params: crate::engine_types::GenParams,
+    owner: &ApiKeyIdentity,
+) -> crate::engine_types::InferenceRequest {
+    crate::engine_types::InferenceRequest {
+        messages,
+        params,
+        owner: owner.0,
+        cancel: Default::default(),
+    }
+}
+
+pub fn engine_error(error: anyhow::Error) -> Response {
+    match error.downcast::<crate::media::MediaError>() {
+        Ok(error) => media_error(error),
+        Err(error) => internal_error(error.to_string()),
+    }
 }
 
 pub async fn generate_collect(
     engine: &dyn Engine,
-    messages: Vec<crate::engine_types::ChatMessage>,
-    params: crate::engine_types::GenParams,
+    request: crate::engine_types::InferenceRequest,
 ) -> Result<GenOutcome, Response> {
-    let mut rx = engine
-        .generate(messages, params)
-        .await
-        .map_err(|e| internal_error(e.to_string()))?;
+    let guard = request.cancel.guard();
+    let mut rx = engine.generate(request).await.map_err(engine_error)?;
     let mut text = String::new();
     while let Some(ev) = rx.recv().await {
         match ev {
             crate::engine_types::StreamEvent::Delta(d) => text.push_str(&d),
             crate::engine_types::StreamEvent::Done {
                 finish_reason,
-                prompt_tokens,
-                completion_tokens,
-                truncated,
+                usage,
             } => {
+                guard.disarm();
                 return Ok(GenOutcome {
                     text,
                     finish_reason,
-                    prompt_tokens,
-                    completion_tokens,
-                    truncated,
-                })
+                    usage,
+                });
             }
-            crate::engine_types::StreamEvent::Error(e) => return Err(internal_error(e)),
+            crate::engine_types::StreamEvent::Error(e) => {
+                guard.disarm();
+                return Err(internal_error(e));
+            }
         }
     }
     Err(internal_error("stream ended without Done"))

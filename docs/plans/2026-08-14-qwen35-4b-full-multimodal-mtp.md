@@ -890,16 +890,18 @@ Profile switch deletes all pending/claimed media for current profile, unloads op
 
 ### Phase 6: Three APIs, usage and cancellation (estimate: 24 h)
 
-- [ ] `src/engine.rs` — typed ordered request and extended usage.
-- [ ] `src/engine_types.rs` — exports.
-- [ ] `src/engine_batched.rs` — preprocessing before scheduler admission and cancellation propagation.
-- [ ] `src/api.rs` — bounded JSON and common error response.
-- [ ] [P] `src/api/openai.rs` — Chat schemas.
-- [ ] [P] `src/api/responses.rs` — Responses schemas.
-- [ ] [P] `src/api/anthropic.rs` — Messages schemas.
-- [ ] `tests/api_test.rs` — current text matrix.
-- [ ] `tests/multimodal_api_test.rs` — all source forms, stream/non-stream, mixed order and Russian UTF-8.
-- **Independent check:** Text/image/multi-image/video pass all three APIs with auth; final usage exact; cancellation during fetch/decode/preprocess/queue/generation frees every reservation and temp file.
+- [x] `src/engine.rs` — typed ordered request, cancellation and extended usage.
+- [x] `src/engine_types.rs` — exports.
+- [x] `src/engine_batched.rs` — preprocessing before scheduler admission and cancellation propagation.
+- [x] `src/api.rs` — bounded JSON and common error response.
+- [x] [P] `src/api/openai.rs` — Chat schemas.
+- [x] [P] `src/api/responses.rs` — Responses schemas.
+- [x] [P] `src/api/anthropic.rs` — Messages schemas.
+- [x] `tests/api_test.rs` — current text matrix.
+- [x] `tests/multimodal_api_test.rs` — source schemas, mixed order, Russian UTF-8, helper preparation and cleanup.
+- **Independent check:** macOS Metal all-target check and `62/62` focused lib/API/media/helper tests pass. Windows CUDA all-target check, same `31/31` API/media/helper tests and real image upload→claim→helper→processor→Vision→scheduler→four-token decode pass; usage reports one image and visual tokens, claimed upload is deleted. Client disconnect propagates a shared cancel flag through generation; cancel-before-helper cleanup test passes. API parsers preserve ordered Russian text/media/text blocks across Chat, Responses and Anthropic. Full public HTTPS success oracle and final video codec matrix remain Phase 10 because approved no-network FFmpeg bundle is still absent. `current` unchanged; live server restored on `18100`.
+- deviated: `src/api/content.rs` and `src/media/prepare.rs` hold shared source parsing and media orchestration to avoid three API copies.
+- deviated: real CUDA engine gate lives in `tests/multimodal_engine_test.rs`; it exposed and fixed scheduler generated-token cache offset in candle commit `6d091012`.
 
 ### Phase 7: Transactional MTP B=1..4 (estimate: 44 h)
 
@@ -1011,13 +1013,13 @@ Profile switch deletes all pending/claimed media for current profile, unloads op
 | FR-005 Atomic publication | 2 ✅, 10 | `MoveFileExW` pointer replacement and rollback |
 | FR-006 Candle runtime | 5 ✅, 7 | native Vision runtime complete; MTP pending; llama.cpp build/reference only |
 | FR-007 Processor parity | 3 ✅, 4 ✅ | normalized decoded RGB, exact processor golden suite |
-| FR-008 Image inputs | 3, 6, 9 | helper codecs, API schemas, WebUI attachments |
-| FR-009 Video inputs | 3 🔶, 4 ✅, 6, 9 | codec matrix, sampling, API/UI |
-| FR-010 Media sources/order | 2, 3, 6 | typed blocks, upload/base64/HTTPS, no reorder |
+| FR-008 Image inputs | 3, 6 ✅, 9 | helper codecs, API schemas, WebUI attachments |
+| FR-009 Video inputs | 3 🔶, 4 ✅, 6 ✅, 9 | codec matrix, sampling, API/UI |
+| FR-010 Media sources/order | 2, 3, 6 ✅ | typed blocks, upload/base64/HTTPS, no reorder |
 | FR-011 Upload API | 3 ✅ | multipart/raw endpoint, key-bound atomic claim, TTL |
 | FR-012 Media limits | 3 ✅, 4 🔶, 8 | encoded/temp/RAM/visual/VRAM admission |
 | FR-013 No hidden degradation | 4 🔶, 8 | deterministic pre-admission choice, 422 after one recheck |
-| FR-014 Adaptive sampling | 4 🔶, 6 | frame selector and actual usage |
+| FR-014 Adaptive sampling | 4 🔶, 6 ✅ | frame selector and actual usage |
 | FR-015 Transparent MTP | 7 | target-sampled verification and full rollback |
 | FR-016 Batched MTP | 7 | B=1..4 transaction scheduler and mixed fallback |
 | FR-017 On-demand components | 8 | unloaded startup, 60s TTL, Vision priority |
@@ -1026,19 +1028,19 @@ Profile switch deletes all pending/claimed media for current profile, unloads op
 | FR-020 Decoder isolation | 3 ✅ | helper Job Object, no-network codecs, probe/error fixtures |
 | FR-021 Pinned codecs | 1, 3 🔶 | bundled absolute-path FFmpeg/ffprobe hashes; final bundle matrix Phase 10 |
 | FR-022 HTTPS safety | 3 ✅ | public-IP validation, pinning, redirect and timeouts |
-| FR-023 Cleanup | 3 ✅, 6, 8 | RAII, TTL, cancel, error and switch deletion |
-| FR-024 Cancellation | 3, 4, 6, 7 | cancel flag through every phase and transaction |
-| FR-025 Error map | 2, 3, 6 | one typed media error conversion |
-| FR-026 API compatibility | 2, 6 | Chat/Responses/Anthropic schemas |
-| FR-027 Streaming usage | 2, 6 | unchanged deltas and final MediaUsage |
+| FR-023 Cleanup | 3 ✅, 6 ✅, 8 | RAII, TTL, cancel, error and switch deletion |
+| FR-024 Cancellation | 3, 4, 6 ✅, 7 | cancel flag through every phase and transaction |
+| FR-025 Error map | 2, 3, 6 ✅ | one typed media error conversion |
+| FR-026 API compatibility | 2, 6 ✅ | Chat/Responses/Anthropic schemas |
+| FR-027 Streaming usage | 2, 6 ✅ | unchanged deltas and final MediaUsage |
 | FR-028 Capability metadata | 2 ✅, 8, 10 | manifest truth and component state |
 | FR-029 Capability fallback | 2 ✅, 6, 8 | text-only synthetic profile and pre-inference rejection |
 | FR-030 Stateless WebUI | 9 | tab-memory bytes, persistent placeholders, accessibility |
-| FR-031 Text output | 2, 6 | media only as input; existing text output protocol |
+| FR-031 Text output | 2, 6 ✅ | media only as input; existing text output protocol |
 | FR-032 Offline runtime | 1, 2, 10 | complete runtime bundle and offline gate |
 | FR-033 Workspace isolation | 1, 10 | path allowlist and Windows scripts |
 | FR-034 Exact source coverage | 1 ✅ | 738 fail-closed mapping report |
-| FR-035 Audio exclusion | 3 ✅, 6 | video-only mapping and `audio_processed=false` |
+| FR-035 Audio exclusion | 3 ✅, 6 ✅ | video-only mapping and `audio_processed=false` |
 | FR-036 Objective media suite | 1 ✅, 4 ✅, 10 | hashed English/Russian fixtures and rubrics |
 | FR-037 Staged validation | 1–10 | independent check per phase, one final promotion |
 | FR-038 mRoPE/token parity | 4 ✅, 5 ✅ | marker/count/position gate, separate cache/RoPE decode positions and scalar Text path |

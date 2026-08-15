@@ -9,7 +9,7 @@ use std::sync::{Arc, RwLock};
 use anyhow::Result;
 use tokio::sync::mpsc;
 
-use crate::engine::{ChatMessage, Engine, GenParams, ModelInfo, StreamEvent};
+use crate::engine::{Engine, InferenceRequest, ModelInfo, StreamEvent};
 
 pub struct SwappableEngine {
     inner: RwLock<Option<Arc<dyn Engine>>>,
@@ -44,16 +44,10 @@ impl SwappableEngine {
 
 #[async_trait::async_trait]
 impl Engine for SwappableEngine {
-    async fn generate(
-        &self,
-        messages: Vec<ChatMessage>,
-        params: GenParams,
-    ) -> Result<mpsc::Receiver<StreamEvent>> {
-        let engine = {
-            self.inner.read().expect("engine lock").clone()
-        };
+    async fn generate(&self, request: InferenceRequest) -> Result<mpsc::Receiver<StreamEvent>> {
+        let engine = { self.inner.read().expect("engine lock").clone() };
         match engine {
-            Some(e) => e.generate(messages, params).await,
+            Some(e) => e.generate(request).await,
             None => Err(anyhow::anyhow!("model is loading")),
         }
     }

@@ -1,13 +1,17 @@
 use axum::{
-    extract::State,
+    extract::{Extension, State},
     response::{sse::Event, IntoResponse, Response},
     Json,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::api::{bad_request, generate_collect, internal_error, sse_response, AppState};
-use crate::engine_types::{ChatMessage, GenParams, StreamEvent};
+use crate::api::{
+    bad_request, engine_error, generate_collect, prepare_inference_request, sse_response,
+    ApiKeyIdentity, AppState,
+};
+use crate::engine_types::{ChatMessage, ContentBlock, GenParams, GenerationUsage, StreamEvent};
+use crate::media::MediaKind;
 
 use super::openai::now_unix;
 
@@ -25,10 +29,7 @@ pub struct ResponsesRequest {
 
 fn input_to_messages(input: &Value) -> Result<Vec<ChatMessage>, Response> {
     match input {
-        Value::String(s) => Ok(vec![ChatMessage {
-            role: "user".into(),
-            content: s.clone(),
-        }]),
+        Value::String(s) => Ok(vec![ChatMessage::text("user", s)]),
         Value::Array(arr) => arr
             .iter()
             .map(|m| {
@@ -38,26 +39,31 @@ fn input_to_messages(input: &Value) -> Result<Vec<ChatMessage>, Response> {
                     .unwrap_or("user")
                     .to_string();
                 let content = match m.get("content") {
-                    Some(Value::String(s)) => s.clone(),
-                    Some(Value::Array(parts)) => {
-                        let mut out = String::new();
-                        for p in parts {
-                            match p.get("type").and_then(|t| t.as_str()) {
-                                Some("input_text") | Some("text") | Some("output_text") => {
-                                    if let Some(t) = p.get("text").and_then(|t| t.as_str()) {
-                                        out.push_str(t);
-                                    }
-                                }
-                                Some("input_image") | Some("image_url") => {
-                                    return Err(bad_request("vision not supported"));
-                                    // BD-004
-                                }
-                                _ => {}
-                            }
-                        }
-                        out
-                    }
-                    _ => String::new(),
+                    Some(Value::String(s)) => vec![super::content::text(s)],
+                    Some(Value::Array(parts)) => parts
+                        .iter()
+                        .map(|part| match part.get("type").and_then(Value::as_str) {
+                            Some("input_text") | Some("text") | Some("output_text") => part
+                                .get("text")
+                                .and_then(Value::as_str)
+                                .map(super::content::text)
+                                .ok_or_else(|| bad_request("text block requires text")),
+                            Some("input_image") | Some("image_url") => super::content::media(
+                                part,
+                                MediaKind::Image,
+                                &["image_url", "url"],
+                                part.get("media_id").and_then(Value::as_str),
+                            ),
+                            Some("input_video") | Some("video_url") => super::content::media(
+                                part,
+                                MediaKind::Video,
+                                &["video_url", "url"],
+                                part.get("media_id").and_then(Value::as_str),
+                            ),
+                            _ => Err(bad_request("unsupported content block type")),
+                        })
+                        .collect::<Result<Vec<ContentBlock>, Response>>()?,
+                    _ => vec![],
                 };
                 Ok(ChatMessage { role, content })
             })
@@ -72,19 +78,8 @@ fn response_object(
     id: &str,
     model: &str,
     text: &str,
-    usage: (usize, usize),
+    usage: GenerationUsage,
     status: &str,
-) -> Value {
-    response_object_ext(id, model, text, usage, status, false)
-}
-
-fn response_object_ext(
-    id: &str,
-    model: &str,
-    text: &str,
-    usage: (usize, usize),
-    status: &str,
-    truncated: bool,
 ) -> Value {
     json!({
         "id": id,
@@ -100,16 +95,19 @@ fn response_object_ext(
             "content": [{"type": "output_text", "text": text}],
         }],
         "usage": {
-            "input_tokens": usage.0,
-            "output_tokens": usage.1,
-            "total_tokens": usage.0 + usage.1,
-            "truncated": truncated,
+            "input_tokens": usage.prompt_tokens,
+            "output_tokens": usage.completion_tokens,
+            "total_tokens": usage.prompt_tokens + usage.completion_tokens,
+            "truncated": usage.truncated,
+            "media": usage.media,
+            "mtp": usage.mtp,
         },
     })
 }
 
 pub async fn responses(
     State(state): State<AppState>,
+    Extension(owner): Extension<ApiKeyIdentity>,
     Json(req): Json<ResponsesRequest>,
 ) -> Response {
     let messages = match input_to_messages(&req.input) {
@@ -133,36 +131,40 @@ pub async fn responses(
     let id = format!("resp_{}", uuid::Uuid::new_v4().simple());
     let model = state.engine.model_info().id;
 
+    let request = match prepare_inference_request(&state, messages, params, &owner).await {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
     if !req.stream {
-        let out = match generate_collect(state.engine.as_ref(), messages, params).await {
+        let out = match generate_collect(state.engine.as_ref(), request).await {
             Ok(o) => o,
             Err(r) => return r,
         };
-        return Json(response_object_ext(
+        return Json(response_object(
             &id,
             &model,
             &out.text,
-            (out.prompt_tokens, out.completion_tokens),
+            out.usage,
             "completed",
-            out.truncated,
         ))
         .into_response();
     }
 
-    let rx = match state.engine.generate(messages, params).await {
+    let cancel = request.cancel.clone();
+    let rx = match state.engine.generate(request).await {
         Ok(r) => r,
-        Err(e) => return internal_error(e.to_string()),
+        Err(e) => return engine_error(e),
     };
 
     let mut acc = String::new();
     let mut created_sent = false;
     let created = json!({
         "type": "response.created",
-        "response": response_object(&id, &model, "", (0, 0), "in_progress"),
+        "response": response_object(&id, &model, "", GenerationUsage::default(), "in_progress"),
     })
     .to_string();
 
-    sse_response(rx, move |ev, out| match ev {
+    sse_response(rx, cancel, move |ev, out| match ev {
         StreamEvent::Delta(d) => {
             if !created_sent {
                 created_sent = true;
@@ -180,12 +182,7 @@ pub async fn responses(
             );
             true
         }
-        StreamEvent::Done {
-            prompt_tokens,
-            completion_tokens,
-            truncated,
-            ..
-        } => {
+        StreamEvent::Done { usage, .. } => {
             if !created_sent {
                 created_sent = true;
                 out.push(
@@ -194,14 +191,7 @@ pub async fn responses(
                         .data(created.clone()),
                 );
             }
-            let obj = response_object_ext(
-                &id,
-                &model,
-                &acc,
-                (prompt_tokens, completion_tokens),
-                "completed",
-                truncated,
-            );
+            let obj = response_object(&id, &model, &acc, usage, "completed");
             out.push(
                 Event::default()
                     .event("response.completed")
