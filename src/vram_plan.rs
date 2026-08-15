@@ -116,6 +116,9 @@ pub fn free_vram_mib() -> Option<usize> {
 
 /// Рабочий запас: cuBLAS workspace, dequant scratch, logits, фрагментация.
 const WORKSPACE_MIB: usize = 384;
+/// Оценка VRAM под on-demand компоненты (Vision ~600 MiB, MTP ~150 MiB).
+pub const VISION_COMPONENT_ESTIMATE_MIB: usize = 650;
+pub const MTP_COMPONENT_ESTIMATE_MIB: usize = 160;
 /// Доля карты, выше которой начинается paging/риск OOM.
 /// 93%: на 12 GB карте это ~500 MiB запаса — ниже начинается WDDM paging
 /// (измерено: 98% → коллапс скорости). 90% было бы безопаснее, но тогда

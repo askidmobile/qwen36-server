@@ -922,14 +922,15 @@ Profile switch deletes all pending/claimed media for current profile, unloads op
 
 ### Phase 8: Component lifecycle, VRAM and hot-switch (estimate: 22 h)
 
-- [ ] `src/component_manager.rs` — load barrier, leases, TTL and priority.
-- [ ] `src/engine_batched.rs` — control queue/drain integration.
-- [ ] `src/engine.rs` — single-slot functional path.
-- [ ] `src/vram_plan.rs` — component/media/transaction budgets.
-- [ ] `src/engine_swap.rs` — safe profile switch and rollback.
-- [ ] `src/api/admin.rs` — state visibility.
-- [ ] `tests/component_manager_test.rs` — deterministic state machine.
-- [ ] `tests/profile_switch_test.rs` — active drain/media cleanup/capabilities.
+- [x] `src/component_manager.rs` — load barrier, leases, TTL and priority.
+- [x] `src/engine_batched.rs` — control queue/drain integration.
+- [x] `src/engine.rs` — single-slot functional path.
+- [x] `src/vram_plan.rs` — component/media/transaction budgets.
+- [x] `src/engine_swap.rs` — safe profile switch and rollback.
+- [x] `src/api/admin.rs` — state visibility.
+- [x] `tests/component_manager_test.rs` — deterministic state machine.
+- [x] `tests/profile_switch_test.rs` — active drain/media cleanup/capabilities.
+- **Independent check:** Component manager unit tests prove on-demand leases, 60s warm TTL, priority eviction of MTP over Vision under pressure, and error state isolation; swappable engine drain and switch tests verify clean handover and capability reflection without leaking active requests.
 - **Independent check:** 10 Vision/MTP cold→use→TTL-unload cycles and mixed pressure cycle show no monotonic dedicated/committed/shared growth; Vision evicts MTP first; text remains 200 after component failure.
 
 ### Phase 9: Accessible multimodal WebUI (estimate: 16 h)
@@ -1023,9 +1024,9 @@ Profile switch deletes all pending/claimed media for current profile, unloads op
 | FR-014 Adaptive sampling | 4 🔶, 6 ✅ | frame selector and actual usage |
 | FR-015 Transparent MTP | 7 ✅ | target-sampled verification and full rollback |
 | FR-016 Batched MTP | 7 ✅ | B=1..4 transaction scheduler and mixed fallback |
-| FR-017 On-demand components | 8 | unloaded startup, 60s TTL, Vision priority |
-| FR-018 Safe load barrier | 8 | control queue, active drain, paused admission |
-| FR-019 Isolated failure | 2 ✅, 7 ✅, 8 | optional component isolation and baseline fallback |
+| FR-017 On-demand components | 8 ✅ | unloaded startup, 60s TTL, Vision priority |
+| FR-018 Safe load barrier | 8 ✅ | control queue, active drain, paused admission |
+| FR-019 Isolated failure | 2 ✅, 7 ✅, 8 ✅ | optional component isolation and baseline fallback |
 | FR-020 Decoder isolation | 3 ✅ | helper Job Object, no-network codecs, probe/error fixtures |
 | FR-021 Pinned codecs | 1, 3 🔶 | bundled absolute-path FFmpeg/ffprobe hashes; final bundle matrix Phase 10 |
 | FR-022 HTTPS safety | 3 ✅ | public-IP validation, pinning, redirect and timeouts |

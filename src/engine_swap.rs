@@ -53,11 +53,16 @@ impl Engine for SwappableEngine {
     }
 
     fn model_info(&self) -> ModelInfo {
+        let (path, ctx, slots) = self.current.read().expect("current lock").clone();
         let engine = { self.inner.read().expect("engine lock").clone() };
         match engine {
-            Some(e) => e.model_info(),
+            Some(e) => {
+                let mut info = e.model_info();
+                info.context_length = ctx;
+                info.slots = slots;
+                info
+            }
             None => {
-                let (path, ctx, slots) = self.current.read().expect("current lock").clone();
                 ModelInfo {
                     id: format!("loading: {}", crate::engine::model_id_from_filename(&path)),
                     context_length: ctx,

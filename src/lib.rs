@@ -1,6 +1,7 @@
 //! qwen36-server — сервер инференса Qwen3.6-27B GGUF (contract: docs/engine-api.md).
 //! Батчинг 4 слотов: docs/batch-integration.md.
 
+pub mod component_manager;
 pub mod config;
 pub mod engine;
 pub mod engine_swap;

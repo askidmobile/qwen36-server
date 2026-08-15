@@ -57,7 +57,7 @@ fn app(deltas: Vec<&str>) -> axum::Router {
     let switcher = Arc::new(qwen36_server::engine_swap::SwappableEngine::new(
         mock,
         std::path::PathBuf::from("mock.gguf"),
-        8192,
+        81920,
         4,
     ));
     let media_root =
