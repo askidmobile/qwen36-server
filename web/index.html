@@ -15,6 +15,15 @@
   --shadow: 0 1px 2px rgba(16,16,20,.05);
   --mono: ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace;
 }
+html[data-theme="dark"] {
+  --bg: #14161c; --bg2: #1a1d25; --bg3: #232733;
+  --border: #2c3140; --border-soft: #232733;
+  --fg: #e5e7eb; --dim: #9ca3af; --faint: #6b7280;
+  --accent: #818cf8; --accent-soft: rgba(99,102,241,.18);
+  --red: #f87171; --green: #34d399; --yellow: #fbbf24;
+  --shadow: 0 1px 2px rgba(0,0,0,.4);
+}
+html[data-theme="dark"] .msg .bubble pre { background: #0b0f1a; color: #d5dceb; }
 * { box-sizing: border-box; }
 * { scrollbar-width: thin; scrollbar-color: #d4d4d8 transparent; }
 *::-webkit-scrollbar { width: 8px; height: 8px; }
@@ -110,6 +119,29 @@ details.think .tc pre { opacity: .9; }
 #keyform h2 { margin: 0; font-size: 17px; }
 #keyform input { background: var(--bg); border: 1px solid var(--border); color: var(--fg); border-radius: var(--radius-sm); padding: 8px 12px; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); border: 0; }
+
+/* message actions */
+.msg .actions { display: flex; gap: 4px; margin-top: 4px; opacity: 0; transition: opacity .12s; }
+.msg:hover .actions, .msg:focus-within .actions { opacity: 1; }
+.msg .actions button { border: none; background: none; color: var(--faint); padding: 2px 6px; font-size: 12px; cursor: pointer; border-radius: 5px; }
+.msg .actions button:hover { color: var(--accent); background: var(--bg3); }
+/* code block header */
+.codewrap { position: relative; margin: .6em 0; }
+.codewrap .codebar { display: flex; justify-content: space-between; align-items: center; background: #0f172a; color: #94a3b8; font-family: var(--mono); font-size: 10.5px; padding: 6px 14px 0; border-radius: var(--radius-sm) var(--radius-sm) 0 0; }
+html[data-theme="dark"] .codewrap .codebar { background: #0b0f1a; }
+.codewrap pre { margin: 0 !important; border-radius: 0 0 var(--radius-sm) var(--radius-sm) !important; }
+.codewrap .codebar button { background: none; border: none; color: #94a3b8; cursor: pointer; font-size: 11px; padding: 2px 6px; }
+.codewrap .codebar button:hover { color: #e2e8f0; }
+/* toasts */
+#toasts { position: fixed; bottom: 20px; right: 20px; display: flex; flex-direction: column; gap: 8px; z-index: 100; }
+.toast { background: var(--fg); color: var(--bg); border-radius: var(--radius-sm); padding: 9px 16px; font-size: 13px; box-shadow: 0 4px 16px rgba(0,0,0,.18); animation: toastin .18s ease-out; max-width: 320px; }
+.toast.err { background: var(--red); color: #fff; }
+@keyframes toastin { from { transform: translateY(8px); opacity: 0; } }
+/* composer counter + system prompt */
+#composerwrap { position: relative; }
+#tokcount { position: absolute; bottom: -16px; right: 26px; font-size: 10.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
+#sysprompt { width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--fg); border-radius: var(--radius-sm); padding: 7px 10px; font: inherit; font-size: 12.5px; min-height: 36px; resize: vertical; margin-top: 6px; }
+#modelfilter { width: 150px; }
 </style>
 </head>
 <body>
@@ -123,6 +155,7 @@ details.think .tc pre { opacity: .9; }
     <option value="thinking-coding">thinking · код</option>
   </select>
   <select id="modelsel" title="Модель (GGUF с диска сервера)" aria-label="Выбор модели"></select>
+  <input id="modelfilter" type="text" placeholder="фильтр…" aria-label="Фильтр моделей" autocomplete="off">
   <select id="slotssel" title="Параллельные слоты" aria-label="Слоты"></select>
   <select id="ctxsel" title="Контекст" aria-label="Контекстное окно"></select>
   <button id="applymodel" title="Переключить модель/контекст">Применить</button>
@@ -131,6 +164,7 @@ details.think .tc pre { opacity: .9; }
     <div class="ctxbar"><div id="ctxfill"></div></div>
   </div>
   <button id="stopbtn" disabled>Стоп</button>
+  <button id="themebtn" title="Светлая/тёмная тема" aria-label="Переключить тему">🌓</button>
 </header>
 <main>
   <aside>
@@ -152,16 +186,22 @@ details.think .tc pre { opacity: .9; }
         <label>repetition_penalty <input type="number" id="p_repetition_penalty" step="0.05" min="0"></label>
         <label>max_tokens <input type="number" id="p_max_tokens" step="128" min="1"></label>
       </div>
+      <div style="padding: 0 24px 14px">
+        <label for="sysprompt" style="font-size:12px;color:var(--dim)">System prompt (для текущего чата)</label>
+        <textarea id="sysprompt" placeholder="Например: Ты — краткий технический ассистент…" aria-label="System prompt"></textarea>
+      </div>
     </details>
     <div id="composer">
       <input type="file" id="fileinput" class="sr-only" multiple accept="image/*,video/*">
       <button id="attachbtn" type="button" title="Прикрепить изображение или видео" aria-label="Прикрепить медиафайл">📎</button>
       <textarea id="input" placeholder="Сообщение… (Enter — отправить, Shift+Enter — новая строка)" aria-label="Текст сообщения"></textarea>
+      <div id="tokcount"></div>
       <button class="primary" id="send">Отправить</button>
     </div>
   </section>
 </main>
 <div id="announcer" class="sr-only" aria-live="assertive"></div>
+<div id="toasts" aria-live="polite"></div>
 <div id="keyform">
   <h2>API key</h2>
   <input type="password" id="keyformkey" placeholder="Введите мастер-ключ" autocomplete="off">
@@ -195,6 +235,14 @@ const store = {
   set current(v) { localStorage.setItem("q36_current", v); },
 };
 
+function regenerate(continuation) {
+  const c = getChat();
+  if (!c) return;
+  saveChat(c);
+  renderMessages();
+  if (continuation) continuation(c);
+}
+
 async function api(path, opts = {}) {
   opts.headers = Object.assign({ "Authorization": "Bearer " + store.key }, opts.headers || {});
   if (opts.body && typeof opts.body === "string") opts.headers["Content-Type"] = "application/json";
@@ -205,6 +253,47 @@ async function api(path, opts = {}) {
 
 function showKeyForm() { $("keyform").style.display = "flex"; }
 function hideKeyForm() { $("keyform").style.display = "none"; }
+
+function toast(msg, err) {
+  const t = document.createElement("div");
+  t.className = "toast" + (err ? " err" : "");
+  t.textContent = msg;
+  $("toasts").append(t);
+  setTimeout(() => t.remove(), err ? 5000 : 2500);
+}
+
+/* theme */
+function applyTheme(t) {
+  document.documentElement.dataset.theme = t;
+  localStorage.setItem("q36_theme", t);
+}
+applyTheme(localStorage.getItem("q36_theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"));
+$("themebtn").onclick = () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+
+async function copyText(s, okMsg) {
+  try { await navigator.clipboard.writeText(s); toast(okMsg || "Скопировано"); }
+  catch { toast("Копирование недоступно", true); }
+}
+
+function decorateCodeblocks(bubble) {
+  bubble.querySelectorAll("pre").forEach(pre => {
+    if (pre.parentElement.classList.contains("codewrap")) return;
+    const wrap = document.createElement("div");
+    wrap.className = "codewrap";
+    const lang = (pre.querySelector("code") || {}).className || "";
+    const bar = document.createElement("div");
+    bar.className = "codebar";
+    const name = document.createElement("span");
+    name.textContent = (lang.replace(/language-/, "") || "code");
+    const btn = document.createElement("button");
+    btn.textContent = "копировать";
+    btn.setAttribute("aria-label", "Скопировать код");
+    btn.onclick = () => copyText(pre.textContent, "Код скопирован");
+    bar.append(name, btn);
+    pre.replaceWith(wrap);
+    wrap.append(bar, pre);
+  });
+}
 
 function renderTray() {
   const tray = $("tray");
@@ -310,7 +399,7 @@ async function loadModels() {
 
 function newChat(title) {
   return { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-           title: title || "Новый чат", messages: [] };
+           title: title || "Новый чат", system: "", messages: [] };
 }
 function getChat() { return store.chats.find(c => c.id === store.current) || null; }
 function saveChat(c) {
@@ -433,11 +522,11 @@ function renderMessages() {
   el.innerHTML = "";
   const c = getChat();
   if (!c) { updateCtxBar(); return; }
-  for (const msg of c.messages) el.append(renderMsg(msg, false));
+  c.messages.forEach((msg, i) => el.append(renderMsg(msg, false, i, c.messages)));
   updateCtxBar();
   el.scrollTop = el.scrollHeight;
 }
-function renderMsg(msg, streaming) {
+function renderMsg(msg, streaming, idx, allMsgs) {
   const d = document.createElement("div");
   d.className = "msg " + msg.role + (streaming ? " streaming" : "");
   const role = document.createElement("div");
@@ -452,6 +541,41 @@ function renderMsg(msg, streaming) {
     if (msg.meta.stats) { const s = document.createElement("span"); s.textContent = msg.meta.stats; meta.append(s); }
     if (msg.meta.truncated) { const b = document.createElement("span"); b.className = "trunc"; b.textContent = "контекст обрезан"; meta.append(b); }
     d.append(meta);
+  }
+  if (!streaming) {
+    const acts = document.createElement("div");
+    acts.className = "actions";
+    const mk = (label, title, fn) => {
+      const b = document.createElement("button");
+      b.textContent = label; b.title = title;
+      b.setAttribute("aria-label", title);
+      b.onclick = fn;
+      acts.append(b);
+      return b;
+    };
+    mk("⧉", "Скопировать сообщение", () => copyText(msg.content, "Сообщение скопировано"));
+    if (msg.role === "user") {
+      mk("✎", "Редактировать сообщение", () => {
+        const t = prompt("Редактировать сообщение:", msg.content);
+        if (t === null) return;
+        msg.content = t;
+        saveChat(getChat());
+        renderMessages();
+      });
+    } else {
+      mk("↻", "Сгенерировать заново", () => {
+        if (abortCtrl) return;
+        allMsgs.splice(idx, 1);
+        regenerate(c => send(true));
+      });
+    }
+    mk("🗑", "Удалить сообщение", () => {
+      allMsgs.splice(idx, 1);
+      saveChat(getChat());
+      renderMessages();
+      toast("Сообщение удалено");
+    });
+    d.append(acts);
   }
   return d;
 }
@@ -481,6 +605,7 @@ function fillBubble(bubble, msg, streaming) {
   } else {
     bubble.textContent = msg.content;
   }
+  decorateCodeblocks(bubble);
 }
 
 function updateCtxBar() {
@@ -526,7 +651,7 @@ async function uploadAttachment(att) {
   return j.id;
 }
 
-async function send() {
+async function send(regen) {
   const text = $("input").value.trim();
   if ((!text && !activeAttachments.length) || abortCtrl) return;
   let c = getChat();
@@ -561,14 +686,20 @@ async function send() {
     persistentText += (persistentText ? "\n" : "") + (att.kind === "image" ? "[Изображение]" : "[Видео]");
   }
 
-  c.messages.push({ role: "user", content: persistentText });
+  if (!regen) c.messages.push({ role: "user", content: persistentText });
   $("input").value = "";
   activeAttachments = [];
   renderTray();
 
   const mode = $("mode").value;
-  const apiMessages = c.messages.slice(0, -1).map(m => ({ role: m.role, content: m.content }));
-  apiMessages.push({ role: "user", content: contentBlocks });
+  const apiMessages = [];
+  const sys = $("sysprompt").value.trim() || (c.system || "");
+  c.system = sys;
+  if (sys) apiMessages.push({ role: "system", content: sys });
+  for (const m of c.messages) apiMessages.push({ role: m.role, content: m.content });
+  if (!regen && contentBlocks.length) {
+    apiMessages[apiMessages.length - 1] = { role: "user", content: contentBlocks };
+  }
 
   const body = Object.assign({
     model: modelId,
@@ -594,6 +725,7 @@ async function send() {
   userPinned = true;
   el.scrollTop = el.scrollHeight;
   const bubble = msgEl.querySelector(".bubble");
+  msgEl.append(liveEl);
 
   let dirty = false, rafScheduled = false;
   const scheduleRedraw = () => {
@@ -612,6 +744,9 @@ async function send() {
   let firstDeltaAt = null;
   let usage = null, finishReason = null;
   const t0 = performance.now();
+  let liveTok = 0, liveT0 = null;
+  const liveEl = document.createElement("div");
+  liveEl.className = "meta"; liveEl.style.marginTop = "4px";
 
   try {
     const r = await api("/v1/chat/completions", {
@@ -641,6 +776,12 @@ async function send() {
           const delta = ch && ch.delta;
           if (delta && delta.content) {
             if (!firstDeltaAt) firstDeltaAt = performance.now();
+            if (!liveT0) liveT0 = performance.now();
+            liveTok++;
+            const ls = (performance.now() - liveT0) / 1000;
+            if (ls > 0.5) {
+              liveEl.textContent = "⚡ " + (liveTok / ls >= 10 ? (liveTok / ls).toFixed(0) : (liveTok / ls).toFixed(1)) + " tok/s";
+            }
             asst.content += delta.content;
             scheduleRedraw();
           }
@@ -686,10 +827,27 @@ async function send() {
   }
 }
 
-$("send").onclick = send;
+$("send").onclick = () => send(false);
 $("stopbtn").onclick = () => { if (abortCtrl) abortCtrl.abort(); };
 $("input").addEventListener("keydown", e => {
-  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(false); }
+});
+$("input").addEventListener("input", () => {
+  const est = Math.ceil($("input").value.length / 4);
+  $("tokcount").textContent = est ? "~" + est + " tok" : "";
+});
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && abortCtrl) abortCtrl.abort();
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    const q = prompt("Поиск по чатам:");
+    if (!q) return;
+    const hits = store.chats.filter(c => c.messages.some(m => (m.content || "").toLowerCase().includes(q.toLowerCase())));
+    if (!hits.length) { toast("Ничего не найдено"); return; }
+    store.current = hits[0].id;
+    renderChatList(); renderMessages();
+    toast("Найдено чатов: " + hits.length + ", открыт первый");
+  }
 });
 $("mode").onchange = () => {
   store.mode = $("mode").value;
@@ -700,6 +858,7 @@ $("newchat").onclick = () => {
   const chats = store.chats; chats.unshift(c); store.chats = chats;
   store.current = c.id;
   renderChatList(); renderMessages();
+  $("sysprompt").value = "";
   $("input").focus();
 };
 $("keysave").onclick = () => {
@@ -838,10 +997,48 @@ $("mode").value = store.mode;
 applyPreset($("mode").value);
 if (!store.chats.length) { const c = newChat(); store.chats = [c]; store.current = c.id; }
 else if (!getChat()) store.current = store.chats[0].id;
+$("sysprompt").value = (getChat() || {}).system || "";
 renderChatList();
 renderMessages();
 loadModels();
 loadAvailableModels();
+
+/* export chat as markdown */
+function exportChat() {
+  const c = getChat();
+  if (!c || !c.messages.length) { toast("Чат пуст", true); return; }
+  let md = "# " + c.title + "\n\n";
+  if (c.system) md += "> **System:** " + c.system + "\n\n";
+  for (const m of c.messages) {
+    md += "## " + (m.role === "user" ? "Пользователь" : "Модель") + "\n\n" + m.content + "\n\n";
+    if (m.meta && m.meta.stats) md += "*" + m.meta.stats + "*\n\n";
+  }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([md], { type: "text/markdown" }));
+  a.download = (c.title || "chat").replace(/[^а-яa-z0-9]+/gi, "_") + ".md";
+  a.click();
+  URL.revokeObjectURL(a.href);
+  toast("Экспортировано в Markdown");
+}
+
+/* model filter */
+function filterModels() {
+  const q = $("modelfilter").value.trim().toLowerCase();
+  for (const o of $("modelsel").options) {
+    o.hidden = q && !(o.value.toLowerCase().includes(q) || o.textContent.toLowerCase().includes(q));
+  }
+}
+$("modelfilter").addEventListener("input", filterModels);
+
+/* export button injected into sidebar */
+{
+  const head = document.querySelector("aside .head");
+  const exp = document.createElement("button");
+  exp.textContent = "⤓"; exp.title = "Экспорт чата в Markdown";
+  exp.setAttribute("aria-label", "Экспорт чата");
+  exp.onclick = exportChat;
+  head.append(exp);
+}
 </script>
 </body>
 </html>
