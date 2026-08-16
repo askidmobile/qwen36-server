@@ -159,6 +159,7 @@ html[data-theme="dark"] .codewrap .codebar { background: #0b0f1a; }
   <select id="slotssel" title="Параллельные слоты" aria-label="Слоты"></select>
   <select id="ctxsel" title="Контекст" aria-label="Контекстное окно"></select>
   <button id="applymodel" title="Переключить модель/контекст">Применить</button>
+  <button id="unloadbtn" title="Выгрузить модель, освободить VRAM">⏏ Выгрузить</button>
   <div class="ctxwrap">
     <div class="ctxlabel" id="ctxlabel">контекст: 0 / 81920</div>
     <div class="ctxbar"><div id="ctxfill"></div></div>
@@ -654,6 +655,10 @@ async function uploadAttachment(att) {
 async function send(regen) {
   const text = $("input").value.trim();
   if ((!text && !activeAttachments.length) || abortCtrl) return;
+  if (/модель выгружена/.test($("modelinfo").textContent)) {
+    toast("Модель выгружена — выберите модель и нажмите «Применить»", true);
+    return;
+  }
   let c = getChat();
   if (!c) { c = newChat(); store.current = c.id; }
   if (!c.messages.length) c.title = (text || activeAttachments[0].name).slice(0, 40);
@@ -991,6 +996,22 @@ $("applymodel").onclick = async () => {
   });
   if (r.ok) watchModelSwitch();
   else $("modelinfo").textContent = "switch: HTTP " + r.status;
+};
+
+$("unloadbtn").onclick = async () => {
+  if (!confirm("Выгрузить модель и освободить VRAM? Для работы снова выберите модель и нажмите «Применить».")) return;
+  try {
+    const r = await api("/v1/unload_model", { method: "POST" });
+    if (r.ok) {
+      toast("Модель выгружена, VRAM свободна");
+      $("modelinfo").textContent = "модель выгружена";
+      loadAvailableModels();
+    } else {
+      toast("Выгрузка: HTTP " + r.status, true);
+    }
+  } catch (e) {
+    if (!String(e.message).startsWith("401")) toast("Выгрузка не удалась: " + e.message, true);
+  }
 };
 
 $("apikey").value = store.key;

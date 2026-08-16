@@ -4,6 +4,7 @@
 //! - POST /v1/switch_model {path, ctx?, slots?} — выгрузить текущий движок,
 //!   дождаться освобождения VRAM, загрузить новый, swap. Во время загрузки
 //!   generate → 503. Ответ сразу (202), прогресс — через GET /v1/models.
+//! - POST /v1/unload_model — выгрузить движок, освободить VRAM без загрузки новой модели.
 
 use axum::{
     extract::State,
@@ -202,6 +203,43 @@ pub async fn available_models(State(state): State<AppState>) -> Json<Value> {
             "components": {"vision": profile.vision, "mtp": profile.mtp},
         })),
     }))
+}
+
+/// Выгрузить текущую модель без загрузки новой: освободить VRAM.
+/// Повторный вызов — idempotent (уже выгружено → 200). Следующая загрузка —
+/// через /v1/switch_model или перезапуск сервера.
+pub async fn unload_model(State(state): State<AppState>) -> Response {
+    if state.switcher.loading.swap(true, Ordering::Relaxed) {
+        return api_error(
+            StatusCode::CONFLICT,
+            "invalid_request_error",
+            "model switch already in progress",
+        );
+    }
+    // Выгружаем синхронно: drop Arc<dyn Engine> в blocking-контексте,
+    // чтобы к ответу VRAM уже была свободна (или близка к тому).
+    let result = tokio::task::spawn_blocking({
+        let switcher = state.switcher.clone();
+        move || {
+            let old = switcher.take();
+            drop(old);
+            switcher.last_error.write().expect("last_error lock").clear();
+        }
+    })
+    .await;
+    state.switcher.loading.store(false, Ordering::Relaxed);
+    if let Err(e) = result {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "api_error",
+            format!("unload failed: {e}"),
+        );
+    }
+    (
+        StatusCode::OK,
+        Json(json!({"status": "unloaded"})),
+    )
+        .into_response()
 }
 
 pub async fn switch_model(

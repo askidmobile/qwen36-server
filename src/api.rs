@@ -135,6 +135,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/ctx_matrix", axum::routing::get(admin::ctx_matrix))
         .route("/switch_model", axum::routing::post(admin::switch_model))
+        .route("/unload_model", axum::routing::post(admin::unload_model))
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth))
         .layer(DefaultBodyLimit::max(MAX_V1_BODY));
 
