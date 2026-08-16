@@ -719,6 +719,10 @@ async function send(regen) {
   $("stopbtn").disabled = false;
   $("send").disabled = true;
 
+  let liveTok = 0, liveT0 = null;
+  const liveEl = document.createElement("div");
+  liveEl.className = "meta"; liveEl.style.marginTop = "4px";
+
   const el = $("messages");
   let msgEl = el.lastElementChild;
   msgEl.classList.add("streaming");
@@ -744,9 +748,6 @@ async function send(regen) {
   let firstDeltaAt = null;
   let usage = null, finishReason = null;
   const t0 = performance.now();
-  let liveTok = 0, liveT0 = null;
-  const liveEl = document.createElement("div");
-  liveEl.className = "meta"; liveEl.style.marginTop = "4px";
 
   try {
     const r = await api("/v1/chat/completions", {
