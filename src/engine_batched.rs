@@ -10,7 +10,7 @@
 //! - TODO-F6 (форк): `BatchScheduler::slots_mut()` — сбор Finished.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -127,6 +127,17 @@ pub struct BatchedEngine {
     tokenizer: Arc<Mutex<tokenizers::Tokenizer>>,
     media: Arc<crate::media::MediaService>,
     vision_path: Option<std::path::PathBuf>,
+    /// Shutdown-флаг dispatch thread: выставляется при drop engine (unload).
+    shutdown: Arc<AtomicBool>,
+}
+
+impl Drop for BatchedEngine {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        // tx_ingest drop → rx.blocking_recv() → None; shutdown гарантирует выход
+        // даже если канал каким-то образом не закрылся.
+    }
+}
 }
 
 impl BatchedEngine {
@@ -173,11 +184,13 @@ impl BatchedEngine {
             )?)),
             media,
             vision_path,
+            shutdown: Arc::new(AtomicBool::new(false)),
         });
 
         let tokenizer = engine.tokenizer.clone();
         let in_flight = Arc::clone(&engine.in_flight);
         let cfg2 = Arc::clone(&cfg);
+        let shutdown2 = Arc::clone(&engine.shutdown);
         let vision_path2 = engine.vision_path.clone();
         let mtp_path2 = mtp_path.clone();
         // ponytail: Qwen35BatchAdapter владеет raw CUDA graph handles → не Send.
@@ -210,7 +223,7 @@ impl BatchedEngine {
             let eos = adapter.eos();
             let vocab = adapter.vocab_size();
             let scheduler = BatchScheduler::new(adapter, cfg2.slots, eos, vocab);
-            dispatch_loop(scheduler, rx_ingest, cfg2, in_flight, tokenizer);
+            dispatch_loop(scheduler, rx_ingest, cfg2, in_flight, tokenizer, shutdown2);
         });
 
         Ok(engine)
@@ -407,6 +420,7 @@ fn dispatch_loop(
     cfg: Arc<BatchConfig>,
     in_flight: Arc<AtomicUsize>,
     tokenizer: Arc<Mutex<tokenizers::Tokenizer>>,
+    shutdown: Arc<AtomicBool>,
 ) {
     let mut bindings: Vec<Option<SlotBinding>> = (0..cfg.slots).map(|_| None).collect();
     let mut pending: VecDeque<AdmitReq> = VecDeque::new();
@@ -424,6 +438,10 @@ fn dispatch_loop(
     let mut last_hb = Instant::now();
 
     loop {
+        if shutdown.load(Ordering::Relaxed) {
+            eprintln!("[dispatch] shutdown");
+            break;
+        }
         // 1. Слить накопленные ingest-сообщения.
         while let Ok(msg) = rx.try_recv() {
             match msg {
@@ -580,13 +598,17 @@ fn dispatch_loop(
             last_hb = Instant::now();
         }
 
-        // 5. Нет работы — ждём; есть — yield.
+        // 5. Нет работы — ждём с polling shutdown (таймаут 50мс, иначе shutdown
+        // не виден пока не придёт сообщение; blocking_recv блокирует навечно).
         if !did_work && pending.is_empty() && bindings.iter().all(|b| b.is_none()) {
-            match rx.blocking_recv() {
-                Some(IngestMsg::Admit(req)) if req.out.is_closed() => {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            match rx.try_recv() {
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                Ok(_) if shutdown.load(Ordering::Relaxed) => break,
+                Ok(IngestMsg::Admit(req)) if req.out.is_closed() => {
                     in_flight.fetch_sub(1, Ordering::Relaxed);
                 }
-                Some(IngestMsg::Admit(req)) => admit(
+                Ok(IngestMsg::Admit(req)) => admit(
                     req,
                     &mut sched,
                     &mut bindings,
@@ -595,7 +617,7 @@ fn dispatch_loop(
                     &mut slot_truncated,
                     &cfg,
                 ),
-                None => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
             }
         } else {
             std::thread::yield_now();
