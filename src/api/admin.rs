@@ -412,16 +412,22 @@ async fn do_switch(
     let old = state.switcher.take();
     drop(old);
     if vram_plan::total_vram_mib().is_some() {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        // Адаптивное ожидание: старый dispatch-thread может ещё грузить адаптер
+        // (35B ~60s внутри Qwen35BatchAdapter::load — shutdown там не виден).
+        // Ждём роста free; если 3 полла подряд без изменений — стагнация,
+        // продолжаем (KV-бюджет и так посчитан от текущего free).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let mut last_free = 0u64;
+        let mut stagnant = 0u8;
         loop {
             let free = vram_plan::free_vram_mib().unwrap_or(0);
-            // Порог = веса новой модели (без +512: driver pool/nvidia-smi
-            // занижают free, сверхзапрос таймаутит — уже ловили 180s «зависание»).
             if free >= fp.weights_mib {
                 break;
             }
-            if std::time::Instant::now() > deadline {
-                eprintln!("[switch] timeout waiting VRAM free (free={free}MiB), продолжаю");
+            stagnant = if free == last_free { stagnant + 1 } else { 0 };
+            last_free = free;
+            if stagnant >= 3 || std::time::Instant::now() > deadline {
+                eprintln!("[switch] VRAM wait done (free={free}MiB, stagnant={stagnant}), продолжаю");
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
