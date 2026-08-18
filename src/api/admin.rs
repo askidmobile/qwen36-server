@@ -274,6 +274,10 @@ pub async fn switch_model(
             "model switch already in progress",
         );
     }
+    // Сброс прошлой ошибки: UI-поллер читает её как сигнал фейла.
+    if let Ok(mut le) = state.switcher.last_error.write() {
+        le.clear();
+    }
 
     // Разрешить имя файла в полный путь.
     let path = if Path::new(&req.path).is_absolute() || req.path.contains(['/', '\\']) {
@@ -400,6 +404,11 @@ async fn do_switch(
     };
 
     // 2. Выгрузить старый движок и дождаться освобождения VRAM.
+    // shutdown() ЯВНО до take: Arc<dyn Engine> может быть запинен открытым
+    // SSE-стримом браузера (generate держит clone на весь запрос) — тогда
+    // Drop не вызовется, dispatch-thread не получит флаг и VRAM не освободится
+    // до таймаута 60с (наблюдаемая «заминка» при переключении).
+    state.switcher.shutdown();
     let old = state.switcher.take();
     drop(old);
     if vram_plan::total_vram_mib().is_some() {

@@ -965,13 +965,22 @@ async function watchModelSwitch() {
   modelSwitching = true;
   $("applymodel").disabled = true;
   $("send").disabled = true;
-  $("modelinfo").textContent = "переключение модели…";
+  const t0 = Date.now();
   for (;;) {
-    await new Promise(r => setTimeout(r, 4000));
+    $("modelinfo").textContent = "переключение модели… " + Math.round((Date.now() - t0) / 1000) + "s";
+    await new Promise(r => setTimeout(r, 2000));
     try {
       const r = await api("/v1/available_models");
       if (!r.ok) continue;
       const j = await r.json();
+      if (j.last_error) {
+        modelSwitching = false;
+        $("applymodel").disabled = false;
+        $("send").disabled = false;
+        $("modelinfo").textContent = "ошибка переключения";
+        toast("Switch failed: " + j.last_error.split("\n")[0], true);
+        break;
+      }
       if (!j.loading) {
         modelSwitching = false;
         $("applymodel").disabled = false;
