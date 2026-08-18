@@ -353,20 +353,61 @@ async fn download_file(
 ) -> anyhow::Result<()> {
     use tokio::io::AsyncWriteExt;
     let url = format!("{HF}/{repo}/resolve/main/{file}");
-    let mut resp = client().get(&url).send().await?;
-    if !resp.status().is_success() {
-        anyhow::bail!("HTTP {}", resp.status());
-    }
-    if let Some(total) = resp.content_length() {
-        if total > MAX_DOWNLOAD_BYTES {
-            anyhow::bail!("file too large: {} MiB", total / (1024 * 1024));
-        }
-        ds.total.store(total, AOrd::Relaxed);
-    }
+    // CDN обрывает длинные стримы («error decoding response body») — resume
+    // по Range с места обрыва, до 10 попыток.
     let mut f = tokio::fs::File::create(part).await?;
-    while let Some(chunk) = resp.chunk().await? {
-        f.write_all(&chunk).await?;
-        ds.done.fetch_add(chunk.len() as u64, AOrd::Relaxed);
+    for attempt in 0..10u32 {
+        let done = ds.done.load(AOrd::Relaxed);
+        let mut req = client().get(&url);
+        if done > 0 {
+            req = req.header("Range", format!("bytes={done}-"));
+        }
+        let mut resp = match req.send().await {
+            Ok(r) if r.status().is_success() || r.status() == StatusCode::PARTIAL_CONTENT => r,
+            Ok(r) => anyhow::bail!("HTTP {}", r.status()),
+            Err(e) => {
+                eprintln!("[hf-dl] attempt {attempt} connect failed: {e}");
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                continue;
+            }
+        };
+        // Resume: сервер обязан ответить 206; 200 = Range проигнорирован,
+        // писать нельзя (дубль данных в хвосте).
+        if done > 0 && resp.status() != StatusCode::PARTIAL_CONTENT {
+            anyhow::bail!("server ignored Range on resume (HTTP 200), refusing to append");
+        }
+        if done == 0 {
+            if let Some(total) = resp.content_length() {
+                if total > MAX_DOWNLOAD_BYTES {
+                    anyhow::bail!("file too large: {} MiB", total / (1024 * 1024));
+                }
+                ds.total.store(total, AOrd::Relaxed);
+            }
+        } else if let Some(cr) = resp.headers().get("content-range").and_then(|v| v.to_str().ok()) {
+            if let Some(t) = cr.rsplit('/').next().and_then(|v| v.parse::<u64>().ok()) {
+                ds.total.store(t, AOrd::Relaxed);
+            }
+        }
+        let mut stream_failed = false;
+        loop {
+            match resp.chunk().await {
+                Ok(Some(chunk)) => {
+                    f.write_all(&chunk).await?;
+                    ds.done.fetch_add(chunk.len() as u64, AOrd::Relaxed);
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    eprintln!("[hf-dl] attempt {attempt} stream broke at {} bytes: {e}",
+                        ds.done.load(AOrd::Relaxed));
+                    stream_failed = true;
+                    break;
+                }
+            }
+        }
+        if !stream_failed {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
     f.flush().await?;
     drop(f);
@@ -374,7 +415,7 @@ async fn download_file(
     let total = ds.total.load(AOrd::Relaxed);
     if total > 0 && done != total {
         std::fs::remove_file(part).ok();
-        anyhow::bail!("incomplete: {done}/{total} bytes");
+        anyhow::bail!("incomplete after retries: {done}/{total} bytes");
     }
     std::fs::rename(part, dest)?;
     Ok(())
