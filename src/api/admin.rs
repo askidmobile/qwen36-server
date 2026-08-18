@@ -214,8 +214,10 @@ pub async fn available_models(State(state): State<AppState>) -> Json<Value> {
 }
 
 /// Выгрузить текущую модель без загрузки новой: освободить VRAM.
-/// Повторный вызов — idempotent (уже выгружено → 200). Следующая загрузка —
-/// через /v1/switch_model или перезапуск сервера.
+/// Реализация: graceful shutdown dispatch thread + exit(1). Candle/CUDA
+/// не освобождает VRAM при drop adapter в живом процессе (context держит
+/// страницы). Task Scheduler перезапускает сервер через 1 мин (restart=3).
+/// Следующая загрузка — через /v1/switch_model или перезапуск.
 pub async fn unload_model(State(state): State<AppState>) -> Response {
     if state.switcher.loading.swap(true, Ordering::Relaxed) {
         return api_error(
@@ -224,52 +226,20 @@ pub async fn unload_model(State(state): State<AppState>) -> Response {
             "model switch already in progress",
         );
     }
-    // Выгружаем: shutdown-флаг → dispatch thread выходит из polling-цикла
-    // (≤50мс), drop scheduler/adapter → VRAM freed. Ждём завершения thread,
-    // потом trim mempool. Без join VRAM не освобождается — adapter ещё жив.
-    let result = tokio::task::spawn_blocking({
-        let switcher = state.switcher.clone();
-        let cuda_device = state.cuda_device.clone();
-        move || {
-            switcher.shutdown();
-            let old = switcher.take();
-            drop(old);
-            // Дождаться завершения dispatch thread (max 5с — shutdown poll 50мс).
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            while std::time::Instant::now() < deadline {
-                if !switcher.is_loaded() {
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            // Trim mempool — adapter dropped в dispatch thread, страницы свободны.
-            // device НЕ обнуляем: cuda_device живёт весь процесс (candle context),
-            // иначе Tensor drop в dispatch без device → orphaned VRAM.
-            #[cfg(feature = "cuda")]
-            if let Some(dev) = cuda_device.read().expect("cuda_device lock").as_ref() {
-                if let candle_core::Device::Cuda(c) = dev {
-                    use candle_core::backend::BackendDevice;
-                    let _ = c.synchronize();
-                    let _ = candle_core::cuda_backend::mem_pool::trim_default_mempool(&c);
-                    let _ = c.synchronize();
-                }
-            }
-            switcher.last_error.write().expect("last_error lock").clear();
-        }
-    })
-    .await;
-    state.switcher.loading.store(false, Ordering::Relaxed);
-    if let Err(e) = result {
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "api_error",
-            format!("unload failed: {e}"),
-        );
-    }
+    // Graceful: shutdown dispatch thread, дать завершиться, exit → Task
+    // перезапускает процесс с чистой CUDA-памятью.
+    tokio::spawn(async move {
+        state.switcher.shutdown();
+        let old = state.switcher.take();
+        drop(old);
+        // Дать dispatch thread выйти (poll 50мс) + flush stderr.
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        eprintln!("[unload] exiting for VRAM cleanup (Task restarts)");
+        std::process::exit(1);
+    });
     (
-        StatusCode::OK,
-        Json(json!({"status": "unloaded"})),
+        StatusCode::ACCEPTED,
+        Json(json!({"status": "unloading", "note": "server restarts to free VRAM"})),
     )
         .into_response()
 }

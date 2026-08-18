@@ -1002,19 +1002,34 @@ $("applymodel").onclick = async () => {
 };
 
 $("unloadbtn").onclick = async () => {
-  if (!confirm("Выгрузить модель и освободить VRAM? Для работы снова выберите модель и нажмите «Применить».")) return;
+  if (!confirm("Выгрузить модель и освободить VRAM? Сервер перезапустится (~1 мин).")) return;
   try {
     const r = await api("/v1/unload_model", { method: "POST" });
-    if (r.ok) {
-      toast("Модель выгружена, VRAM свободна");
-      $("modelinfo").textContent = "модель выгружена";
+    if (r.ok || r.status === 202) {
+      toast("Сервер перезапускается для освобождения VRAM…");
+      $("modelinfo").textContent = "перезапуск…";
       $("send").disabled = true;
-      loadAvailableModels();
+      // Сервер уходит на restart (Task). Поллим до доступности.
+      setTimeout(() => {
+        const t = setInterval(async () => {
+          try {
+            const rr = await fetch("/v1/models", { headers: { Authorization: "Bearer " + store.key } });
+            if (rr.ok) {
+              clearInterval(t);
+              toast("Сервер вернулся, модель не загружена — выберите и нажмите «Применить»");
+              $("modelinfo").textContent = "модель не загружена";
+              loadModels();
+              loadAvailableModels();
+            }
+          } catch {}
+        }, 5000);
+        setTimeout(() => clearInterval(t), 180000);
+      }, 3000);
     } else {
       toast("Выгрузка: HTTP " + r.status, true);
     }
   } catch (e) {
-    if (!String(e.message).startsWith("401")) toast("Выгрузка не удалась: " + e.message, true);
+    if (!String(e.message).startsWith("401")) toast("Выгрузка: " + e.message, true);
   }
 };
 
