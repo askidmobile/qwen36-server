@@ -119,12 +119,6 @@ struct SlotBinding {
     cancel: crate::engine_types::CancelFlag,
 }
 
-/// ponytail: BatchScheduler<Qwen35BatchAdapter> не Send под cfg(cuda) —
-/// adapter владеет raw CUDA graph handles (DecodeGraphState).
-/// dispatch_loop живёт в одном std::thread, доступ сериализован.
-struct SendSched(BatchScheduler<Qwen35BatchAdapter>);
-unsafe impl Send for SendSched {}
-
 pub struct BatchedEngine {
     tx_ingest: mpsc::Sender<IngestMsg>,
     info: ModelInfo,
@@ -160,39 +154,6 @@ impl BatchedEngine {
         // TODO-F1: загрузка адаптера (блокирующе) + токенизатора.
         let device = select_device()?;
         let adapter_device = device.clone();
-        // ponytail: Qwen35BatchAdapter из candle-fork владеет raw CUDA graph/event
-        // handles (DecodeGraphState) → не Send под cfg(cuda). Загружаем в
-        // spawn_blocking; scheduler целиком живёт в dispatch std::thread (не tokio).
-        // SendAdapter: handles эксклюзивны, доступ только из dispatch thread.
-        struct SendAdapter(Qwen35BatchAdapter);
-        unsafe impl Send for SendAdapter {}
-        unsafe impl Sync for SendAdapter {}
-        let adapter = tokio::task::spawn_blocking({
-            let p = cfg.model_path.clone();
-            let slots = cfg.slots;
-            let vision_path = vision_path.clone();
-            let mtp_path = mtp_path.clone();
-            move || {
-                let mut adapter =
-                    Qwen35BatchAdapter::load(std::path::Path::new(&p), adapter_device, slots)?;
-                if let Some(path) = vision_path {
-                    adapter.load_vision(&path)?;
-                }
-                if let Some(path) = mtp_path {
-                    adapter.load_mtp(&path)?;
-                }
-                Ok::<_, anyhow::Error>(SendAdapter(adapter))
-            }
-        })
-        .await??;
-        #[cfg(feature = "cuda")]
-        crate::engine::maybe_retain_mempool(&device);
-        let eos = adapter.0.eos();
-        let vocab = adapter.0.vocab_size();
-        let tokenizer = tokenizer::load_from_gguf_path(std::path::Path::new(&cfg.model_path))?;
-
-        let scheduler = BatchScheduler::new(adapter.0, cfg.slots, eos, vocab);
-        let scheduler = SendSched(scheduler);
 
         let info = ModelInfo {
             id: model_id_from_filename(std::path::Path::new(&cfg.model_path)),
@@ -207,7 +168,9 @@ impl BatchedEngine {
             info,
             max_queue: cfg.max_queue,
             in_flight: Arc::new(AtomicUsize::new(0)),
-            tokenizer: Arc::new(Mutex::new(tokenizer)),
+            tokenizer: Arc::new(Mutex::new(tokenizer::load_from_gguf_path(
+                std::path::Path::new(&cfg.model_path),
+            )?)),
             media,
             vision_path,
         });
@@ -215,10 +178,37 @@ impl BatchedEngine {
         let tokenizer = engine.tokenizer.clone();
         let in_flight = Arc::clone(&engine.in_flight);
         let cfg2 = Arc::clone(&cfg);
-        // scheduler/adapter не Send (CUDA context не thread-safe) → свой thread,
-        // не tokio::spawn. dispatch_loop синхронная; blocking_recv на idle.
+        // ponytail: Qwen35BatchAdapter владеет raw CUDA graph handles → не Send.
+        // Создаём adapter+scheduler прямо в dispatch std::thread (не tokio, не
+        // spawn_blocking): closure не содержит non-Send значений.
         std::thread::spawn(move || {
-            dispatch_loop(scheduler.0, rx_ingest, cfg2, in_flight, tokenizer);
+            let mut adapter = match Qwen35BatchAdapter::load(
+                std::path::Path::new(&cfg2.model_path),
+                adapter_device,
+                cfg2.slots,
+            ) {
+                Ok(a) => a,
+                Err(e) => {
+                    eprintln!("[dispatch] adapter load failed: {e:#}");
+                    return;
+                }
+            };
+            if let Some(path) = engine.vision_path.clone() {
+                if let Err(e) = adapter.load_vision(&path) {
+                    eprintln!("[dispatch] vision load failed: {e:#}");
+                }
+            }
+            if let Some(path) = mtp_path.clone() {
+                if let Err(e) = adapter.load_mtp(&path) {
+                    eprintln!("[dispatch] mtp load failed: {e:#}");
+                }
+            }
+            #[cfg(feature = "cuda")]
+            crate::engine::maybe_retain_mempool(&device);
+            let eos = adapter.eos();
+            let vocab = adapter.vocab_size();
+            let scheduler = BatchScheduler::new(adapter, cfg2.slots, eos, vocab);
+            dispatch_loop(scheduler, rx_ingest, cfg2, in_flight, tokenizer);
         });
 
         Ok(engine)
