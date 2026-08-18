@@ -248,6 +248,7 @@ pub async fn unload_model(State(state): State<AppState>) -> Response {
             #[cfg(feature = "cuda")]
             if let Some(dev) = cuda_device {
                 if let candle_core::Device::Cuda(c) = dev {
+                    use candle_core::backend::BackendDevice;
                     let _ = c.synchronize();
                     let _ = candle_core::cuda_backend::mem_pool::trim_default_mempool(&c);
                     let _ = c.synchronize();
