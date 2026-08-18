@@ -417,10 +417,10 @@ async fn do_switch(
         // Ждём роста free; если 3 полла подряд без изменений — стагнация,
         // продолжаем (KV-бюджет и так посчитан от текущего free).
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-        let mut last_free = 0u64;
+        let mut last_free = 0usize;
         let mut stagnant = 0u8;
         loop {
-            let free = vram_plan::free_vram_mib().unwrap_or(0);
+            let free = vram_plan::free_vram_mib().unwrap_or(0) as usize;
             if free >= fp.weights_mib {
                 break;
             }
