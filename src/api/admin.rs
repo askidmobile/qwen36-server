@@ -19,6 +19,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use super::{api_error, AppState};
+use crate::engine::Engine;
 use crate::engine_batched::{BatchConfig, BatchedEngine};
 use crate::vram_plan;
 
