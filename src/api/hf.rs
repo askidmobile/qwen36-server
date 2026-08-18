@@ -259,6 +259,7 @@ pub async fn hf_probe(Query(q): Query<ProbeQuery>) -> Response {
     // Вердикт: веса + минимальный KV (4×8K ~ 1 GiB) + 512 MiB запаса.
     let (fits, total_vram) = match vram_plan::total_vram_mib() {
         Some(total) => {
+            let total = total as u64;
             let need = size_mib + 1024 + 512;
             (need < total, total)
         }
