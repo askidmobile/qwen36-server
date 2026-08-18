@@ -25,7 +25,7 @@ tokenizers = { version = "0.22.0", default-features = false, features = ["onig"]
 memmap2 = "0.9.3"
 sha2 = "0.10"
 base64 = "0.22"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
 url = "2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "bmp", "tiff", "gif"] }
 moxcms = "0.8"
