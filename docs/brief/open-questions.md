@@ -3,8 +3,6 @@
 | # | Вопрос | Почему отложен | Когда вернуться |
 |---|---|---|---|
 | OQ-1 | IQ2-ядра: поддержка IQ2_XXS/IQ2_M в candle-core (CPU dequant + CUDA/Metal matmul) | Фаза 2 по BD-019; старт на Q2_K_XL | После v1 на Q2_K_XL |
-| OQ-2 | Vision-энкодер (image/video input) | Вне v1 по BD-004; GGUF text-only, vision tower в safetensors | Отдельная фаза при запросе |
-| OQ-3 | MTP speculative decoding (draft-heads, потенциальный ×1.7 speedup) | Не критерий v1 (BD-008); llama.cpp показывает выигрыш 1.73x | После стабилизации базового decode |
 | OQ-4 | VRAM-бюджет при 4 слотах × 81 920 контекста (точный расчёт KV + recurrent state) | Зависит от реализации; оценки в research.md | На этапе включения 4 слотов |
 | OQ-5 | Деградация качества Q2_K_XL vs Q4_K_M на реальных задачах (judge-замеры) | Критерий v1 — только стабильность (BD-008); качество — риск BD-020 | При выборе целевого кванта после v1 |
 | OQ-6 | Полный Responses API (встроенные tools, store=true, reasoning items) | Базовый уровень в v1 по BD-012 | По запросу пользователей API |

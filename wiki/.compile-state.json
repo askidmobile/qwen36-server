@@ -1,0 +1,17 @@
+{
+  "last_compiled": "2026-08-08",
+  "topics": ["project-overview", "engine-layer", "http-api-layer", "web-chat", "testing"],
+  "concepts": ["candle-fork-coupling", "not-send-serialization"],
+  "source_locations": [
+    "README.md", "CLAUDE.md", "AGENTS.md", "Cargo.toml",
+    "docs/brief/PROJECT-BRIEF.md", "docs/brief/decisions.md", "docs/brief/open-questions.md",
+    "docs/brief/research.md", "docs/brief/interview-log.md",
+    "docs/engine-api.md", "docs/batch-integration.md",
+    "src/main.rs", "src/lib.rs", "src/config.rs", "src/engine.rs", "src/engine_batched.rs",
+    "src/engine_types.rs", "src/sampler.rs", "src/api.rs",
+    "src/api/openai.rs", "src/api/anthropic.rs", "src/api/responses.rs",
+    "web/index.html", "tests/api_test.rs", "tests/stability_plan.md",
+    "scripts/stability_smoke.sh", "scripts/bench.ps1"
+  ],
+  "total_sources_scanned": 25
+}

@@ -36,6 +36,11 @@ impl SwappableEngine {
         self.inner.write().expect("engine lock").take()
     }
 
+    /// Загружен ли движок (false = выгружен / loading).
+    pub fn is_loaded(&self) -> bool {
+        self.inner.read().expect("engine lock").is_some()
+    }
+
     pub fn install(&self, engine: Arc<dyn Engine>, model_path: PathBuf, ctx: usize, slots: usize) {
         *self.inner.write().expect("engine lock") = Some(engine);
         *self.current.write().expect("current lock") = (model_path, ctx, slots);

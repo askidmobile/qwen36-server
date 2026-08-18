@@ -188,9 +188,16 @@ pub async fn available_models(State(state): State<AppState>) -> Json<Value> {
         .read()
         .map(|c| c.clone())
         .unwrap_or_else(|_| (PathBuf::new(), 0, 0));
+    // Выгруженная модель: inner=None → current=null (UI показывает «выгружена»).
+    let loaded = state.switcher.is_loaded();
+    let current_json = if loaded {
+        json!({ "path": cur.to_string_lossy(), "ctx": ctx, "slots": slots })
+    } else {
+        Value::Null
+    };
     Json(json!({
         "models_dir": state.models_dir.to_string_lossy(),
-        "current": { "path": cur.to_string_lossy(), "ctx": ctx, "slots": slots },
+        "current": current_json,
         "loading": state.switcher.loading.load(Ordering::Relaxed),
         "last_error": state.switcher.last_error.read().map(|s| s.clone()).unwrap_or_default(),
         "models": out,

@@ -932,7 +932,7 @@ async function loadAvailableModels() {
       const o = document.createElement("option");
       o.value = m.path;
       o.textContent = m.name + " (" + m.size_mib + " MiB)";
-      if (j.current && m.path === j.current.path) o.selected = true;
+      if (j.current && j.current.path && m.path === j.current.path) o.selected = true;
       sel.append(o);
     }
     if (j.current && j.current.path && ![...sel.options].some(o => o.value === j.current.path)) {
@@ -994,7 +994,10 @@ $("applymodel").onclick = async () => {
     method: "POST",
     body: JSON.stringify({ path, ctx, slots }),
   });
-  if (r.ok) watchModelSwitch();
+  if (r.ok) {
+    watchModelSwitch();
+    watchLoadGate();
+  }
   else $("modelinfo").textContent = "switch: HTTP " + r.status;
 };
 
@@ -1005,6 +1008,7 @@ $("unloadbtn").onclick = async () => {
     if (r.ok) {
       toast("Модель выгружена, VRAM свободна");
       $("modelinfo").textContent = "модель выгружена";
+      $("send").disabled = true;
       loadAvailableModels();
     } else {
       toast("Выгрузка: HTTP " + r.status, true);
@@ -1013,6 +1017,23 @@ $("unloadbtn").onclick = async () => {
     if (!String(e.message).startsWith("401")) toast("Выгрузка не удалась: " + e.message, true);
   }
 };
+
+/* разблокировать send, когда модель загружена (switch завершён) */
+function watchLoadGate() {
+  const t = setInterval(async () => {
+    try {
+      const r = await api("/v1/available_models");
+      if (!r.ok) return;
+      const j = await r.json();
+      if (j.current && !j.loading) {
+        $("send").disabled = false;
+        $("modelinfo").textContent = j.current.path.split(/[\\/]/).pop();
+        clearInterval(t);
+      }
+    } catch {}
+  }, 3000);
+  setTimeout(() => clearInterval(t), 600000); // макс 10 мин
+}
 
 $("apikey").value = store.key;
 $("mode").value = store.mode;

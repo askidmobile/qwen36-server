@@ -18,6 +18,7 @@ Rust-сервер инференса Qwen3.6-27B (GGUF 2-bit) на собств�
 - Критерий успеха v1 — стабильность 4 слотов × 8-16K генераций без падений и утечек VRAM (BD-008). Скорость и совместимость — вехи.
 - Ничего лишнего на диске: логи в stdout, чаты в localStorage (BD-014).
 - Windows WDDM: process private commit включает CUDA GPU allocations; paging проверять через GPU Process Memory Shared Usage, не PrivateMemorySize64. Details: [docs/lessons/2026-08-12-yttri-win-stability.md](docs/lessons/2026-08-12-yttri-win-stability.md).
+- Windows workspace: код, builds, logs и benchmarks — только `D:\Projects\yttri-inference`; `D:\Projects\yttri-build` принадлежит другому агенту и запрещён. Test model: `D:\Models\yttri\qwen3.5-4b\Qwen3.5-4B-Q4_K_M.gguf`.
 
 ## Ключевые параметры
 
