@@ -129,13 +129,19 @@ pub struct BatchedEngine {
     vision_path: Option<std::path::PathBuf>,
     /// Shutdown-флаг dispatch thread: выставляется при drop engine (unload).
     shutdown: Arc<AtomicBool>,
+    /// JoinHandle dispatch thread — join в Drop гарантирует, что adapter
+    /// (GPU-память) освобождён до возврата из drop (иначе trim mempool идёт
+    /// по живому adapter и VRAM не возвращается ОС).
+    dispatch_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl Drop for BatchedEngine {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
-        // tx_ingest drop → rx.blocking_recv() → None; shutdown гарантирует выход
-        // даже если канал каким-то образом не закрылся.
+        if let Some(h) = self.dispatch_handle.lock().expect("dispatch lock").take() {
+            let _ = h.join();
+            eprintln!("[batched] dispatch thread joined, adapter dropped");
+        }
     }
 }
 
@@ -184,6 +190,7 @@ impl BatchedEngine {
             media,
             vision_path,
             shutdown: Arc::new(AtomicBool::new(false)),
+            dispatch_handle: Mutex::new(None),
         });
 
         let tokenizer = engine.tokenizer.clone();
@@ -195,7 +202,7 @@ impl BatchedEngine {
         // ponytail: Qwen35BatchAdapter владеет raw CUDA graph handles → не Send.
         // Создаём adapter+scheduler прямо в dispatch std::thread (не tokio, не
         // spawn_blocking): closure не содержит non-Send значений.
-        std::thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
             let mut adapter = match Qwen35BatchAdapter::load(
                 std::path::Path::new(&cfg2.model_path),
                 adapter_device,
@@ -224,6 +231,7 @@ impl BatchedEngine {
             let scheduler = BatchScheduler::new(adapter, cfg2.slots, eos, vocab);
             dispatch_loop(scheduler, rx_ingest, cfg2, in_flight, tokenizer, shutdown2);
         });
+        *engine.dispatch_handle.lock().expect("dispatch lock") = Some(handle);
 
         Ok(engine)
     }
@@ -232,7 +240,6 @@ impl BatchedEngine {
 #[async_trait::async_trait]
 impl Engine for BatchedEngine {
     fn shutdown(&self) {
-        eprintln!("[batched] shutdown() called");
         self.shutdown.store(true, Ordering::Relaxed);
     }
     async fn generate(

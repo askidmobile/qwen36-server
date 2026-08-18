@@ -214,11 +214,9 @@ pub async fn available_models(State(state): State<AppState>) -> Json<Value> {
 }
 
 /// Выгрузить текущую модель без загрузки новой: освободить VRAM.
-/// Реализация: graceful shutdown dispatch thread + exit(0). Candle/CUDA
-/// не освобождает VRAM при drop adapter в живом процессе (context держит
-/// страницы). exit(0) → Task НЕ перезапускает (restart только при ошибке).
-/// Сервер останавливается, VRAM полностью свободна. Перезапуск — вручную
-/// или через /v1/switch_model после повторного запуска.
+/// Порядок: shutdown dispatch thread → take/drop engine → дождаться выхода
+/// потока → trim CUDA mempool. Dispatch обязан выйти (break 'outer, poll 50мс) —
+/// тогда adapter drop вызывает cudaFree и VRAM реально возвращается ОС.
 pub async fn unload_model(State(state): State<AppState>) -> Response {
     if state.switcher.loading.swap(true, Ordering::Relaxed) {
         return api_error(
@@ -227,19 +225,40 @@ pub async fn unload_model(State(state): State<AppState>) -> Response {
             "model switch already in progress",
         );
     }
-    // Graceful: shutdown dispatch thread, дать завершиться, exit(0) →
-    // сервер останавливается, VRAM полностью освобождается ОС.
-    tokio::spawn(async move {
-        state.switcher.shutdown();
-        let old = state.switcher.take();
-        drop(old);
-        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-        eprintln!("[unload] exiting — VRAM freed, server stopped (restart manually)");
-        std::process::exit(0);
-    });
+    let result = tokio::task::spawn_blocking({
+        let switcher = state.switcher.clone();
+        let cuda_device = state.cuda_device.clone();
+        move || {
+            // shutdown → dispatch выходит (poll 50мс) → take() возвращает последний
+            // Arc → drop вызывает Drop: join dispatch thread, adapter (GPU-память)
+            // освобождён синхронно до выхода из этого блока.
+            switcher.shutdown();
+            let old = switcher.take();
+            drop(old);
+            #[cfg(feature = "cuda")]
+            if let Some(dev) = cuda_device.read().expect("cuda_device lock").as_ref() {
+                if let candle_core::Device::Cuda(c) = dev {
+                    use candle_core::backend::BackendDevice;
+                    let _ = c.synchronize();
+                    let _ = candle_core::cuda_backend::mem_pool::trim_default_mempool(&c);
+                    let _ = c.synchronize();
+                }
+            }
+            switcher.last_error.write().expect("last_error lock").clear();
+        }
+    })
+    .await;
+    state.switcher.loading.store(false, Ordering::Relaxed);
+    if let Err(e) = result {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "api_error",
+            format!("unload failed: {e}"),
+        );
+    }
     (
-        StatusCode::ACCEPTED,
-        Json(json!({"status": "unloading", "note": "server stops; VRAM freed on exit"})),
+        StatusCode::OK,
+        Json(json!({"status": "unloaded"})),
     )
         .into_response()
 }
@@ -329,12 +348,22 @@ pub async fn switch_model(
     let req_slots = req_slots_raw;
 
     tokio::spawn(async move {
-        let result = do_switch(&state, path, req_ctx, req_slots).await;
-        if let Err(e) = result {
-            eprintln!("[switch] FAILED: {e:#}");
-            if let Ok(mut le) = state.switcher.last_error.write() {
-                *le = format!("{e:#}");
+        // Страховка: do_switch паника в spawn → loading застрял бы навсегда
+        // (все switch/unload → 409). timeout гарантирует сброс при зависании.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(600),
+            do_switch(&state, path, req_ctx, req_slots),
+        )
+        .await;
+        match result {
+            Err(_) => eprintln!("[switch] TIMEOUT 600s — flag reset"),
+            Ok(Err(e)) => {
+                eprintln!("[switch] FAILED: {e:#}");
+                if let Ok(mut le) = state.switcher.last_error.write() {
+                    *le = format!("{e:#}");
+                }
             }
+            Ok(Ok(())) => {}
         }
         state.switcher.loading.store(false, Ordering::Relaxed);
     });

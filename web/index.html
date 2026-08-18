@@ -1002,13 +1002,16 @@ $("applymodel").onclick = async () => {
 };
 
 $("unloadbtn").onclick = async () => {
-  if (!confirm("Выгрузить модель и остановить сервер? VRAM освободится. Запустить снова — вручную или через Task Scheduler.")) return;
+  if (!confirm("Выгрузить модель и освободить VRAM? Для работы снова выберите модель и нажмите «Применить».")) return;
   try {
     const r = await api("/v1/unload_model", { method: "POST" });
-    if (r.ok || r.status === 202) {
-      toast("Сервер останавливается — VRAM освобождается");
-      $("modelinfo").textContent = "сервер остановлен";
+    if (r.ok) {
+      toast("Модель выгружена, VRAM свободна");
+      $("modelinfo").textContent = "модель выгружена";
       $("send").disabled = true;
+      loadAvailableModels();
+    } else if (r.status === 409) {
+      toast("Идёт переключение модели — подождите", true);
     } else {
       toast("Выгрузка: HTTP " + r.status, true);
     }
