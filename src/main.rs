@@ -81,6 +81,8 @@ async fn main() -> Result<()> {
     let cuda_device = candle_core::Device::new_cuda(0).ok();
     #[cfg(not(feature = "cuda"))]
     let cuda_device = None;
+    // Mutably wrapped: unload_model clears it to free CUDA context + VRAM.
+    let cuda_device = std::sync::Arc::new(std::sync::RwLock::new(cuda_device));
     let info = engine.model_info();
     eprintln!(
         "[qwen36] loaded: id={} quant={} ctx={} slots={}",

@@ -18,7 +18,7 @@ use axum::{
 };
 use serde::Serialize;
 use std::convert::Infallible;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use crate::engine_types::Engine;
 
@@ -34,7 +34,9 @@ pub struct AppState {
     /// Validated profile metadata; None для legacy `QWEN36_MODEL`.
     pub profile: Option<Arc<crate::profile::ResolvedProfile>>,
     /// CUDA device handle (для mempool trim при switch; None на macOS/CPU).
-    pub cuda_device: Option<candle_core::Device>,
+    /// Мутабельно: unload_model обнуляет, чтобы CUDA context разрушился и VRAM
+    /// освободилась. Без этого Device живёт весь процесс → VRAM не отпускается.
+    pub cuda_device: Arc<RwLock<Option<candle_core::Device>>>,
 }
 
 #[derive(Debug, Clone)]

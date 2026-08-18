@@ -238,6 +238,11 @@ pub async fn unload_model(State(state): State<AppState>) -> Response {
             switcher.shutdown();
             let old = switcher.take();
             drop(old);
+            // Очистить CUDA device handle: без этого Device живёт весь процесс
+            // и CUDA context не разрушается → VRAM не освобождается.
+            let mut dev_guard = cuda_device.write().expect("cuda_device lock");
+            let dev_opt = dev_guard.take();
+            drop(dev_guard);
             // Дождаться завершения dispatch thread (max 5с — shutdown poll 50мс).
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             while std::time::Instant::now() < deadline {
@@ -252,7 +257,7 @@ pub async fn unload_model(State(state): State<AppState>) -> Response {
             // Освободить retained-страницы CUDA mempool: иначе пул держит
             // страницы старых весов навсегда (урок 2026-08-10, trim_default_mempool).
             #[cfg(feature = "cuda")]
-            if let Some(dev) = cuda_device {
+            if let Some(dev) = dev_opt {
                 if let candle_core::Device::Cuda(c) = dev {
                     use candle_core::backend::BackendDevice;
                     let _ = c.synchronize();
