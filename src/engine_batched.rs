@@ -119,6 +119,12 @@ struct SlotBinding {
     cancel: crate::engine_types::CancelFlag,
 }
 
+/// ponytail: BatchScheduler<Qwen35BatchAdapter> не Send под cfg(cuda) —
+/// adapter владеет raw CUDA graph handles (DecodeGraphState).
+/// dispatch_loop живёт в одном std::thread, доступ сериализован.
+struct SendSched(BatchScheduler<Qwen35BatchAdapter>);
+unsafe impl Send for SendSched {}
+
 pub struct BatchedEngine {
     tx_ingest: mpsc::Sender<IngestMsg>,
     info: ModelInfo,
@@ -130,13 +136,7 @@ pub struct BatchedEngine {
 }
 
 impl BatchedEngine {
-    /// ponytail: BatchScheduler<Qwen35BatchAdapter> не Send под cfg(cuda) —
-/// adapter владеет raw CUDA graph handles (DecodeGraphState).
-/// dispatch_loop живёт в одном std::thread, доступ сериализован.
-struct SendSched(BatchScheduler<Qwen35BatchAdapter>);
-unsafe impl Send for SendSched {}
-
-pub async fn load(
+    pub async fn load(
         cfg: BatchConfig,
         media: Arc<crate::media::MediaService>,
         vision_path: Option<std::path::PathBuf>,
