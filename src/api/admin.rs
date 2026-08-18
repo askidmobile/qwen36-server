@@ -214,10 +214,11 @@ pub async fn available_models(State(state): State<AppState>) -> Json<Value> {
 }
 
 /// Выгрузить текущую модель без загрузки новой: освободить VRAM.
-/// Реализация: graceful shutdown dispatch thread + exit(1). Candle/CUDA
+/// Реализация: graceful shutdown dispatch thread + exit(0). Candle/CUDA
 /// не освобождает VRAM при drop adapter в живом процессе (context держит
-/// страницы). Task Scheduler перезапускает сервер через 1 мин (restart=3).
-/// Следующая загрузка — через /v1/switch_model или перезапуск.
+/// страницы). exit(0) → Task НЕ перезапускает (restart только при ошибке).
+/// Сервер останавливается, VRAM полностью свободна. Перезапуск — вручную
+/// или через /v1/switch_model после повторного запуска.
 pub async fn unload_model(State(state): State<AppState>) -> Response {
     if state.switcher.loading.swap(true, Ordering::Relaxed) {
         return api_error(
@@ -226,20 +227,19 @@ pub async fn unload_model(State(state): State<AppState>) -> Response {
             "model switch already in progress",
         );
     }
-    // Graceful: shutdown dispatch thread, дать завершиться, exit → Task
-    // перезапускает процесс с чистой CUDA-памятью.
+    // Graceful: shutdown dispatch thread, дать завершиться, exit(0) →
+    // сервер останавливается, VRAM полностью освобождается ОС.
     tokio::spawn(async move {
         state.switcher.shutdown();
         let old = state.switcher.take();
         drop(old);
-        // Дать dispatch thread выйти (poll 50мс) + flush stderr.
         tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-        eprintln!("[unload] exiting for VRAM cleanup (Task restarts)");
-        std::process::exit(1);
+        eprintln!("[unload] exiting — VRAM freed, server stopped (restart manually)");
+        std::process::exit(0);
     });
     (
         StatusCode::ACCEPTED,
-        Json(json!({"status": "unloading", "note": "server restarts to free VRAM"})),
+        Json(json!({"status": "unloading", "note": "server stops; VRAM freed on exit"})),
     )
         .into_response()
 }
