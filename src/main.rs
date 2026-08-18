@@ -115,6 +115,7 @@ async fn main() -> Result<()> {
         models_dir,
         profile,
         cuda_device,
+        hf_downloads: Default::default(),
     };
     let app =
         build_router(state).merge(Router::new().route("/", get(|| async { Html(CHAT_HTML) })));

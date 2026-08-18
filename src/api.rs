@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod anthropic;
+pub mod hf;
 pub(crate) mod content;
 pub mod media;
 pub mod openai;
@@ -37,6 +38,8 @@ pub struct AppState {
     /// Мутабельно: unload_model обнуляет, чтобы CUDA context разрушился и VRAM
     /// освободилась. Без этого Device живёт весь процесс → VRAM не отпускается.
     pub cuda_device: Arc<RwLock<Option<candle_core::Device>>>,
+    /// Прогресс фоновых HF-загрузок (repo/file → state).
+    pub hf_downloads: hf::Downloads,
 }
 
 #[derive(Debug, Clone)]
@@ -138,6 +141,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/ctx_matrix", axum::routing::get(admin::ctx_matrix))
         .route("/switch_model", axum::routing::post(admin::switch_model))
         .route("/unload_model", axum::routing::post(admin::unload_model))
+        .route("/hf/search", axum::routing::get(hf::hf_search))
+        .route("/hf/files", axum::routing::get(hf::hf_files))
+        .route("/hf/probe", axum::routing::get(hf::hf_probe))
+        .route("/hf/download", axum::routing::post(hf::hf_download))
+        .route("/hf/downloads", axum::routing::get(hf::hf_downloads))
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth))
         .layer(DefaultBodyLimit::max(MAX_V1_BODY));
 

@@ -34,6 +34,40 @@ header { display: flex; align-items: center; gap: 12px; padding: 10px 20px; back
 header .brand { font-weight: 700; font-size: 15px; letter-spacing: -.2px; }
 header .badge { background: var(--bg2); border: 1px solid var(--border); border-radius: 999px; padding: 3px 12px; font-size: 11.5px; color: var(--dim); font-variant-numeric: tabular-nums; }
 header input[type=password] { background: var(--bg); border: 1px solid var(--border); color: var(--fg); border-radius: var(--radius-sm); padding: 6px 10px; width: 200px; }
+
+/* server panel */
+#backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.35); opacity: 0; pointer-events: none; transition: opacity .2s; z-index: 60; }
+#backdrop.open { opacity: 1; pointer-events: auto; }
+#serverpanel { position: fixed; top: 0; right: 0; bottom: 0; width: 380px; max-width: 92vw; background: var(--bg); border-left: 1px solid var(--border); box-shadow: -8px 0 30px rgba(0,0,0,.12); transform: translateX(100%); transition: transform .22s ease-out; z-index: 61; display: flex; flex-direction: column; overflow-y: auto; }
+#serverpanel.open { transform: translateX(0); }
+#serverpanel .phead { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; border-bottom: 1px solid var(--border-soft); position: sticky; top: 0; background: var(--bg); z-index: 1; }
+#serverpanel .phead h2 { margin: 0; font-size: 16px; }
+#serverpanel section { padding: 14px 18px; border-bottom: 1px solid var(--border-soft); }
+#serverpanel h3 { margin: 0 0 10px; font-size: 12px; text-transform: uppercase; letter-spacing: .6px; color: var(--dim); }
+#serverpanel .row { display: flex; gap: 8px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+#serverpanel select, #serverpanel input[type=text], #serverpanel input[type=password] { width: 100%; }
+#serverpanel #modelsel { width: 100%; font-family: var(--mono); font-size: 11.5px; }
+#curinfo { background: var(--bg2); border: 1px solid var(--border-soft); border-radius: var(--radius-sm); padding: 10px 12px; font-size: 13px; margin-bottom: 10px; }
+#curinfo .q { color: var(--dim); font-size: 11.5px; margin-top: 4px; }
+.hfrepo { border: 1px solid var(--border-soft); border-radius: var(--radius-sm); margin-bottom: 8px; overflow: hidden; }
+.hfrepo > .rhead { display: flex; align-items: center; gap: 8px; padding: 8px 12px; cursor: pointer; }
+.hfrepo > .rhead:hover { background: var(--bg2); }
+.hfrepo .rname { flex: 1; font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hfrepo .rmeta { font-size: 11px; color: var(--faint); white-space: nowrap; }
+.hfrepo .rfiles { display: none; border-top: 1px solid var(--border-soft); }
+.hfrepo.open .rfiles { display: block; }
+.hffile { display: flex; align-items: center; gap: 8px; padding: 7px 12px; font-size: 12px; border-top: 1px solid var(--border-soft); }
+.hffile .fname { flex: 1; font-family: var(--mono); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hffile .fsize { color: var(--faint); white-space: nowrap; font-size: 11px; }
+.hffile button { padding: 3px 10px; font-size: 11.5px; }
+.badge-fit { color: var(--green); font-weight: 600; font-size: 11px; }
+.badge-nofit { color: var(--red); font-weight: 600; font-size: 11px; }
+.badge-info { color: var(--dim); font-size: 11px; }
+.dlbar { margin: 8px 0; font-size: 11.5px; }
+.dlbar .dlname { font-family: var(--mono); font-size: 10.5px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dlbar .dltrack { height: 5px; background: var(--bg3); border-radius: 999px; overflow: hidden; margin-top: 3px; }
+.dlbar .dlfill { height: 100%; background: var(--accent); width: 0; transition: width .3s; }
+.dlbar .dlstat { color: var(--faint); margin-top: 2px; }
 select, input[type=number] { background: var(--bg); border: 1px solid var(--border); color: var(--fg); border-radius: var(--radius-sm); padding: 5px 8px; }
 input:focus, select:focus, textarea:focus, button:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 button { background: var(--bg); border: 1px solid var(--border); color: var(--fg); border-radius: var(--radius-sm); padding: 6px 14px; cursor: pointer; font-weight: 500; transition: border-color .15s, background .15s; }
@@ -154,18 +188,13 @@ html[data-theme="dark"] .codewrap .codebar { background: #0b0f1a; }
     <option value="thinking">thinking · общее</option>
     <option value="thinking-coding">thinking · код</option>
   </select>
-  <select id="modelsel" title="Модель (GGUF с диска сервера)" aria-label="Выбор модели"></select>
-  <input id="modelfilter" type="text" placeholder="фильтр…" aria-label="Фильтр моделей" autocomplete="off">
-  <select id="slotssel" title="Параллельные слоты" aria-label="Слоты"></select>
-  <select id="ctxsel" title="Контекст" aria-label="Контекстное окно"></select>
-  <button id="applymodel" title="Переключить модель/контекст">Применить</button>
-  <button id="unloadbtn" title="Выгрузить модель, освободить VRAM">⏏ Выгрузить</button>
   <div class="ctxwrap">
     <div class="ctxlabel" id="ctxlabel">контекст: 0 / 81920</div>
     <div class="ctxbar"><div id="ctxfill"></div></div>
   </div>
   <button id="stopbtn" disabled>Стоп</button>
   <button id="themebtn" title="Светлая/тёмная тема" aria-label="Переключить тему">🌓</button>
+  <button id="serverbtn" title="Управление сервером" aria-label="Управление сервером" aria-haspopup="dialog">⚙ Сервер</button>
 </header>
 <main>
   <aside>
@@ -203,6 +232,34 @@ html[data-theme="dark"] .codewrap .codebar { background: #0b0f1a; }
 </main>
 <div id="announcer" class="sr-only" aria-live="assertive"></div>
 <div id="toasts" aria-live="polite"></div>
+<div id="backdrop"></div>
+<aside id="serverpanel" role="dialog" aria-modal="true" aria-label="Управление сервером">
+  <div class="phead"><h2>Управление сервером</h2><button id="panelclose" aria-label="Закрыть панель">✕</button></div>
+  <section>
+    <h3>Текущая модель</h3>
+    <div id="curinfo">—</div>
+    <button id="unloadbtn" title="Выгрузить модель, освободить VRAM">⏏ Выгрузить модель</button>
+  </section>
+  <section>
+    <h3>Локальные модели</h3>
+    <div class="row"><input id="modelfilter" type="text" placeholder="фильтр…" aria-label="Фильтр моделей" autocomplete="off"></div>
+    <div class="row"><select id="modelsel" size="9" aria-label="Выбор модели"></select></div>
+    <div class="row">
+      <select id="ctxsel" title="Контекст" aria-label="Контекстное окно"></select>
+      <select id="slotssel" title="Параллельные слоты" aria-label="Слоты"></select>
+      <button id="applymodel" class="primary" title="Переключить модель/контекст">Применить</button>
+    </div>
+  </section>
+  <section>
+    <h3>HuggingFace</h3>
+    <div class="row">
+      <input id="hfq" type="text" placeholder="Найти GGUF (напр. qwen3.5)…" aria-label="Поиск на HuggingFace" autocomplete="off">
+      <button id="hfsearchbtn" class="primary">Найти</button>
+    </div>
+    <div id="hfresults"></div>
+    <div id="hfdownloads"></div>
+  </section>
+</aside>
 <div id="keyform">
   <h2>API key</h2>
   <input type="password" id="keyformkey" placeholder="Введите мастер-ключ" autocomplete="off">
@@ -386,6 +443,8 @@ async function loadModels() {
     const m = j.data && j.data[0];
     if (m) {
       hideKeyForm();
+      lastModelInfo = m;
+      renderCurInfo();
       if (m.context_length) ctxLen = m.context_length;
       if (m.id) modelId = m.id;
       $("modelinfo").textContent =
@@ -879,6 +938,202 @@ $("apikey").addEventListener("change", () => {
   loadModels();
   loadAvailableModels();
 });
+
+/* server panel open/close */
+const panel = $("serverpanel"), backdrop = $("backdrop");
+let panelReturnFocus = null;
+function openPanel() {
+  panelReturnFocus = document.activeElement;
+  panel.classList.add("open"); backdrop.classList.add("open");
+  $("panelclose").focus();
+  loadAvailableModels();
+}
+function closePanel() {
+  panel.classList.remove("open"); backdrop.classList.remove("open");
+  if (panelReturnFocus) panelReturnFocus.focus();
+}
+$("serverbtn").onclick = openPanel;
+$("panelclose").onclick = closePanel;
+backdrop.onclick = closePanel;
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && panel.classList.contains("open")) { e.stopPropagation(); closePanel(); }
+}, true);
+
+/* current model card */
+function renderCurInfo() {
+  const el = $("curinfo");
+  const m = lastModelInfo;
+  if (!m) { el.textContent = "—"; return; }
+  el.innerHTML = "";
+  const t = document.createElement("div");
+  t.textContent = m.id;
+  t.style.fontWeight = "600";
+  const q = document.createElement("div");
+  q.className = "q";
+  q.textContent = [m.quant, "ctx " + (m.context_length || "?"), "slots " + (m.slots ?? "?")].filter(Boolean).join(" · ");
+  el.append(t, q);
+}
+let lastModelInfo = null;
+
+/* HF search/files/probe/download */
+async function hfSearch() {
+  const q = $("hfq").value.trim();
+  if (q.length < 2) return;
+  const box = $("hfresults");
+  box.innerHTML = "<div class='badge-info'>поиск…</div>";
+  try {
+    const r = await api("/v1/hf/search?q=" + encodeURIComponent(q));
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const j = await r.json();
+    box.innerHTML = "";
+    if (!j.results.length) { box.innerHTML = "<div class='badge-info'>ничего не найдено</div>"; return; }
+    for (const m of j.results) {
+      const card = document.createElement("div");
+      card.className = "hfrepo";
+      const head = document.createElement("div");
+      head.className = "rhead";
+      const name = document.createElement("span");
+      name.className = "rname"; name.textContent = m.repo; name.title = m.repo;
+      const meta = document.createElement("span");
+      meta.className = "rmeta"; meta.textContent = "⤓ " + m.downloads + " · ★ " + m.likes;
+      const toggle = document.createElement("span");
+      toggle.textContent = "▸";
+      head.append(toggle, name, meta);
+      const filesEl = document.createElement("div");
+      filesEl.className = "rfiles";
+      head.onclick = () => {
+        card.classList.toggle("open");
+        toggle.textContent = card.classList.contains("open") ? "▾" : "▸";
+        if (card.classList.contains("open") && !filesEl.dataset.loaded) {
+          filesEl.dataset.loaded = "1";
+          hfFiles(m.repo, filesEl);
+        }
+      };
+      card.append(head, filesEl);
+      box.append(card);
+    }
+  } catch (e) {
+    box.innerHTML = "<div class='badge-nofit'>ошибка: " + escapeHtml(e.message) + "</div>";
+  }
+}
+
+async function hfFiles(repo, filesEl) {
+  filesEl.innerHTML = "<div class='badge-info' style='padding:8px 12px'>файлы…</div>";
+  try {
+    const r = await api("/v1/hf/files?repo=" + encodeURIComponent(repo));
+    const j = await r.json();
+    filesEl.innerHTML = "";
+    for (const f of j.files) {
+      const row = document.createElement("div");
+      row.className = "hffile";
+      const name = document.createElement("span");
+      name.className = "fname"; name.textContent = f.file; name.title = f.file;
+      const size = document.createElement("span");
+      size.className = "fsize"; size.textContent = f.size_bytes ? Math.round(f.size_bytes / 1048576) + " MiB" : "?";
+      const probeBtn = document.createElement("button");
+      probeBtn.textContent = "Проверить";
+      const badge = document.createElement("span");
+      const dlBtn = document.createElement("button");
+      dlBtn.textContent = "Скачать"; dlBtn.className = "primary";
+      probeBtn.onclick = () => hfProbe(repo, f.file, badge, probeBtn);
+      dlBtn.onclick = () => hfDownload(repo, f.file, dlBtn);
+      row.append(name, size, badge, probeBtn, dlBtn);
+      filesEl.append(row);
+    }
+    if (!j.files.length) filesEl.innerHTML = "<div class='badge-info' style='padding:8px 12px'>нет .gguf файлов</div>";
+  } catch (e) {
+    filesEl.innerHTML = "<div class='badge-nofit' style='padding:8px 12px'>ошибка: " + escapeHtml(e.message) + "</div>";
+  }
+}
+
+async function hfProbe(repo, file, badge, btn) {
+  btn.disabled = true; badge.textContent = "…"; badge.className = "badge-info";
+  try {
+    const r = await api("/v1/hf/probe?repo=" + encodeURIComponent(repo) + "&file=" + encodeURIComponent(file));
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error && j.error.message || "HTTP " + r.status);
+    if (j.fits === true) {
+      badge.textContent = "✓ влезет · " + j.arch + " · ctx " + j.native_ctx;
+      badge.className = "badge-fit";
+      badge.title = "Рекомендуется ctx " + j.recommended.ctx + ", slots " + j.recommended.slots;
+    } else if (j.fits === false) {
+      badge.textContent = "✗ не влезет (" + j.size_mib + " MiB > VRAM)";
+      badge.className = "badge-nofit";
+    } else {
+      badge.textContent = j.arch + " · " + j.size_mib + " MiB";
+      badge.className = "badge-info";
+    }
+  } catch (e) {
+    badge.textContent = "probe: " + e.message;
+    badge.className = "badge-nofit";
+  }
+  btn.disabled = false;
+}
+
+let hfPollTimer = null;
+async function hfDownload(repo, file, btn) {
+  btn.disabled = true;
+  try {
+    const r = await api("/v1/hf/download", { method: "POST", body: JSON.stringify({ repo, file }) });
+    if (r.status === 409) { toast("Уже скачивается", true); btn.disabled = false; return; }
+    if (!r.ok && r.status !== 202) throw new Error("HTTP " + r.status);
+    toast("Загрузка началась: " + file);
+    startDlPoll();
+  } catch (e) {
+    toast("Загрузка не началась: " + e.message, true);
+    btn.disabled = false;
+  }
+}
+
+function startDlPoll() {
+  if (hfPollTimer) return;
+  hfPollTimer = setInterval(pollDownloads, 2000);
+  pollDownloads();
+}
+
+async function pollDownloads() {
+  try {
+    const r = await api("/v1/hf/downloads");
+    if (!r.ok) return;
+    const j = await r.json();
+    const box = $("hfdownloads");
+    box.innerHTML = "";
+    let anyActive = false;
+    for (const d of j.downloads) {
+      const wrap = document.createElement("div");
+      wrap.className = "dlbar";
+      const name = document.createElement("div");
+      name.className = "dlname"; name.textContent = d.key;
+      const track = document.createElement("div");
+      track.className = "dltrack";
+      const fill = document.createElement("div");
+      fill.className = "dlfill";
+      const stat = document.createElement("div");
+      stat.className = "dlstat";
+      if (d.status === "downloading") {
+        anyActive = true;
+        const pct = d.total_bytes ? Math.round(100 * d.done_bytes / d.total_bytes) : 0;
+        fill.style.width = pct + "%";
+        stat.textContent = Math.round(d.done_bytes / 1048576) + " / " + (d.total_bytes ? Math.round(d.total_bytes / 1048576) : "?") + " MiB · " + pct + "%";
+      } else if (d.status === "done") {
+        fill.style.width = "100%";
+        stat.textContent = "готово — в локальных моделях";
+        stat.style.color = "var(--green)";
+        loadAvailableModels();
+      } else {
+        stat.textContent = d.status;
+        stat.style.color = "var(--red)";
+      }
+      track.append(fill);
+      wrap.append(name, track, stat);
+      box.append(wrap);
+    }
+    if (!anyActive) { clearInterval(hfPollTimer); hfPollTimer = null; }
+  } catch (e) {}
+}
+
+$("hfsearchbtn").onclick = hfSearch;
+$("hfq").addEventListener("keydown", e => { if (e.key === "Enter") hfSearch(); });
 
 let modelSwitching = false;
 let ctxMatrix = null;
