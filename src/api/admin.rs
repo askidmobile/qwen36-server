@@ -223,20 +223,34 @@ pub async fn unload_model(State(state): State<AppState>) -> Response {
             "model switch already in progress",
         );
     }
-    // Выгружаем синхронно: drop Arc<dyn Engine> в blocking-контексте,
-    // чтобы к ответу VRAM уже была свободна (или близка к тому).
+    // Выгружаем: shutdown-флаг → dispatch thread выходит из polling-цикла
+    // (≤50мс), drop scheduler/adapter → VRAM freed. Ждём завершения thread,
+    // потом trim mempool. Без join VRAM не освобождается — adapter ещё жив.
     let result = tokio::task::spawn_blocking({
         let switcher = state.switcher.clone();
         let cuda_device = state.cuda_device.clone();
         move || {
             let old = switcher.take();
             drop(old);
+            // Дождаться завершения dispatch thread (max 5с — shutdown poll 50мс).
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while std::time::Instant::now() < deadline {
+                if !switcher.is_loaded() {
+                    // inner=None, но thread может ещё не закончить drop.
+                    // Ждём ещё 100мс запаса на падение CUDA-аллокаций.
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
             // Освободить retained-страницы CUDA mempool: иначе пул держит
             // страницы старых весов навсегда (урок 2026-08-10, trim_default_mempool).
             #[cfg(feature = "cuda")]
             if let Some(dev) = cuda_device {
                 if let candle_core::Device::Cuda(c) = dev {
+                    let _ = c.synchronize();
                     let _ = candle_core::cuda_backend::mem_pool::trim_default_mempool(&c);
+                    let _ = c.synchronize();
                 }
             }
             switcher.last_error.write().expect("last_error lock").clear();
