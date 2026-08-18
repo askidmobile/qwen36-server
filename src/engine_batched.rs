@@ -178,6 +178,8 @@ impl BatchedEngine {
         let tokenizer = engine.tokenizer.clone();
         let in_flight = Arc::clone(&engine.in_flight);
         let cfg2 = Arc::clone(&cfg);
+        let vision_path2 = engine.vision_path.clone();
+        let mtp_path2 = mtp_path.clone();
         // ponytail: Qwen35BatchAdapter владеет raw CUDA graph handles → не Send.
         // Создаём adapter+scheduler прямо в dispatch std::thread (не tokio, не
         // spawn_blocking): closure не содержит non-Send значений.
@@ -193,12 +195,12 @@ impl BatchedEngine {
                     return;
                 }
             };
-            if let Some(path) = engine.vision_path.clone() {
+            if let Some(path) = vision_path2 {
                 if let Err(e) = adapter.load_vision(&path) {
                     eprintln!("[dispatch] vision load failed: {e:#}");
                 }
             }
-            if let Some(path) = mtp_path.clone() {
+            if let Some(path) = mtp_path2 {
                 if let Err(e) = adapter.load_mtp(&path) {
                     eprintln!("[dispatch] mtp load failed: {e:#}");
                 }
