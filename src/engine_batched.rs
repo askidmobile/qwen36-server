@@ -440,7 +440,7 @@ fn dispatch_loop(
     // Диагностика: heartbeat раз в 5s пока есть активные слоты.
     let mut last_hb = Instant::now();
 
-    loop {
+    'outer: loop {
         if shutdown.load(Ordering::Relaxed) {
             eprintln!("[dispatch] shutdown flag seen, exiting");
             break;
@@ -611,8 +611,8 @@ fn dispatch_loop(
                 last_hb = Instant::now();
             }
             match rx.try_recv() {
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
-                Ok(_) if shutdown.load(Ordering::Relaxed) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break 'outer,
+                Ok(_) if shutdown.load(Ordering::Relaxed) => break 'outer,
                 Ok(IngestMsg::Admit(req)) if req.out.is_closed() => {
                     in_flight.fetch_sub(1, Ordering::Relaxed);
                 }
