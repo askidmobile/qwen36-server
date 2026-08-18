@@ -260,6 +260,17 @@ struct ModelState {
     device: candle_core::Device,
 }
 
+// ponytail: ModelWeights (из candle-fork) теперь владеет raw CUDA graph/event
+// handles (DecodeGraphState: CUgraphExec/CUgraph/CudaStream). Доступ к модели
+// сериализован Arc<Mutex<ModelState>> — единственный владелец handles, drop под
+// блокировкой. Raw CUDA handles не имеют Rust-aliasing, передавать между потоками
+// safe при эксклюзивном владении. Снять allow, когда форк обернёт graph handles в
+// Send-wrapper (cudarc CudaGraph).
+#[cfg(feature = "cuda")]
+unsafe impl Send for ModelState {}
+#[cfg(feature = "cuda")]
+unsafe impl Sync for ModelState {}
+
 pub struct CandleEngine {
     /// Модель не thread-safe — вся генерация под мьютексом.
     /// Параллелизм 4 слотов (BD-007) даст batched-планировщик форка
