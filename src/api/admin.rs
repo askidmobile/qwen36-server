@@ -227,9 +227,18 @@ pub async fn unload_model(State(state): State<AppState>) -> Response {
     // чтобы к ответу VRAM уже была свободна (или близка к тому).
     let result = tokio::task::spawn_blocking({
         let switcher = state.switcher.clone();
+        let cuda_device = state.cuda_device.clone();
         move || {
             let old = switcher.take();
             drop(old);
+            // Освободить retained-страницы CUDA mempool: иначе пул держит
+            // страницы старых весов навсегда (урок 2026-08-10, trim_default_mempool).
+            #[cfg(feature = "cuda")]
+            if let Some(dev) = cuda_device {
+                if let candle_core::Device::Cuda(c) = dev {
+                    let _ = candle_core::cuda_backend::mem_pool::trim_default_mempool(&c);
+                }
+            }
             switcher.last_error.write().expect("last_error lock").clear();
         }
     })
