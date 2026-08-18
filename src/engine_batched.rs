@@ -154,6 +154,13 @@ impl BatchedEngine {
         // TODO-F1: загрузка адаптера (блокирующе) + токенизатора.
         let device = select_device()?;
         let adapter_device = device.clone();
+        // ponytail: Qwen35BatchAdapter из candle-fork владеет raw CUDA graph/event
+        // handles (DecodeGraphState) → не Send под cfg(cuda). Загружаем в
+        // spawn_blocking; scheduler целиком живёт в dispatch std::thread (не tokio).
+        // SendAdapter: handles эксклюзивны, доступ только из dispatch thread.
+        struct SendAdapter(Qwen35BatchAdapter);
+        unsafe impl Send for SendAdapter {}
+        unsafe impl Sync for SendAdapter {}
         let adapter = tokio::task::spawn_blocking({
             let p = cfg.model_path.clone();
             let slots = cfg.slots;
@@ -168,17 +175,17 @@ impl BatchedEngine {
                 if let Some(path) = mtp_path {
                     adapter.load_mtp(&path)?;
                 }
-                Ok::<_, anyhow::Error>(adapter)
+                Ok::<_, anyhow::Error>(SendAdapter(adapter))
             }
         })
         .await??;
         #[cfg(feature = "cuda")]
         crate::engine::maybe_retain_mempool(&device);
-        let eos = adapter.eos();
-        let vocab = adapter.vocab_size();
+        let eos = adapter.0.eos();
+        let vocab = adapter.0.vocab_size();
         let tokenizer = tokenizer::load_from_gguf_path(std::path::Path::new(&cfg.model_path))?;
 
-        let scheduler = BatchScheduler::new(adapter, cfg.slots, eos, vocab);
+        let scheduler = BatchScheduler::new(adapter.0, cfg.slots, eos, vocab);
 
         let info = ModelInfo {
             id: model_id_from_filename(std::path::Path::new(&cfg.model_path)),
