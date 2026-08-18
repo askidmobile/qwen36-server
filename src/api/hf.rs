@@ -25,7 +25,9 @@ use super::{api_error, AppState};
 use crate::vram_plan;
 
 const HF: &str = "https://huggingface.co";
-const PROBE_BYTES: u64 = 4 * 1024 * 1024;
+/// Tokenizer-метаданные в GGUF-заголовке (до ~150K токенов) занимают мегабайты —
+/// 4MB не хватает («string length exceeds remaining»). 16MB покрывает 248K vocab.
+const PROBE_BYTES: u64 = 16 * 1024 * 1024;
 /// Макс. размер скачиваемого файла (защита от случайных 100+GB).
 const MAX_DOWNLOAD_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 
