@@ -231,11 +231,10 @@ pub async fn unload_model(State(state): State<AppState>) -> Response {
         let switcher = state.switcher.clone();
         let cuda_device = state.cuda_device.clone();
         move || {
-            // 1. shutdown: dispatch thread выходит и drop-ает adapter (VRAM).
             switcher.shutdown();
             let old = switcher.take();
             drop(old);
-            // 2. Дождаться завершения dispatch thread (max 5с — shutdown poll 50мс).
+            // Дождаться завершения dispatch thread (max 5с — shutdown poll 50мс).
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             while std::time::Instant::now() < deadline {
                 if !switcher.is_loaded() {
@@ -244,15 +243,11 @@ pub async fn unload_model(State(state): State<AppState>) -> Response {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            // 3. Только после drop adapter — очистить device (context destruction).
-            //    Обратный порядок (device до adapter) → cudaFree в разрушенном
-            //    context → orphaned VRAM (11GB не освобождаются).
-            let mut dev_guard = cuda_device.write().expect("cuda_device lock");
-            let dev_opt = dev_guard.take();
-            drop(dev_guard);
-            // 4. Trim mempool до разрушения context (после drop adapter).
+            // Trim mempool — adapter dropped в dispatch thread, страницы свободны.
+            // device НЕ обнуляем: cuda_device живёт весь процесс (candle context),
+            // иначе Tensor drop в dispatch без device → orphaned VRAM.
             #[cfg(feature = "cuda")]
-            if let Some(dev) = dev_opt {
+            if let Some(dev) = cuda_device.read().expect("cuda_device lock").as_ref() {
                 if let candle_core::Device::Cuda(c) = dev {
                     use candle_core::backend::BackendDevice;
                     let _ = c.synchronize();
