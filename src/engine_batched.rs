@@ -138,7 +138,6 @@ impl Drop for BatchedEngine {
         // даже если канал каким-то образом не закрылся.
     }
 }
-}
 
 impl BatchedEngine {
     pub async fn load(
