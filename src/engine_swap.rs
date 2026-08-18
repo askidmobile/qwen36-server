@@ -51,8 +51,10 @@ impl SwappableEngine {
 impl Engine for SwappableEngine {
     fn shutdown(&self) {
         // Пробрасываем внутрь (для unload_model: shutdown до take).
-        if let Some(e) = self.inner.read().expect("engine lock").as_ref() {
-            e.shutdown();
+        let inner = self.inner.read().expect("engine lock");
+        match inner.as_ref() {
+            Some(e) => { eprintln!("[swappable] shutdown → inner"); e.shutdown(); }
+            None => eprintln!("[swappable] shutdown: inner=None"),
         }
     }
     async fn generate(&self, request: InferenceRequest) -> Result<mpsc::Receiver<StreamEvent>> {

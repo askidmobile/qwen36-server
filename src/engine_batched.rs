@@ -232,6 +232,7 @@ impl BatchedEngine {
 #[async_trait::async_trait]
 impl Engine for BatchedEngine {
     fn shutdown(&self) {
+        eprintln!("[batched] shutdown() called");
         self.shutdown.store(true, Ordering::Relaxed);
     }
     async fn generate(
