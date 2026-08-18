@@ -186,6 +186,12 @@ impl BatchedEngine {
         let tokenizer = tokenizer::load_from_gguf_path(std::path::Path::new(&cfg.model_path))?;
 
         let scheduler = BatchScheduler::new(adapter.0, cfg.slots, eos, vocab);
+        // ponytail: BatchScheduler<Qwen35BatchAdapter> не Send под cfg(cuda) —
+        // adapter владеет raw CUDA graph handles. dispatch_loop живёт в одном
+        // std::thread, доступ сериализован. Send unsafe по эксклюзивности.
+        struct SendSched(BatchScheduler<Qwen35BatchAdapter>);
+        unsafe impl Send for SendSched {}
+        let scheduler = SendSched(scheduler);
 
         let info = ModelInfo {
             id: model_id_from_filename(std::path::Path::new(&cfg.model_path)),
@@ -211,7 +217,7 @@ impl BatchedEngine {
         // scheduler/adapter не Send (CUDA context не thread-safe) → свой thread,
         // не tokio::spawn. dispatch_loop синхронная; blocking_recv на idle.
         std::thread::spawn(move || {
-            dispatch_loop(scheduler, rx_ingest, cfg2, in_flight, tokenizer);
+            dispatch_loop(scheduler.0, rx_ingest, cfg2, in_flight, tokenizer);
         });
 
         Ok(engine)
