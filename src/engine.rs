@@ -246,6 +246,9 @@ pub trait Engine: Send + Sync {
     /// Стриминговая генерация по chat-сообщениям. sliding window внутри (BD-017).
     async fn generate(&self, request: InferenceRequest) -> Result<mpsc::Receiver<StreamEvent>>;
     fn model_info(&self) -> ModelInfo;
+    /// Остановить фоновые потоки движка (dispatch thread). Вызывается при unload.
+    /// Default no-op — single-slot CandleEngine ничего не держит в фоне.
+    fn shutdown(&self) {}
 }
 
 // ── CandleEngine ────────────────────────────────────────────────────────────

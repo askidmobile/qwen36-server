@@ -230,6 +230,11 @@ pub async fn unload_model(State(state): State<AppState>) -> Response {
         let switcher = state.switcher.clone();
         let cuda_device = state.cuda_device.clone();
         move || {
+            // Сначала shutdown: dispatch thread выходит из polling-цикла и
+            // drop-ает adapter (VRAM). Без shutdown Arc<dyn Engine> → drop
+            // dyn object → Drop for BatchedEngine не вызывается (vtable drop
+            // не выставляет shutdown-флаг).
+            switcher.shutdown();
             let old = switcher.take();
             drop(old);
             // Дождаться завершения dispatch thread (max 5с — shutdown poll 50мс).

@@ -49,6 +49,12 @@ impl SwappableEngine {
 
 #[async_trait::async_trait]
 impl Engine for SwappableEngine {
+    fn shutdown(&self) {
+        // Пробрасываем внутрь (для unload_model: shutdown до take).
+        if let Some(e) = self.inner.read().expect("engine lock").as_ref() {
+            e.shutdown();
+        }
+    }
     async fn generate(&self, request: InferenceRequest) -> Result<mpsc::Receiver<StreamEvent>> {
         let engine = { self.inner.read().expect("engine lock").clone() };
         match engine {

@@ -231,6 +231,9 @@ impl BatchedEngine {
 
 #[async_trait::async_trait]
 impl Engine for BatchedEngine {
+    fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+    }
     async fn generate(
         &self,
         request: InferenceRequest,
