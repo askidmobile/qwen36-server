@@ -196,10 +196,13 @@ pub async fn available_models(State(state): State<AppState>) -> Json<Value> {
     } else {
         Value::Null
     };
+    let (ready, load_err) = (state.switcher.ready(), state.switcher.load_error());
     Json(json!({
         "models_dir": state.models_dir.to_string_lossy(),
         "current": current_json,
         "loading": state.switcher.loading.load(Ordering::Relaxed),
+        "ready": loaded && ready,
+        "load_error": load_err,
         "last_error": state.switcher.last_error.read().map(|s| s.clone()).unwrap_or_default(),
         "models": out,
         "profiles": profiles,

@@ -1228,15 +1228,17 @@ async function watchModelSwitch() {
       const r = await api("/v1/available_models");
       if (!r.ok) continue;
       const j = await r.json();
-      if (j.last_error) {
+      if (j.load_error) {
         modelSwitching = false;
         $("applymodel").disabled = false;
         $("send").disabled = false;
-        $("modelinfo").textContent = "ошибка переключения";
-        toast("Switch failed: " + j.last_error.split("\n")[0], true);
+        $("modelinfo").textContent = "ошибка загрузки модели";
+        toast("Модель не загрузилась: " + String(j.load_error).split("\n")[0].slice(0, 200), true);
         break;
       }
-      if (!j.loading) {
+      // loading=false только когда install завершён; ready=true — веса в
+      // dispatch-потоке готовы (для batched). CandleEngine всегда ready.
+      if (!j.loading && j.ready) {
         modelSwitching = false;
         $("applymodel").disabled = false;
         $("send").disabled = false;

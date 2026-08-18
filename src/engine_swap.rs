@@ -55,6 +55,19 @@ impl Engine for SwappableEngine {
             e.shutdown();
         }
     }
+    fn ready(&self) -> bool {
+        match self.inner.read().expect("engine lock").as_ref() {
+            Some(e) => e.ready(),
+            None => false,
+        }
+    }
+    fn load_error(&self) -> Option<String> {
+        self.inner
+            .read()
+            .expect("engine lock")
+            .as_ref()
+            .and_then(|e| e.load_error())
+    }
     async fn generate(&self, request: InferenceRequest) -> Result<mpsc::Receiver<StreamEvent>> {
         let engine = { self.inner.read().expect("engine lock").clone() };
         match engine {

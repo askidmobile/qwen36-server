@@ -249,6 +249,12 @@ pub trait Engine: Send + Sync {
     /// Остановить фоновые потоки движка (dispatch thread). Вызывается при unload.
     /// Default no-op — single-slot CandleEngine ничего не держит в фоне.
     fn shutdown(&self) {}
+    /// true = веса загружены, движок готов к generate. CandleEngine грузится
+    /// синхронно → всегда true; BatchedEngine грузит адаптер в потоке.
+    fn ready(&self) -> bool { true }
+    /// Ошибка асинхронной загрузки (None = ок). Для BatchedEngine — текст
+    /// ошибки adapter load, иначе switch рапортует успех при мёртвом движке.
+    fn load_error(&self) -> Option<String> { None }
 }
 
 // ── CandleEngine ────────────────────────────────────────────────────────────

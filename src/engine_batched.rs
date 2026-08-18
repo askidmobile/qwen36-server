@@ -11,6 +11,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -133,6 +134,11 @@ pub struct BatchedEngine {
     /// (GPU-память) освобождён до возврата из drop (иначе trim mempool идёт
     /// по живому adapter и VRAM не возвращается ОС).
     dispatch_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// Готовность: адаптер загружен в dispatch-потоке. До этого generate
+    /// стоит в очереди канала (не ошибка), а UI должен показывать «загрузка».
+    ready: Arc<AtomicBool>,
+    /// Ошибка загрузки адаптера в dispatch-потоке (видна в available_models).
+    load_error: Arc<RwLock<String>>,
 }
 
 impl Drop for BatchedEngine {
@@ -191,6 +197,8 @@ impl BatchedEngine {
             vision_path,
             shutdown: Arc::new(AtomicBool::new(false)),
             dispatch_handle: Mutex::new(None),
+            ready: Arc::new(AtomicBool::new(false)),
+            load_error: Arc::new(RwLock::new(String::new())),
         });
 
         let tokenizer = engine.tokenizer.clone();
@@ -202,6 +210,8 @@ impl BatchedEngine {
         // ponytail: Qwen35BatchAdapter владеет raw CUDA graph handles → не Send.
         // Создаём adapter+scheduler прямо в dispatch std::thread (не tokio, не
         // spawn_blocking): closure не содержит non-Send значений.
+        let ready = Arc::clone(&engine.ready);
+        let load_error = Arc::clone(&engine.load_error);
         let handle = std::thread::spawn(move || {
             let mut adapter = match Qwen35BatchAdapter::load(
                 std::path::Path::new(&cfg2.model_path),
@@ -211,6 +221,7 @@ impl BatchedEngine {
                 Ok(a) => a,
                 Err(e) => {
                     eprintln!("[dispatch] adapter load failed: {e:#}");
+                    *load_error.write().expect("load_error lock") = format!("{e:#}");
                     return;
                 }
             };
@@ -229,6 +240,7 @@ impl BatchedEngine {
             let eos = adapter.eos();
             let vocab = adapter.vocab_size();
             let scheduler = BatchScheduler::new(adapter, cfg2.slots, eos, vocab);
+            ready.store(true, Ordering::Relaxed);
             dispatch_loop(scheduler, rx_ingest, cfg2, in_flight, tokenizer, shutdown2);
         });
         *engine.dispatch_handle.lock().expect("dispatch lock") = Some(handle);
@@ -242,6 +254,13 @@ impl Engine for BatchedEngine {
     fn shutdown(&self) {
         self.shutdown.store(true, Ordering::Relaxed);
     }
+    fn ready(&self) -> bool {
+        self.ready.load(Ordering::Relaxed)
+    }
+    fn load_error(&self) -> Option<String> {
+        let e = self.load_error.read().expect("load_error lock");
+        if e.is_empty() { None } else { Some(e.clone()) }
+    }
     async fn generate(
         &self,
         request: InferenceRequest,
@@ -253,6 +272,14 @@ impl Engine for BatchedEngine {
             cancel,
         } = request;
         let has_media = messages.iter().any(ChatMessage::has_media);
+        // Адаптер грузится в dispatch-потоке: до ready — отказ (не молчаливый
+        // 503-queue). UI уже не пускает (send disabled), но API-клиенты могут.
+        if !self.ready.load(Ordering::Relaxed) {
+            if let Some(err) = self.load_error() {
+                bail!("model load failed: {err}");
+            }
+            bail!("model still loading");
+        }
         if has_media && self.vision_path.is_none() {
             return Err(crate::media::MediaError::new(
                 crate::media::MediaErrorKind::ComponentUnavailable,
