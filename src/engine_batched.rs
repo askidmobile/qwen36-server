@@ -130,7 +130,13 @@ pub struct BatchedEngine {
 }
 
 impl BatchedEngine {
-    pub async fn load(
+    /// ponytail: BatchScheduler<Qwen35BatchAdapter> не Send под cfg(cuda) —
+/// adapter владеет raw CUDA graph handles (DecodeGraphState).
+/// dispatch_loop живёт в одном std::thread, доступ сериализован.
+struct SendSched(BatchScheduler<Qwen35BatchAdapter>);
+unsafe impl Send for SendSched {}
+
+pub async fn load(
         cfg: BatchConfig,
         media: Arc<crate::media::MediaService>,
         vision_path: Option<std::path::PathBuf>,
@@ -186,11 +192,6 @@ impl BatchedEngine {
         let tokenizer = tokenizer::load_from_gguf_path(std::path::Path::new(&cfg.model_path))?;
 
         let scheduler = BatchScheduler::new(adapter.0, cfg.slots, eos, vocab);
-        // ponytail: BatchScheduler<Qwen35BatchAdapter> не Send под cfg(cuda) —
-        // adapter владеет raw CUDA graph handles. dispatch_loop живёт в одном
-        // std::thread, доступ сериализован. Send unsafe по эксклюзивности.
-        struct SendSched(BatchScheduler<Qwen35BatchAdapter>);
-        unsafe impl Send for SendSched {}
         let scheduler = SendSched(scheduler);
 
         let info = ModelInfo {
