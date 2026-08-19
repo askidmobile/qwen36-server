@@ -638,11 +638,6 @@ fn dispatch_loop(
         // не виден пока не придёт сообщение; blocking_recv блокирует навечно).
         if !did_work && pending.is_empty() && bindings.iter().all(|b| b.is_none()) {
             std::thread::sleep(std::time::Duration::from_millis(50));
-            // Диагностика: печать shutdown-флага каждую секунду в idle.
-            if std::time::Instant::now().duration_since(last_hb).as_secs() >= 1 {
-                eprintln!("[dispatch] idle, shutdown={}", shutdown.load(Ordering::Relaxed));
-                last_hb = Instant::now();
-            }
             match rx.try_recv() {
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break 'outer,
                 Ok(_) if shutdown.load(Ordering::Relaxed) => break 'outer,
