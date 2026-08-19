@@ -339,6 +339,7 @@ impl Engine for CandleEngine {
             cancel,
             tools,
             reasoning_effort,
+            ..
         } = request;
         // Sliding window (BD-017): system сохраняется, режутся старые пары.
         // Оценка: токены каждого сообщения отдельно (BPE-границы дают погрешность
