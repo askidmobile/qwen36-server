@@ -642,7 +642,22 @@ function renderMsg(msg, streaming, idx, allMsgs) {
 function fillBubble(bubble, msg, streaming) {
   bubble.innerHTML = "";
   if (msg.role === "assistant") {
-    const assumeThinking = msg.thinking === true;
+    // Сервер присылает мышление отдельным полем reasoning_content (thinkText);
+    // легаси-контент с </think> парсим из текста.
+    if (msg.thinkText) {
+      const det = document.createElement("details");
+      det.className = "think";
+      det.open = !!streaming;
+      const sum = document.createElement("summary");
+      const words = msg.thinkText.trim().split(/\s+/).filter(Boolean).length;
+      sum.textContent = "Рассуждения" + (words ? " · " + words + " слов" : "");
+      const tc = document.createElement("div");
+      tc.className = "tc"; tc.innerHTML = renderMarkdown(msg.thinkText);
+      det.append(sum, tc);
+      bubble.append(det);
+      if (streaming) tc.scrollTop = tc.scrollHeight;
+    }
+    const assumeThinking = msg.thinking === true && !msg.thinkText;
     for (const part of parseThinking(msg.content || "", assumeThinking)) {
       if (part.kind === "think") {
         const det = document.createElement("details");
@@ -773,7 +788,7 @@ async function send(regen) {
     chat_template_kwargs: { enable_thinking: mode !== "instruct" },
   }, readParams());
 
-  const asst = { role: "assistant", content: "", meta: {}, thinking: mode !== "instruct" };
+  const asst = { role: "assistant", content: "", thinkText: "", meta: {}, thinking: mode !== "instruct" };
   c.messages.push(asst);
   saveChat(c);
   renderChatList();
@@ -839,6 +854,10 @@ async function send(regen) {
           try { j = JSON.parse(data); } catch { continue; }
           const ch = j.choices && j.choices[0];
           const delta = ch && ch.delta;
+          if (delta && delta.reasoning_content) {
+            asst.thinkText = (asst.thinkText || "") + delta.reasoning_content;
+            scheduleRedraw();
+          }
           if (delta && delta.content) {
             if (!firstDeltaAt) firstDeltaAt = performance.now();
             if (!liveT0) liveT0 = performance.now();

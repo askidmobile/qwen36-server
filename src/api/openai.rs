@@ -217,13 +217,25 @@ pub async fn chat_completions(
         Ok(o) => o,
         Err(r) => return r,
     };
-    let (text, calls) = parse_tool_calls(&out.text);
+    // Отрезать мышление из content: thinking → message.reasoning_content.
+    let (reasoning, text_body) = match out.text.find("</think>") {
+        Some(pos) => {
+            let r = out.text[..pos].trim().to_string();
+            let t = out.text[pos + "</think>".len()..].trim_start().to_string();
+            (if r.is_empty() { None } else { Some(r) }, t)
+        }
+        None => (None, out.text.clone()),
+    };
+    let (text, calls) = parse_tool_calls(&text_body);
     let finish = if !calls.is_empty() {
         "tool_calls"
     } else {
         out.finish_reason.as_str()
     };
     let mut message = json!({"role": "assistant", "content": if text.is_empty() { Value::Null } else { json!(text) }});
+    if let Some(r) = reasoning {
+        message["reasoning_content"] = json!(r);
+    }
     if !calls.is_empty() {
         message["tool_calls"] = oai_tool_calls(&calls);
     }
@@ -276,6 +288,10 @@ async fn stream_chat(
     let id = format!("chatcmpl-{}", uuid::Uuid::new_v4().simple());
     let model = state.engine.model_info().id;
     let cancel = request.cancel.clone();
+    // OpenAI-совместимый контракт мышления (vLLM/DeepSeek): thinking идёт в
+    // delta.reasoning_content, ответ — в delta.content. Модель генерит
+    // мышление + </think> + ответ в одном потоке — делим здесь.
+    let thinking = request.params.thinking;
     let rx = match state.engine.generate(request).await {
         Ok(r) => r,
         Err(e) => return engine_error(e),
@@ -283,6 +299,11 @@ async fn stream_chat(
 
     let mut first = true;
     let mut acc = String::new();
+    // Состояние сплиттера: вся мысль копится в think_acc до закрывающего тега;
+    // после него всё идёт в content. Хвост в 8 байт держим под частичный тег.
+    let mut think_acc = String::new();
+    let mut reasoning_done = !thinking;
+    const THINK_CLOSE: &str = "</think>";
     sse_response(rx, cancel, move |ev, out| match ev {
         StreamEvent::Delta(d) => {
             if first {
@@ -294,9 +315,50 @@ async fn stream_chat(
                     None,
                 )));
             }
-            acc.push_str(&d);
-            if !has_tools {
-                out.push(Event::default().data(chunk(&id, &model, json!({"content": d}), None)));
+            // Сплит: мышление → reasoning_content, ответ → content/acc.
+            let mut content_part = d.as_str();
+            if !reasoning_done {
+                think_acc.push_str(&d);
+                if let Some(pos) = think_acc.find(THINK_CLOSE) {
+                    let reasoning = think_acc[..pos].trim().to_string();
+                    if !reasoning.is_empty() {
+                        out.push(Event::default().data(chunk(
+                            &id,
+                            &model,
+                            json!({"reasoning_content": reasoning}),
+                            None,
+                        )));
+                    }
+                    reasoning_done = true;
+                    content_part = think_acc[pos + THINK_CLOSE.len()..].trim_start();
+                    think_acc.clear();
+                } else {
+                    // Нет тега: эмитим всё, кроме хвоста под частичный `</think>`.
+                    let safe = think_acc.len().saturating_sub(THINK_CLOSE.len());
+                    let boundary = think_acc.floor_char_boundary(safe);
+                    if boundary > 0 {
+                        let reasoning = &think_acc[..boundary];
+                        out.push(Event::default().data(chunk(
+                            &id,
+                            &model,
+                            json!({"reasoning_content": reasoning}),
+                            None,
+                        )));
+                        think_acc.drain(..boundary);
+                    }
+                    content_part = "";
+                }
+            }
+            if !content_part.is_empty() {
+                acc.push_str(content_part);
+                if !has_tools {
+                    out.push(Event::default().data(chunk(
+                        &id,
+                        &model,
+                        json!({"content": content_part}),
+                        None,
+                    )));
+                }
             }
             true
         }
