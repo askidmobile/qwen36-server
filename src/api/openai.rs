@@ -92,8 +92,19 @@ fn parse_content(m: &OaiMessage) -> Result<Vec<ContentBlock>, Response> {
     }
 }
 
-fn to_gen_params(req: &ChatCompletionRequest) -> GenParams {
-    let mut p = GenParams::default();
+fn to_gen_params(req: &ChatCompletionRequest, d: &crate::config::SamplingDefaults) -> GenParams {
+    // База — дефолты из .env (QWEN36_*), не хардкод; поля запроса перекрывают.
+    let mut p = GenParams {
+        temperature: d.temperature,
+        top_p: d.top_p,
+        top_k: d.top_k,
+        min_p: d.min_p,
+        presence_penalty: d.presence_penalty,
+        repetition_penalty: d.repetition_penalty,
+        max_tokens: d.max_tokens,
+        thinking: d.thinking,
+        ..GenParams::default()
+    };
     if let Some(t) = req.temperature {
         p.temperature = t;
     }
@@ -125,13 +136,13 @@ fn to_gen_params(req: &ChatCompletionRequest) -> GenParams {
             _ => {}
         }
     }
-    // thinking: прямой флаг приоритетнее chat_template_kwargs; default true.
+    // thinking: прямой флаг приоритетнее chat_template_kwargs; default из .env.
     let ctk = req
         .chat_template_kwargs
         .as_ref()
         .and_then(|k| k.get("enable_thinking"))
         .and_then(|v| v.as_bool());
-    p.thinking = req.thinking.or(ctk).unwrap_or(true);
+    p.thinking = req.thinking.or(ctk).unwrap_or(d.thinking);
     p
 }
 
@@ -187,7 +198,7 @@ pub async fn chat_completions(
     {
         return bad_request("system messages cannot contain media");
     }
-    let params = to_gen_params(&req);
+    let params = to_gen_params(&req, &state.sampling.read().expect("sampling lock"));
     if params.max_tokens == 0 {
         return bad_request("max_tokens must be greater than 0");
     }
@@ -466,7 +477,7 @@ pub async fn list_models(State(state): State<AppState>) -> Response {
     })
     .await
     .unwrap_or((0, 0));
-    let d = crate::engine_types::GenParams::default();
+    let d = state.sampling.read().expect("sampling lock").clone();
     let profile = state.profile.as_ref();
     let capabilities = profile.map(|profile| profile.capabilities()).unwrap_or(
         crate::profile::EffectiveCapabilities {
@@ -550,7 +561,7 @@ mod tests {
             "seed": 42
         }))
         .unwrap();
-        let params = to_gen_params(&req);
+        let params = to_gen_params(&req, &state.sampling.read().expect("sampling lock"));
         assert_eq!(params.top_k, 7);
         assert_eq!(params.min_p, 0.1);
         assert_eq!(params.presence_penalty, 1.5);

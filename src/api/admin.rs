@@ -220,6 +220,68 @@ pub async fn available_models(State(state): State<AppState>) -> Json<Value> {
 /// Порядок: shutdown dispatch thread → take/drop engine → дождаться выхода
 /// потока → trim CUDA mempool. Dispatch обязан выйти (break 'outer, poll 50мс) —
 /// тогда adapter drop вызывает cudaFree и VRAM реально возвращается ОС.
+/// Сохранить дефолты сэмплинга: обновить runtime + записать в .env.
+/// WebUI «Сохранить по умолчанию». .env переписывается по ключам QWEN36_*
+/// сэмплинга — остальное (секреты, модель) не трогается.
+pub async fn sampling_defaults(
+    State(state): State<AppState>,
+    Json(req): Json<crate::config::SamplingDefaults>,
+) -> Response {
+    if !(req.temperature >= 0.0 && req.top_p > 0.0 && req.top_p <= 1.0
+        && req.min_p >= 0.0 && req.min_p <= 1.0 && req.presence_penalty >= 0.0
+        && req.repetition_penalty > 0.0 && req.max_tokens > 0)
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "invalid sampling values",
+        );
+    }
+    *state.sampling.write().expect("sampling lock") = req.clone();
+    if let Err(e) = persist_sampling(&state.env_file, &req) {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "api_error",
+            format!(".env write failed: {e}"),
+        );
+    }
+    Json(json!({"status": "saved"})).into_response()
+}
+
+fn persist_sampling(path: &std::path::Path, d: &crate::config::SamplingDefaults) -> anyhow::Result<()> {
+    let keys: Vec<(String, String)> = vec![
+        ("QWEN36_TEMPERATURE".into(), d.temperature.to_string()),
+        ("QWEN36_TOP_P".into(), d.top_p.to_string()),
+        ("QWEN36_TOP_K".into(), d.top_k.to_string()),
+        ("QWEN36_MIN_P".into(), d.min_p.to_string()),
+        ("QWEN36_PRESENCE_PENALTY".into(), d.presence_penalty.to_string()),
+        ("QWEN36_REPETITION_PENALTY".into(), d.repetition_penalty.to_string()),
+        ("QWEN36_MAX_TOKENS".into(), d.max_tokens.to_string()),
+        ("QWEN36_THINKING".into(), d.thinking.to_string()),
+    ];
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<String> = existing
+        .lines()
+        .map(|line| {
+            let name = line.split('=').next().unwrap_or("").trim();
+            if let Some((_, v)) = keys.iter().find(|(k, _)| k == name) {
+                seen.insert(name.to_string());
+                format!("{name}={v}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    for (k, v) in &keys {
+        if !seen.contains(k) {
+            out.push(format!("{k}={v}"));
+        }
+    }
+    std::fs::write(path, out.join("\n") + "\n")?;
+    Ok(())
+}
+
 pub async fn unload_model(State(state): State<AppState>) -> Response {
     if state.switcher.loading.swap(true, Ordering::Relaxed) {
         return api_error(

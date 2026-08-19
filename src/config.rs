@@ -23,6 +23,52 @@ impl std::fmt::Debug for ApiKey {
 }
 
 #[derive(Debug, Clone)]
+/// Дефолты сэмплинга — задаются в .env при запуске (QWEN36_*), меняются
+/// через WebUI с сохранением обратно в .env. Код-дефолты = fallback,
+/// если .env не задаёт значения.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SamplingDefaults {
+    pub temperature: f32,
+    pub top_p: f32,
+    pub top_k: usize,
+    pub min_p: f32,
+    pub presence_penalty: f32,
+    pub repetition_penalty: f32,
+    pub max_tokens: usize,
+    pub thinking: bool,
+}
+
+impl Default for SamplingDefaults {
+    fn default() -> Self {
+        Self {
+            temperature: 0.7,
+            top_p: 0.80,
+            top_k: 20,
+            min_p: 0.0,
+            presence_penalty: 1.5,
+            repetition_penalty: 1.0,
+            max_tokens: 32768,
+            thinking: false,
+        }
+    }
+}
+
+impl SamplingDefaults {
+    fn from_env() -> Result<Self> {
+        let d = Self::default();
+        Ok(Self {
+            temperature: parse_env("QWEN36_TEMPERATURE", d.temperature)?,
+            top_p: parse_env("QWEN36_TOP_P", d.top_p)?,
+            top_k: parse_env("QWEN36_TOP_K", d.top_k)?,
+            min_p: parse_env("QWEN36_MIN_P", d.min_p)?,
+            presence_penalty: parse_env("QWEN36_PRESENCE_PENALTY", d.presence_penalty)?,
+            repetition_penalty: parse_env("QWEN36_REPETITION_PENALTY", d.repetition_penalty)?,
+            max_tokens: parse_env("QWEN36_MAX_TOKENS", d.max_tokens)?,
+            thinking: parse_env("QWEN36_THINKING", d.thinking)?,
+        })
+    }
+}
+
 pub struct Config {
     /// Manifest/current pointer (`QWEN36_PROFILE`), если задан.
     pub profile: Option<PathBuf>,
@@ -48,6 +94,10 @@ pub struct Config {
     pub prefix_cache_mib: usize,
     /// Временный media root (`QWEN36_MEDIA_TEMP`). Limits фиксированы release contract.
     pub media_temp: PathBuf,
+    /// Дефолты сэмплинга из .env (QWEN36_TEMPERATURE/.../QWEN36_MAX_TOKENS/...).
+    pub sampling: SamplingDefaults,
+    /// Путь к .env (для записи «сохранить по умолчанию» из WebUI).
+    pub env_file: PathBuf,
 }
 
 impl Config {
@@ -56,10 +106,14 @@ impl Config {
     pub fn load() -> Result<Self> {
         let path = std::env::var("QWEN36_ENV_FILE").unwrap_or_else(|_| ".env".into());
         load_env_file(Path::new(&path))?;
-        Self::from_env()
+        Self::from_env_with_path(PathBuf::from(path))
     }
 
     pub fn from_env() -> Result<Self> {
+        Self::from_env_with_path(PathBuf::from(".env"))
+    }
+
+    fn from_env_with_path(env_file: PathBuf) -> Result<Self> {
         let api_keys =
             parse_api_keys(&std::env::var("QWEN36_API_KEYS").map_err(|_| {
                 anyhow!("QWEN36_API_KEYS обязателен: JSON-массив объектов key/name")
@@ -104,6 +158,8 @@ impl Config {
             media_temp: std::env::var("QWEN36_MEDIA_TEMP")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| std::env::temp_dir().join("qwen36-media")),
+            sampling: SamplingDefaults::from_env()?,
+            env_file,
         };
         cfg.apply_vram_plan()?;
         Ok(cfg)

@@ -216,6 +216,10 @@ html[data-theme="dark"] .codewrap .codebar { background: #0b0f1a; }
         <label>repetition_penalty <input type="number" id="p_repetition_penalty" step="0.05" min="0"></label>
         <label>max_tokens <input type="number" id="p_max_tokens" step="128" min="1"></label>
       </div>
+      <div style="padding: 0 24px 14px; display:flex; gap:10px; align-items:center">
+        <button id="savedefaults" title="Записать текущие параметры в .env как дефолтные">Сохранить по умолчанию</button>
+        <span style="font-size:11px;color:var(--faint)">применится после перезапуска и для всех клиентов</span>
+      </div>
       <div style="padding: 0 24px 14px">
         <label for="sysprompt" style="font-size:12px;color:var(--dim)">System prompt (для текущего чата)</label>
         <textarea id="sysprompt" placeholder="Например: Ты — краткий технический ассистент…" aria-label="System prompt"></textarea>
@@ -445,6 +449,12 @@ async function loadModels() {
       hideKeyForm();
       lastModelInfo = m;
       renderCurInfo();
+      // Дефолты сэмплинга с сервера (.env) — заполняем поля, если пользователь
+      // не менял режим вручную в этой сессии.
+      if (m.sampling_defaults && !sessionStorage.getItem("q36_params_dirty")) {
+        const d = m.sampling_defaults;
+        for (const k of PARAM_IDS) if (d[k] !== undefined) $("p_" + k).value = d[k];
+      }
       if (m.context_length) ctxLen = m.context_length;
       if (m.id) modelId = m.id;
       $("modelinfo").textContent =
@@ -909,6 +919,29 @@ async function send(regen) {
     saveChat(c);
     renderMessages();
   }
+}
+
+$("savedefaults").onclick = async () => {
+  if (!confirm("Сохранить текущие параметры сэмплинга как дефолтные в .env сервера?")) return;
+  try {
+    const r = await api("/v1/sampling_defaults", {
+      method: "POST",
+      body: JSON.stringify(Object.assign(readParams(), {
+        thinking: $("mode").value !== "instruct",
+      })),
+    });
+    if (r.ok) {
+      sessionStorage.removeItem("q36_params_dirty");
+      toast("Дефолты сохранены в .env");
+    } else {
+      toast("Сохранение: HTTP " + r.status, true);
+    }
+  } catch (e) {
+    if (!String(e.message).startsWith("401")) toast("Сохранение не удалось: " + e.message, true);
+  }
+};
+for (const k of PARAM_IDS) {
+  $("p_" + k).addEventListener("input", () => sessionStorage.setItem("q36_params_dirty", "1"));
 }
 
 $("send").onclick = () => send(false);

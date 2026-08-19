@@ -116,6 +116,8 @@ async fn main() -> Result<()> {
         profile,
         cuda_device,
         hf_downloads: Default::default(),
+        sampling: std::sync::Arc::new(std::sync::RwLock::new(cfg.sampling.clone())),
+        env_file: cfg.env_file.clone(),
     };
     let app =
         build_router(state).merge(Router::new().route("/", get(|| async { Html(CHAT_HTML) })));

@@ -19,40 +19,37 @@ use crate::sampler::{self, Rng, SamplingPreset};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenParams {
-    pub temperature: f32,        // default 1.0
-    pub top_p: f32,              // default 0.95
+    pub temperature: f32,        // default 0.7 (instruct)
+    pub top_p: f32,              // default 0.80 (instruct)
     pub top_k: usize,            // default 20
     pub min_p: f32,              // default 0.0
-    pub presence_penalty: f32,   // default 0.0
+    pub presence_penalty: f32,   // default 1.5 (instruct)
     pub repetition_penalty: f32, // default 1.0
-    pub max_tokens: usize,       // default 4096
+    pub max_tokens: usize,       // default 32768
     #[serde(default)]
     pub stop: Vec<String>,
     #[serde(default)]
     pub seed: Option<u64>,
-    /// thinking-режим: false → prompt получает пустой <think></think> суффикс
-    /// (encode_no_think). default true (BD-016, model card).
-    #[serde(default = "default_thinking")]
+    /// thinking-режим: false → prompt получает пустой <think></think> суффикс.
+    /// Default FALSE: запрос без явного enable_thinking = режим без рассуждений
+    /// (быстрые ответы, нет 4K-токенного мышления → pi-таймаутов).
+    #[serde(default)]
     pub thinking: bool,
-}
-
-fn default_thinking() -> bool {
-    true
 }
 
 impl Default for GenParams {
     fn default() -> Self {
         Self {
-            temperature: 1.0,
-            top_p: 0.95,
+            temperature: 0.7,
+            top_p: 0.80,
             top_k: 20,
             min_p: 0.0,
-            presence_penalty: 0.0,
+            presence_penalty: 1.5,
             repetition_penalty: 1.0,
-            max_tokens: 4096,
+            max_tokens: 32768,
             stop: vec![],
             seed: None,
-            thinking: true,
+            thinking: false,
         }
     }
 }

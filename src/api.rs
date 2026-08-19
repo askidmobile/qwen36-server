@@ -41,6 +41,10 @@ pub struct AppState {
     pub cuda_device: Arc<RwLock<Option<candle_core::Device>>>,
     /// Прогресс фоновых HF-загрузок (repo/file → state).
     pub hf_downloads: hf::Downloads,
+    /// Дефолты сэмплинга из .env; меняются через POST /v1/sampling_defaults.
+    pub sampling: Arc<RwLock<crate::config::SamplingDefaults>>,
+    /// Путь к .env для персистентности дефолтов.
+    pub env_file: std::path::PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -142,6 +146,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/ctx_matrix", axum::routing::get(admin::ctx_matrix))
         .route("/switch_model", axum::routing::post(admin::switch_model))
         .route("/unload_model", axum::routing::post(admin::unload_model))
+        .route(
+            "/sampling_defaults",
+            axum::routing::post(admin::sampling_defaults),
+        )
         .route("/hf/search", axum::routing::get(hf::hf_search))
         .route("/hf/files", axum::routing::get(hf::hf_files))
         .route("/hf/probe", axum::routing::get(hf::hf_probe))
