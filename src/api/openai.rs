@@ -316,11 +316,13 @@ async fn stream_chat(
                 )));
             }
             // Сплит: мышление → reasoning_content, ответ → content/acc.
-            let mut content_part = d.as_str();
+            let mut content_owned = String::new();
             if !reasoning_done {
                 think_acc.push_str(&d);
                 if let Some(pos) = think_acc.find(THINK_CLOSE) {
                     let reasoning = think_acc[..pos].trim().to_string();
+                    content_owned = think_acc[pos + THINK_CLOSE.len()..].trim_start().to_string();
+                    think_acc.clear();
                     if !reasoning.is_empty() {
                         out.push(Event::default().data(chunk(
                             &id,
@@ -330,25 +332,25 @@ async fn stream_chat(
                         )));
                     }
                     reasoning_done = true;
-                    content_part = think_acc[pos + THINK_CLOSE.len()..].trim_start();
-                    think_acc.clear();
                 } else {
                     // Нет тега: эмитим всё, кроме хвоста под частичный `</think>`.
                     let safe = think_acc.len().saturating_sub(THINK_CLOSE.len());
                     let boundary = think_acc.floor_char_boundary(safe);
                     if boundary > 0 {
-                        let reasoning = &think_acc[..boundary];
+                        let reasoning = think_acc[..boundary].to_string();
+                        think_acc.drain(..boundary);
                         out.push(Event::default().data(chunk(
                             &id,
                             &model,
                             json!({"reasoning_content": reasoning}),
                             None,
                         )));
-                        think_acc.drain(..boundary);
                     }
-                    content_part = "";
                 }
+            } else {
+                content_owned = d;
             }
+            let content_part = content_owned.as_str();
             if !content_part.is_empty() {
                 acc.push_str(content_part);
                 if !has_tools {
