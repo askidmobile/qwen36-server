@@ -200,20 +200,23 @@ pub async fn prepare_inference_request(
     messages: Vec<crate::engine_types::ChatMessage>,
     params: crate::engine_types::GenParams,
     owner: &ApiKeyIdentity,
+    tools: Option<serde_json::Value>,
 ) -> Result<crate::engine_types::InferenceRequest, Response> {
-    Ok(inference_request(messages, params, owner))
+    Ok(inference_request(messages, params, owner, tools))
 }
 
 pub fn inference_request(
     messages: Vec<crate::engine_types::ChatMessage>,
     params: crate::engine_types::GenParams,
     owner: &ApiKeyIdentity,
+    tools: Option<serde_json::Value>,
 ) -> crate::engine_types::InferenceRequest {
     crate::engine_types::InferenceRequest {
         messages,
         params,
         owner: owner.0,
         cancel: Default::default(),
+        tools,
     }
 }
 

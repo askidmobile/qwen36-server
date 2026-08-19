@@ -219,6 +219,8 @@ pub struct InferenceRequest {
     pub params: GenParams,
     pub owner: crate::media::OwnerDigest,
     pub cancel: CancelFlag,
+    /// OpenAI tools JSON (массив function-схем). None/пусто — обычный prompt.
+    pub tools: Option<serde_json::Value>,
 }
 
 #[derive(Debug)]
@@ -330,6 +332,7 @@ impl Engine for CandleEngine {
             messages,
             mut params,
             cancel,
+            tools,
             ..
         } = request;
         // Sliding window (BD-017): system сохраняется, режутся старые пары.
@@ -361,7 +364,7 @@ impl Engine for CandleEngine {
                 .iter()
                 .map(|(role, content)| ChatMsg { role, content })
                 .collect();
-            let text = tokenizer::build_chatml_text(&msgs);
+            let text = tokenizer::build_chatml_text_with_tools(&msgs, tools.as_ref());
             prompt_ids = if params.thinking {
                 // Каноничный Qwen-шаблон: "assistant\n<think>\n" — модель
                 // продолжает уже ОТКРЫТЫЙ think-блок (иначе она может не

@@ -269,6 +269,7 @@ impl Engine for BatchedEngine {
             mut params,
             owner,
             cancel,
+            tools,
         } = request;
         let has_media = messages.iter().any(ChatMessage::has_media);
         // Адаптер грузится в dispatch-потоке: до ready — отказ (не молчаливый
@@ -402,7 +403,7 @@ impl Engine for BatchedEngine {
                 .iter()
                 .map(|(role, content)| ChatMsg { role, content })
                 .collect();
-            let text = tokenizer::build_chatml_text(&msgs);
+            let text = tokenizer::build_chatml_text_with_tools(&msgs, tools.as_ref());
             let ids = if params.thinking {
                 let mut ids = tok
                     .encode(text, false)

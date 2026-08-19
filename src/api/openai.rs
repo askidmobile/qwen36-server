@@ -51,6 +51,9 @@ enum OaiContent {
 struct OaiMessage {
     role: String,
     content: Option<OaiContent>,
+    /// OpenAI-история: прошлые вызовы инструментов — рендерим в текст,
+    /// чтобы модель видела собственные <tool_call> в контексте.
+    tool_calls: Option<Value>,
 }
 
 fn parse_content(m: &OaiMessage) -> Result<Vec<ContentBlock>, Response> {
@@ -136,9 +139,30 @@ fn build_messages(req: &ChatCompletionRequest) -> Result<Vec<ChatMessage>, Respo
     req.messages
         .iter()
         .map(|m| {
+            let mut content = parse_content(m)?;
+            // История tool_calls ассистента — как <tool_call> текст (модель
+            // видит собственные вызовы в контексте, Qwen-конвенция).
+            if m.role == "assistant" {
+                if let Some(Value::Array(calls)) = &m.tool_calls {
+                    for c in calls {
+                        let f = c.get("function").cloned().unwrap_or(Value::Null);
+                        let name = f.get("name").cloned().unwrap_or(Value::Null);
+                        let args = f.get("arguments").cloned().unwrap_or(json!({}));
+                        let args_text = match &args {
+                            Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        };
+                        content.push(super::content::text(format!(
+                            "<tool_call>\n{{\"name\": {}, \"arguments\": {}}}\n</tool_call>",
+                            serde_json::to_string(&name).unwrap_or_default(),
+                            args_text,
+                        )));
+                    }
+                }
+            }
             Ok(ChatMessage {
                 role: m.role.clone(),
-                content: parse_content(m)?,
+                content,
             })
         })
         .collect()
@@ -202,7 +226,7 @@ pub async fn chat_completions(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let request = match prepare_inference_request(&state, messages, params, &owner).await {
+    let request = match prepare_inference_request(&state, messages, params, &owner, req.tools.clone()).await {
         Ok(request) => request,
         Err(response) => return response,
     };

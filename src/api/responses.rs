@@ -131,7 +131,7 @@ pub async fn responses(
     let id = format!("resp_{}", uuid::Uuid::new_v4().simple());
     let model = state.engine.model_info().id;
 
-    let request = match prepare_inference_request(&state, messages, params, &owner).await {
+    let request = match prepare_inference_request(&state, messages, params, &owner, None).await {
         Ok(request) => request,
         Err(response) => return response,
     };
