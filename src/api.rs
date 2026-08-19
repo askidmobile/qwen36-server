@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod anthropic;
 pub mod hf;
+pub mod tools;
 pub(crate) mod content;
 pub mod media;
 pub mod openai;
@@ -257,46 +258,9 @@ pub async fn generate_collect(
     Err(internal_error("stream ended without Done"))
 }
 
-/// Парсинг <tool_call>{...}</tool_call> из накопленного текста.
+/// Парсинг tool calls из накопленного текста. Форматы: JSON (Qwen3.5/3.6) и
+/// Hermes <function=...> (Qwen3.8), с лечением битого JSON (порт Yttri-опыта).
 /// Возвращает (текст без tool_call-блоков, список (name, arguments-json-string)).
 pub fn parse_tool_calls(text: &str) -> (String, Vec<(String, String)>) {
-    let mut calls = Vec::new();
-    let mut rest = String::new();
-    let mut s = text;
-    loop {
-        let Some(start) = s.find("<tool_call>") else {
-            rest.push_str(s);
-            break;
-        };
-        rest.push_str(&s[..start]);
-        let after = &s[start + "<tool_call>".len()..];
-        let Some(end) = after.find("</tool_call>") else {
-            // незакрытый тег — оставляем как текст
-            rest.push_str(&s[start..]);
-            break;
-        };
-        let body = after[..end].trim();
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
-            let name = v
-                .get("name")
-                .and_then(|n| n.as_str())
-                .unwrap_or("")
-                .to_string();
-            let args = v
-                .get("arguments")
-                .map(|a| {
-                    if a.is_string() {
-                        a.as_str().unwrap().to_string()
-                    } else {
-                        a.to_string()
-                    }
-                })
-                .unwrap_or_else(|| "{}".to_string());
-            if !name.is_empty() {
-                calls.push((name, args));
-            }
-        }
-        s = &after[end + "</tool_call>".len()..];
-    }
-    (rest.trim().to_string(), calls)
+    tools::parse_tool_calls(text)
 }

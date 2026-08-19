@@ -121,10 +121,12 @@ pub enum ContentBlock {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ChatMessage {
     pub role: String, // system|user|assistant|tool
     pub content: Vec<ContentBlock>,
+    /// OpenAI tool_calls из истории (структурно, для chat template).
+    pub tool_calls: Vec<serde_json::Value>,
 }
 
 impl ChatMessage {
@@ -132,6 +134,7 @@ impl ChatMessage {
         Self {
             role: role.into(),
             content: vec![ContentBlock::Text { text: text.into() }],
+            tool_calls: Vec::new(),
         }
     }
 
@@ -290,6 +293,7 @@ pub struct CandleEngine {
     eos: u32,
     ctx: usize,
     info: ModelInfo,
+    chat_tpl: Option<crate::chat_template::ChatTemplate>,
 }
 
 impl CandleEngine {
@@ -299,6 +303,7 @@ impl CandleEngine {
         #[cfg(feature = "cuda")]
         maybe_retain_mempool(&device);
         let tokenizer = tokenizer::load_from_gguf_path(&cfg.model)?;
+        let chat_tpl = crate::chat_template::ChatTemplate::from_gguf(&cfg.model);
         Ok(Self {
             state: Arc::new(Mutex::new(ModelState {
                 model,
@@ -314,6 +319,7 @@ impl CandleEngine {
                 slots: cfg.slots,
                 modes: vec!["thinking".into(), "instruct".into()],
             },
+            chat_tpl,
         })
     }
 }
@@ -364,26 +370,40 @@ impl Engine for CandleEngine {
                 .iter()
                 .map(|(role, content)| ChatMsg { role, content })
                 .collect();
-            let text = tokenizer::build_chatml_text_with_tools(&msgs, tools.as_ref());
-            prompt_ids = if params.thinking {
-                // Каноничный Qwen-шаблон: "assistant\n<think>\n" — модель
-                // продолжает уже ОТКРЫТЫЙ think-блок (иначе она может не
-                // эмитить opener и </think> окажется в середине ответа).
-                let mut ids = st
+            // Официальный Jinja-шаблон из GGUF (сам ставит think-блок и
+            // формат tool calls); fallback — встроенный ChatML-билдер.
+            let rendered = self
+                .chat_tpl
+                .as_ref()
+                .and_then(|tpl| tpl.render(&kept, tools.as_ref(), params.thinking).ok());
+            prompt_ids = match rendered {
+                Some(text) => st
                     .tokenizer
-                    .encode(text, false)
+                    .encode(text.as_str(), false)
                     .map(|e| e.get_ids().to_vec())
-                    .map_err(|e| anyhow::anyhow!("encode prompt: {e}"))?;
-                ids.push(qwen35_batch::real::tokenizer::THINK_OPEN_TOKEN_ID);
-                let nl = st
-                    .tokenizer
-                    .encode("\n", false)
-                    .map(|e| e.get_ids().to_vec())
-                    .map_err(|e| anyhow::anyhow!("encode nl: {e}"))?;
-                ids.extend_from_slice(&nl);
-                ids
-            } else {
-                tokenizer::encode_no_think(&st.tokenizer, &text)?
+                    .map_err(|e| anyhow::anyhow!("encode prompt: {e}"))?,
+                None => {
+                    let text = tokenizer::build_chatml_text_with_tools(&msgs, tools.as_ref());
+                    if params.thinking {
+                        // Каноничный Qwen-шаблон: "assistant\n<think>\n" — модель
+                        // продолжает уже ОТКРЫТЫЙ think-блок.
+                        let mut ids = st
+                            .tokenizer
+                            .encode(text, false)
+                            .map(|e| e.get_ids().to_vec())
+                            .map_err(|e| anyhow::anyhow!("encode prompt: {e}"))?;
+                        ids.push(qwen35_batch::real::tokenizer::THINK_OPEN_TOKEN_ID);
+                        let nl = st
+                            .tokenizer
+                            .encode("\n", false)
+                            .map(|e| e.get_ids().to_vec())
+                            .map_err(|e| anyhow::anyhow!("encode nl: {e}"))?;
+                        ids.extend_from_slice(&nl);
+                        ids
+                    } else {
+                        tokenizer::encode_no_think(&st.tokenizer, &text)?
+                    }
+                }
             };
         }
         let prompt_tokens = prompt_ids.len();

@@ -26,6 +26,7 @@ memmap2 = "0.9.3"
 sha2 = "0.10"
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+minijinja = { version = "2", features = ["json", "adjacent_loop_items", "builtins"] }
 url = "2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "bmp", "tiff", "gif"] }
 moxcms = "0.8"

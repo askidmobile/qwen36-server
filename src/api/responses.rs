@@ -65,7 +65,7 @@ fn input_to_messages(input: &Value) -> Result<Vec<ChatMessage>, Response> {
                         .collect::<Result<Vec<ContentBlock>, Response>>()?,
                     _ => vec![],
                 };
-                Ok(ChatMessage { role, content })
+                Ok(ChatMessage { role, content, tool_calls: Vec::new() })
             })
             .collect(),
         _ => Err(bad_request(

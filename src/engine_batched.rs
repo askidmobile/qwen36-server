@@ -138,6 +138,8 @@ pub struct BatchedEngine {
     ready: Arc<AtomicBool>,
     /// Ошибка загрузки адаптера в dispatch-потоке (видна в available_models).
     load_error: Arc<RwLock<String>>,
+    /// Официальный chat template из GGUF (minijinja). None → встроенный ChatML.
+    chat_tpl: Option<crate::chat_template::ChatTemplate>,
 }
 
 impl Drop for BatchedEngine {
@@ -198,6 +200,9 @@ impl BatchedEngine {
             dispatch_handle: Mutex::new(None),
             ready: Arc::new(AtomicBool::new(false)),
             load_error: Arc::new(RwLock::new(String::new())),
+            chat_tpl: crate::chat_template::ChatTemplate::from_gguf(std::path::Path::new(
+                &cfg.model_path,
+            )),
         });
 
         let tokenizer = engine.tokenizer.clone();
@@ -403,21 +408,34 @@ impl Engine for BatchedEngine {
                 .iter()
                 .map(|(role, content)| ChatMsg { role, content })
                 .collect();
-            let text = tokenizer::build_chatml_text_with_tools(&msgs, tools.as_ref());
-            let ids = if params.thinking {
-                let mut ids = tok
-                    .encode(text, false)
+            // Официальный Jinja-шаблон из GGUF (think-блок и tool calls в
+            // формате обучения модели); fallback — встроенный ChatML-билдер.
+            let rendered = self.chat_tpl.as_ref().and_then(|tpl| {
+                tpl.render(&kept, tools.as_ref(), params.thinking).ok()
+            });
+            let ids = match rendered {
+                Some(text) => tok
+                    .encode(text.as_str(), false)
                     .map(|e| e.get_ids().to_vec())
-                    .map_err(|e| anyhow!("encode prompt: {e}"))?;
-                ids.push(qwen35_batch::real::tokenizer::THINK_OPEN_TOKEN_ID);
-                let nl = tok
-                    .encode("\n", false)
-                    .map(|e| e.get_ids().to_vec())
-                    .map_err(|e| anyhow!("encode nl: {e}"))?;
-                ids.extend_from_slice(&nl);
-                ids
-            } else {
-                tokenizer::encode_no_think(&tok, &text)?
+                    .map_err(|e| anyhow!("encode prompt: {e}"))?,
+                None => {
+                    let text = tokenizer::build_chatml_text_with_tools(&msgs, tools.as_ref());
+                    if params.thinking {
+                        let mut ids = tok
+                            .encode(text, false)
+                            .map(|e| e.get_ids().to_vec())
+                            .map_err(|e| anyhow!("encode prompt: {e}"))?;
+                        ids.push(qwen35_batch::real::tokenizer::THINK_OPEN_TOKEN_ID);
+                        let nl = tok
+                            .encode("\n", false)
+                            .map(|e| e.get_ids().to_vec())
+                            .map_err(|e| anyhow!("encode nl: {e}"))?;
+                        ids.extend_from_slice(&nl);
+                        ids
+                    } else {
+                        tokenizer::encode_no_think(&tok, &text)?
+                    }
+                }
             };
             let n = ids.len();
             params.clamp_to_context(n, self.info.context_length)?;

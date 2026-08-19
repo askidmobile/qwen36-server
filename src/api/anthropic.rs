@@ -168,6 +168,7 @@ pub async fn messages(
         msgs.push(ChatMessage {
             role: m.role.clone(),
             content,
+            tool_calls: Vec::new(),
         });
     }
 

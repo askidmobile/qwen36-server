@@ -139,30 +139,17 @@ fn build_messages(req: &ChatCompletionRequest) -> Result<Vec<ChatMessage>, Respo
     req.messages
         .iter()
         .map(|m| {
-            let mut content = parse_content(m)?;
-            // История tool_calls ассистента — как <tool_call> текст (модель
-            // видит собственные вызовы в контексте, Qwen-конвенция).
-            if m.role == "assistant" {
-                if let Some(Value::Array(calls)) = &m.tool_calls {
-                    for c in calls {
-                        let f = c.get("function").cloned().unwrap_or(Value::Null);
-                        let name = f.get("name").cloned().unwrap_or(Value::Null);
-                        let args = f.get("arguments").cloned().unwrap_or(json!({}));
-                        let args_text = match &args {
-                            Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        };
-                        content.push(super::content::text(format!(
-                            "<tool_call>\n{{\"name\": {}, \"arguments\": {}}}\n</tool_call>",
-                            serde_json::to_string(&name).unwrap_or_default(),
-                            args_text,
-                        )));
-                    }
-                }
-            }
+            let content = parse_content(m)?;
+            // tool_calls из истории — структурно; chat template сам рендерит
+            // их в формате модели (Hermes для Qwen3.8, JSON для 3.5/3.6).
+            let tool_calls = match &m.tool_calls {
+                Some(Value::Array(calls)) => calls.clone(),
+                _ => Vec::new(),
+            };
             Ok(ChatMessage {
                 role: m.role.clone(),
                 content,
+                tool_calls,
             })
         })
         .collect()

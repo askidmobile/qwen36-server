@@ -2,6 +2,7 @@
 //! Батчинг 4 слотов: docs/batch-integration.md.
 
 pub mod component_manager;
+pub mod chat_template;
 pub mod config;
 pub mod engine;
 pub mod engine_swap;
