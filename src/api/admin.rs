@@ -537,6 +537,8 @@ async fn do_switch(
             kv_per_tok_mib,
             prefix_cache_mib: 0,
             media_temp: std::env::temp_dir().join("qwen36-media"),
+            sampling: crate::config::SamplingDefaults::default(),
+            env_file: std::path::PathBuf::from(".env"),
         };
         Arc::new(crate::engine::CandleEngine::load(&cfg)?)
     };

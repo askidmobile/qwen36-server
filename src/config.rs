@@ -22,7 +22,6 @@ impl std::fmt::Debug for ApiKey {
     }
 }
 
-#[derive(Debug, Clone)]
 /// Дефолты сэмплинга — задаются в .env при запуске (QWEN36_*), меняются
 /// через WebUI с сохранением обратно в .env. Код-дефолты = fallback,
 /// если .env не задаёт значения.
