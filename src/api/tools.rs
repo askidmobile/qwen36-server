@@ -16,35 +16,57 @@ pub fn parse_tool_calls(text: &str) -> (String, Vec<(String, String)>) {
     let mut rest = String::new();
     let mut s = text;
     loop {
-        let Some(start) = s.find("<tool_call>") else {
+        // Толерантный поиск: модель на IQ2 искажает тег — `<tool_1>`,
+        // `<toolcall>`, `<|tool_call>` — вместо каноничного `<tool_call>`.
+        let Some((start, open_end)) = find_tool_tag(s, "<tool") else {
             rest.push_str(s);
             break;
         };
         rest.push_str(&s[..start]);
-        let after = &s[start + "<tool_call>".len()..];
-        match after.find("</tool_call>") {
-            Some(end) => {
+        let after = &s[open_end..];
+        match find_tool_tag(after, "</tool") {
+            Some((end, close_end)) => {
                 let body = after[..end].trim();
                 if let Some(call) = parse_block_body(body) {
                     calls.push(call);
                 } else {
-                    // Нераспарсенный блок — вернуть как текст (не прячем мусор).
-                    rest.push_str(&s[start..start + "<tool_call>".len() + end + "</tool_call>".len()]);
+                    // Нераспарсенный блок — НЕ возвращаем разметку пользователю
+                    // (Yttri: strip_tool_call_tags), выкидываем теги, текст тела оставляем.
+                    if !body.is_empty() && !body.starts_with("<function=") && !body.starts_with('{') {
+                        rest.push_str(body);
+                    }
                 }
-                s = &after[end + "</tool_call>".len()..];
+                s = &after[close_end..];
             }
             None => {
                 // Незакрытый тег: пробуем распарсить хвост (обрыв генерации).
                 if let Some(call) = parse_block_body(after.trim()) {
                     calls.push(call);
-                } else {
-                    rest.push_str(&s[start..]);
                 }
                 break;
             }
         }
     }
     (rest.trim().to_string(), calls)
+}
+
+/// Найти тег по префиксу (`<tool` или `</tool`), вернуть (начало, конец_после_>`).
+/// Терпит любое продолжение до `>`: `<tool_call>`, `<tool_1>`, `<|tool_call|>`, …
+fn find_tool_tag(s: &str, prefix: &str) -> Option<(usize, usize)> {
+    let mut from = 0;
+    loop {
+        let i = s[from..].find(prefix)? + from;
+        // Следующий символ после префикса: не буква/цифра слова-тега — иначе это
+        // `<tool_response>`/`<tools>` (не наш случай) — но `<tool_call>` разрешён.
+        let tail = &s[i + prefix.len()..];
+        let rel_close = tail.find('>')?;
+        let name = &tail[..rel_close];
+        let name_clean = name.trim_matches(|c: char| c == '|' || c == '_' || c == ' ');
+        if matches!(name_clean, "call" | "calls" | "" | "1" | "2" | "3" | "4" | "5") {
+            return Some((i, i + prefix.len() + rel_close + 1));
+        }
+        from = i + prefix.len() + rel_close + 1;
+    }
 }
 
 fn parse_block_body(body: &str) -> Option<(String, String)> {
@@ -449,5 +471,24 @@ mod tests {
             "text <tool_call>{\"name\": \"f\", \"arguments\": {\"x\": 1}}",
         );
         assert_eq!(calls.len(), 1);
+    }
+
+    #[test]
+    fn tolerant_broken_open_tag() {
+        // IQ2-модель написала <tool_1> вместо <tool_call> (live-наблюдение 27B IQ2_XXS).
+        let (text, calls) = parse_tool_calls(
+            "<tool_1>\n<function=bash>\n<parameter=command>\nls -la\n</parameter>\n</function>\n</tool_call>",
+        );
+        assert!(text.is_empty());
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "bash");
+    }
+
+    #[test]
+    fn tool_response_not_eaten() {
+        // <tool_response> — не наш тег, должен остаться текстом.
+        let (text, calls) = parse_tool_calls("<tool_response>data</tool_response>");
+        assert!(calls.is_empty());
+        assert!(text.contains("tool_response"));
     }
 }
