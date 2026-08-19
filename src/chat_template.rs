@@ -39,7 +39,10 @@ impl ChatTemplate {
         });
         env.add_test("startswith", |v: String, prefix: String| v.starts_with(&prefix));
         env.add_test("endswith", |v: String, suffix: String| v.ends_with(&suffix));
-        env.add_template("chat", &preprocess(&tpl)).ok()?;
+        // ponytail: leak источника шаблона — Environment<'static> требует 'static
+        // источник. Шаблонов несколько штук за жизнь процесса, утечка ~10KB каждый.
+        let src: &'static str = Box::leak(preprocess(&tpl).into_boxed_str());
+        env.add_template("chat", src).ok()?;
         Some(Self { env })
     }
 
