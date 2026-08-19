@@ -282,6 +282,66 @@ fn persist_sampling(path: &std::path::Path, d: &crate::config::SamplingDefaults)
     Ok(())
 }
 
+/// Сохранить пресет режима (instruct/thinking/thinking-coding) в .env
+/// (QWEN36_PRESETS JSON) + runtime. WebUI «Сохранить как пресет».
+pub async fn sampling_preset(
+    State(state): State<AppState>,
+    Json(req): Json<PresetRequest>,
+) -> Response {
+    if req.name.trim().is_empty() || req.name.len() > 32
+        || !(req.values.temperature >= 0.0 && req.values.top_p > 0.0 && req.values.top_p <= 1.0)
+    {
+        return api_error(StatusCode::BAD_REQUEST, "invalid_request_error", "invalid preset");
+    }
+    {
+        let mut presets = state.presets.write().expect("presets lock");
+        presets.insert(req.name.clone(), req.values.clone());
+    }
+    let all = state.presets.read().expect("presets lock").clone();
+    if let Err(e) = persist_presets(&state.env_file, &all) {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "api_error",
+            format!(".env write failed: {e}"),
+        );
+    }
+    Json(json!({"status": "saved", "preset": req.name})).into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub struct PresetRequest {
+    name: String,
+    values: crate::config::SamplingPresetValues,
+}
+
+fn persist_presets(
+    path: &std::path::Path,
+    presets: &crate::config::SamplingPresets,
+) -> anyhow::Result<()> {
+    let json_line = format!(
+        "QWEN36_PRESETS={}",
+        serde_json::to_string(presets)?
+    );
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let mut replaced = false;
+    let mut out: Vec<String> = existing
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with("QWEN36_PRESETS=") {
+                replaced = true;
+                json_line.clone()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    if !replaced {
+        out.push(json_line);
+    }
+    std::fs::write(path, out.join("\n") + "\n")?;
+    Ok(())
+}
+
 pub async fn unload_model(State(state): State<AppState>) -> Response {
     if state.switcher.loading.swap(true, Ordering::Relaxed) {
         return api_error(
@@ -538,6 +598,7 @@ async fn do_switch(
             prefix_cache_mib: 0,
             media_temp: std::env::temp_dir().join("qwen36-media"),
             sampling: crate::config::SamplingDefaults::default(),
+            presets: crate::config::default_presets(),
             env_file: std::path::PathBuf::from(".env"),
         };
         Arc::new(crate::engine::CandleEngine::load(&cfg)?)

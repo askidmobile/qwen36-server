@@ -117,6 +117,7 @@ async fn main() -> Result<()> {
         cuda_device,
         hf_downloads: Default::default(),
         sampling: std::sync::Arc::new(std::sync::RwLock::new(cfg.sampling.clone())),
+        presets: std::sync::Arc::new(std::sync::RwLock::new(cfg.presets.clone())),
         env_file: cfg.env_file.clone(),
     };
     let app =

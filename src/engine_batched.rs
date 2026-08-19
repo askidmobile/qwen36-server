@@ -275,6 +275,7 @@ impl Engine for BatchedEngine {
             owner,
             cancel,
             tools,
+            reasoning_effort,
         } = request;
         let has_media = messages.iter().any(ChatMessage::has_media);
         // Адаптер грузится в dispatch-потоке: до ready — отказ (не молчаливый
@@ -411,7 +412,7 @@ impl Engine for BatchedEngine {
             // Официальный Jinja-шаблон из GGUF (think-блок и tool calls в
             // формате обучения модели); fallback — встроенный ChatML-билдер.
             let rendered = self.chat_tpl.as_ref().and_then(|tpl| {
-                tpl.render(&kept, tools.as_ref(), params.thinking).ok()
+                tpl.render(&kept, tools.as_ref(), params.thinking, reasoning_effort.as_deref()).ok()
             });
             let ids = match rendered {
                 Some(text) => tok

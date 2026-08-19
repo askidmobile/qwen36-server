@@ -48,12 +48,16 @@ impl ChatTemplate {
 
     /// Отрендерить промпт. messages — JSON-массив {role, content, tool_calls?};
     /// template сам ставит thinking-блок по enable_thinking и формат tool calls.
+    /// reasoning_effort: None | "low" | "medium" | "xhigh" — шаблонные уровни.
     pub fn render(
         &self,
         messages: &[crate::engine_types::ChatMessage],
         tools: Option<&Value>,
         enable_thinking: bool,
+        reasoning_effort: Option<&str>,
     ) -> Result<String> {
+        // Шаблон знает только low/medium/xhigh; high = xhigh (дефолт шаблона).
+        let reasoning_effort = reasoning_effort.map(|e| if e == "high" { "xhigh" } else { e });
         let msgs: Vec<Value> = messages
             .iter()
             .map(|m| {
@@ -73,6 +77,9 @@ impl ChatTemplate {
             "enable_thinking": enable_thinking,
             "add_vision_id": false,
         });
+        if let Some(effort) = reasoning_effort {
+            ctx["reasoning_effort"] = json!(effort);
+        }
         if let Some(t) = tools {
             if t.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
                 ctx["tools"] = t.clone();

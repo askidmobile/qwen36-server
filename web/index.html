@@ -216,9 +216,9 @@ html[data-theme="dark"] .codewrap .codebar { background: #0b0f1a; }
         <label>repetition_penalty <input type="number" id="p_repetition_penalty" step="0.05" min="0"></label>
         <label>max_tokens <input type="number" id="p_max_tokens" step="128" min="1"></label>
       </div>
-      <div style="padding: 0 24px 14px; display:flex; gap:10px; align-items:center">
+      <div style="padding: 0 24px 14px; display:flex; gap:10px; align-items:center; flex-wrap:wrap">
         <button id="savedefaults" title="Записать текущие параметры в .env как дефолтные">Сохранить по умолчанию</button>
-        <span style="font-size:11px;color:var(--faint)">применится после перезапуска и для всех клиентов</span>
+        <button id="savepreset" title="Записать текущие параметры как пресет выбранного режима">Сохранить как пресет режима</button>
       </div>
       <div style="padding: 0 24px 14px">
         <label for="sysprompt" style="font-size:12px;color:var(--dim)">System prompt (для текущего чата)</label>
@@ -284,6 +284,8 @@ const PRESETS = {
   "thinking-coding": { temperature: 0.6, top_p: 0.95, top_k: 20, min_p: 0, presence_penalty: 0,   repetition_penalty: 1.0, max_tokens: 4096 },
   "instruct":        { temperature: 0.7, top_p: 0.80, top_k: 20, min_p: 0, presence_penalty: 1.5, repetition_penalty: 1.0, max_tokens: 4096 },
 };
+// Серверные пресеты (.env) перекрывают встроенные при загрузке модели.
+const SERVER_PRESETS = {};
 const PARAM_IDS = ["temperature","top_p","top_k","min_p","presence_penalty","repetition_penalty","max_tokens"];
 
 const store = {
@@ -455,6 +457,7 @@ async function loadModels() {
         const d = m.sampling_defaults;
         for (const k of PARAM_IDS) if (d[k] !== undefined) $("p_" + k).value = d[k];
       }
+      if (m.sampling_presets) Object.assign(SERVER_PRESETS, m.sampling_presets);
       if (m.context_length) ctxLen = m.context_length;
       if (m.id) modelId = m.id;
       $("modelinfo").textContent =
@@ -705,9 +708,9 @@ function updateCtxBar() {
 }
 
 function applyPreset(name) {
-  const p = PRESETS[name];
+  const p = SERVER_PRESETS[name] || PRESETS[name];
   if (!p) return;
-  for (const k of PARAM_IDS) $("p_" + k).value = p[k];
+  for (const k of PARAM_IDS) if (p[k] !== undefined) $("p_" + k).value = p[k];
 }
 function readParams() {
   const o = {};
@@ -940,6 +943,27 @@ $("savedefaults").onclick = async () => {
     if (!String(e.message).startsWith("401")) toast("Сохранение не удалось: " + e.message, true);
   }
 };
+$("savepreset").onclick = async () => {
+  const mode = $("mode").value;
+  if (!confirm(`Сохранить текущие параметры как пресет «${mode}» в .env сервера?`)) return;
+  const v = readParams();
+  delete v.max_tokens;
+  try {
+    const r = await api("/v1/sampling_preset", {
+      method: "POST",
+      body: JSON.stringify({ name: mode, values: v }),
+    });
+    if (r.ok) {
+      SERVER_PRESETS[mode] = v;
+      toast(`Пресет «${mode}» сохранён в .env`);
+    } else {
+      toast("Сохранение: HTTP " + r.status, true);
+    }
+  } catch (e) {
+    if (!String(e.message).startsWith("401")) toast("Сохранение не удалось: " + e.message, true);
+  }
+};
+
 for (const k of PARAM_IDS) {
   $("p_" + k).addEventListener("input", () => sessionStorage.setItem("q36_params_dirty", "1"));
 }

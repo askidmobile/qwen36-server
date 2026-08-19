@@ -68,6 +68,69 @@ impl SamplingDefaults {
     }
 }
 
+/// Пресет режима (instruct/thinking/thinking-coding). У разных моделей
+/// оптимум разный — переопределяются через QWEN36_PRESETS (JSON) и WebUI.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SamplingPresetValues {
+    pub temperature: f32,
+    pub top_p: f32,
+    pub top_k: usize,
+    pub min_p: f32,
+    pub presence_penalty: f32,
+    pub repetition_penalty: f32,
+}
+
+impl Default for SamplingPresetValues {
+    fn default() -> Self {
+        Self {
+            temperature: 0.7,
+            top_p: 0.80,
+            top_k: 20,
+            min_p: 0.0,
+            presence_penalty: 1.5,
+            repetition_penalty: 1.0,
+        }
+    }
+}
+
+pub type SamplingPresets = std::collections::HashMap<String, SamplingPresetValues>;
+
+pub fn default_presets() -> SamplingPresets {
+    let mut m = SamplingPresets::new();
+    m.insert("instruct".into(), SamplingPresetValues::default());
+    m.insert(
+        "thinking".into(),
+        SamplingPresetValues {
+            temperature: 1.0,
+            top_p: 0.95,
+            presence_penalty: 0.0,
+            ..Default::default()
+        },
+    );
+    m.insert(
+        "thinking-coding".into(),
+        SamplingPresetValues {
+            temperature: 0.6,
+            top_p: 0.95,
+            presence_penalty: 0.0,
+            ..Default::default()
+        },
+    );
+    m
+}
+
+/// QWEN36_PRESETS: JSON-объект {name: {temperature,...}} — частичный merge
+/// поверх встроенных пресетов.
+fn presets_from_env() -> Result<SamplingPresets> {
+    let mut presets = default_presets();
+    if let Ok(raw) = std::env::var("QWEN36_PRESETS") {
+        let overrides: SamplingPresets = serde_json::from_str(&raw)
+            .map_err(|e| anyhow!("QWEN36_PRESETS: невалидный JSON: {e}"))?;
+        presets.extend(overrides);
+    }
+    Ok(presets)
+}
+
 pub struct Config {
     /// Manifest/current pointer (`QWEN36_PROFILE`), если задан.
     pub profile: Option<PathBuf>,
@@ -95,6 +158,8 @@ pub struct Config {
     pub media_temp: PathBuf,
     /// Дефолты сэмплинга из .env (QWEN36_TEMPERATURE/.../QWEN36_MAX_TOKENS/...).
     pub sampling: SamplingDefaults,
+    /// Пресеты режимов (QWEN36_PRESETS JSON, merge поверх встроенных).
+    pub presets: SamplingPresets,
     /// Путь к .env (для записи «сохранить по умолчанию» из WebUI).
     pub env_file: PathBuf,
 }
@@ -158,6 +223,7 @@ impl Config {
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| std::env::temp_dir().join("qwen36-media")),
             sampling: SamplingDefaults::from_env()?,
+            presets: presets_from_env()?,
             env_file,
         };
         cfg.apply_vram_plan()?;

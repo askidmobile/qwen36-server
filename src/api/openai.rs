@@ -38,6 +38,9 @@ pub struct ChatCompletionRequest {
     chat_template_kwargs: Option<Value>,
     /// Прямой флаг thinking (альтернатива chat_template_kwargs).
     thinking: Option<bool>,
+    /// Уровень рассуждений: none (без), low (с рассуждениями), high (кодинг).
+    /// Мапится на thinking-флаг + пресет сэмплинга + шаблонный reasoning_effort.
+    reasoning_effort: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -92,7 +95,11 @@ fn parse_content(m: &OaiMessage) -> Result<Vec<ContentBlock>, Response> {
     }
 }
 
-fn to_gen_params(req: &ChatCompletionRequest, d: &crate::config::SamplingDefaults) -> GenParams {
+fn to_gen_params(
+    req: &ChatCompletionRequest,
+    d: &crate::config::SamplingDefaults,
+    presets: &crate::config::SamplingPresets,
+) -> GenParams {
     // База — дефолты из .env (QWEN36_*), не хардкод; поля запроса перекрывают.
     let mut p = GenParams {
         temperature: d.temperature,
@@ -137,12 +144,36 @@ fn to_gen_params(req: &ChatCompletionRequest, d: &crate::config::SamplingDefault
         }
     }
     // thinking: прямой флаг приоритетнее chat_template_kwargs; default из .env.
+    // reasoning_effort: none → выкл; low/medium/high/xhigh → вкл (+пресет ниже).
     let ctk = req
         .chat_template_kwargs
         .as_ref()
         .and_then(|k| k.get("enable_thinking"))
         .and_then(|v| v.as_bool());
-    p.thinking = req.thinking.or(ctk).unwrap_or(d.thinking);
+    let effort = req.reasoning_effort.as_deref().unwrap_or("");
+    let effort_thinking = match effort {
+        "none" => Some(false),
+        "low" | "medium" | "high" | "xhigh" => Some(true),
+        _ => None,
+    };
+    p.thinking = req.thinking.or(ctk).or(effort_thinking).unwrap_or(d.thinking);
+    // Пресет по уровню рассуждений — значения из .env/WebUI пресетов;
+    // explicit-поля запроса приоритетнее.
+    if matches!(effort, "low" | "medium" | "high" | "xhigh") {
+        let preset_name = if matches!(effort, "high" | "xhigh") {
+            "thinking-coding"
+        } else {
+            "thinking"
+        };
+        if let Some(pv) = presets.get(preset_name) {
+            if req.temperature.is_none() { p.temperature = pv.temperature; }
+            if req.top_p.is_none() { p.top_p = pv.top_p; }
+            if req.top_k.is_none() { p.top_k = pv.top_k; }
+            if req.min_p.is_none() { p.min_p = pv.min_p; }
+            if req.presence_penalty.is_none() { p.presence_penalty = pv.presence_penalty; }
+            if req.repetition_penalty.is_none() { p.repetition_penalty = pv.repetition_penalty; }
+        }
+    }
     p
 }
 
@@ -198,7 +229,7 @@ pub async fn chat_completions(
     {
         return bad_request("system messages cannot contain media");
     }
-    let params = to_gen_params(&req, &state.sampling.read().expect("sampling lock"));
+    let params = to_gen_params(&req, &state.sampling.read().expect("sampling lock"), &state.presets.read().expect("presets lock"));
     if params.max_tokens == 0 {
         return bad_request("max_tokens must be greater than 0");
     }
@@ -224,7 +255,16 @@ pub async fn chat_completions(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let request = match prepare_inference_request(&state, messages, params, &owner, req.tools.clone()).await {
+    let request = match prepare_inference_request(
+        &state,
+        messages,
+        params,
+        &owner,
+        req.tools.clone(),
+        req.reasoning_effort.clone(),
+    )
+    .await
+    {
         Ok(request) => request,
         Err(response) => return response,
     };
@@ -536,11 +576,7 @@ pub async fn list_models(State(state): State<AppState>) -> Response {
                 "max_tokens": d.max_tokens,
             },
             // пресеты из model card (BD-016)
-            "sampling_presets": {
-                "thinking":         {"temperature": 1.0, "top_p": 0.95, "top_k": 20},
-                "thinking-coding":  {"temperature": 0.6, "top_p": 0.95, "top_k": 20},
-                "instruct":         {"temperature": 0.7, "top_p": 0.80, "top_k": 20, "presence_penalty": 1.5},
-            },
+            "sampling_presets": state.presets.read().expect("presets lock").clone(),
         }],
     }))
     .into_response()
@@ -561,7 +597,7 @@ mod tests {
             "seed": 42
         }))
         .unwrap();
-        let params = to_gen_params(&req, &state.sampling.read().expect("sampling lock"));
+        let params = to_gen_params(&req, &state.sampling.read().expect("sampling lock"), &state.presets.read().expect("presets lock"));
         assert_eq!(params.top_k, 7);
         assert_eq!(params.min_p, 0.1);
         assert_eq!(params.presence_penalty, 1.5);

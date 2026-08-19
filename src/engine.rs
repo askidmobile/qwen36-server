@@ -221,6 +221,8 @@ pub struct InferenceRequest {
     pub cancel: CancelFlag,
     /// OpenAI tools JSON (массив function-схем). None/пусто — обычный prompt.
     pub tools: Option<serde_json::Value>,
+    /// reasoning_effort из запроса (none/low/high → шаблонные уровни).
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug)]
@@ -336,7 +338,7 @@ impl Engine for CandleEngine {
             mut params,
             cancel,
             tools,
-            ..
+            reasoning_effort,
         } = request;
         // Sliding window (BD-017): system сохраняется, режутся старые пары.
         // Оценка: токены каждого сообщения отдельно (BPE-границы дают погрешность
@@ -372,7 +374,7 @@ impl Engine for CandleEngine {
             let rendered = self
                 .chat_tpl
                 .as_ref()
-                .and_then(|tpl| tpl.render(&kept, tools.as_ref(), params.thinking).ok());
+                .and_then(|tpl| tpl.render(&kept, tools.as_ref(), params.thinking, reasoning_effort.as_deref()).ok());
             prompt_ids = match rendered {
                 Some(text) => st
                     .tokenizer

@@ -43,6 +43,8 @@ pub struct AppState {
     pub hf_downloads: hf::Downloads,
     /// Дефолты сэмплинга из .env; меняются через POST /v1/sampling_defaults.
     pub sampling: Arc<RwLock<crate::config::SamplingDefaults>>,
+    /// Пресеты режимов (instruct/thinking/thinking-coding), QWEN36_PRESETS.
+    pub presets: Arc<RwLock<crate::config::SamplingPresets>>,
     /// Путь к .env для персистентности дефолтов.
     pub env_file: std::path::PathBuf,
 }
@@ -150,6 +152,10 @@ pub fn build_router(state: AppState) -> Router {
             "/sampling_defaults",
             axum::routing::post(admin::sampling_defaults),
         )
+        .route(
+            "/sampling_preset",
+            axum::routing::post(admin::sampling_preset),
+        )
         .route("/hf/search", axum::routing::get(hf::hf_search))
         .route("/hf/files", axum::routing::get(hf::hf_files))
         .route("/hf/probe", axum::routing::get(hf::hf_probe))
@@ -210,8 +216,9 @@ pub async fn prepare_inference_request(
     params: crate::engine_types::GenParams,
     owner: &ApiKeyIdentity,
     tools: Option<serde_json::Value>,
+    reasoning_effort: Option<String>,
 ) -> Result<crate::engine_types::InferenceRequest, Response> {
-    Ok(inference_request(messages, params, owner, tools))
+    Ok(inference_request(messages, params, owner, tools, reasoning_effort))
 }
 
 pub fn inference_request(
@@ -219,6 +226,7 @@ pub fn inference_request(
     params: crate::engine_types::GenParams,
     owner: &ApiKeyIdentity,
     tools: Option<serde_json::Value>,
+    reasoning_effort: Option<String>,
 ) -> crate::engine_types::InferenceRequest {
     crate::engine_types::InferenceRequest {
         messages,
@@ -226,6 +234,7 @@ pub fn inference_request(
         owner: owner.0,
         cancel: Default::default(),
         tools,
+        reasoning_effort,
     }
 }
 
