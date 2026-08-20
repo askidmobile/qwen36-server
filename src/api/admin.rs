@@ -106,18 +106,13 @@ pub fn scan_gguf(dir: &Path, depth: usize, out: &mut Vec<Value>) {
                     }
                 }
             }
-            // Быстрая проверка совместимости по имени файла: наш сервер оптимизирован
-            // под архитектуры Qwen 3.5 / 3.6 / 3.8 и Ornith 1.0 / 1.5.
-            // Модели сторонних архитектур (Gemma, GPT-OSS) помечаем флагом supported=false.
-            let lower = name.to_lowercase();
-            let is_supported = lower.contains("qwen") || lower.contains("ornith");
-
+            // Все валидные GGUF модели поддерживаются сервером
             let size_mib = e.metadata().map(|m| m.len() / 1024 / 1024).unwrap_or(0);
             out.push(json!({
                 "name": name,
                 "path": p.to_string_lossy(),
                 "size_mib": size_mib,
-                "supported": is_supported,
+                "supported": true,
             }));
         }
     }

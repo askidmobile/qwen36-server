@@ -1297,13 +1297,7 @@ async function loadAvailableModels() {
     for (const m of j.models || []) {
       const o = document.createElement("option");
       o.value = m.path;
-      if (m.supported === false) {
-        o.textContent = m.name + " (" + m.size_mib + " MiB) [архитектура не поддерживается]";
-        o.disabled = true;
-        o.style.color = "var(--faint)";
-      } else {
-        o.textContent = m.name + " (" + m.size_mib + " MiB)";
-      }
+      o.textContent = m.name + " (" + m.size_mib + " MiB)";
       if (j.current && j.current.path && m.path === j.current.path) o.selected = true;
       sel.append(o);
     }
