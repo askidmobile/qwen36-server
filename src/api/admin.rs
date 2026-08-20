@@ -227,9 +227,14 @@ pub async fn sampling_defaults(
     State(state): State<AppState>,
     Json(req): Json<crate::config::SamplingDefaults>,
 ) -> Response {
-    if !(req.temperature >= 0.0 && req.top_p > 0.0 && req.top_p <= 1.0
-        && req.min_p >= 0.0 && req.min_p <= 1.0 && req.presence_penalty >= 0.0
-        && req.repetition_penalty > 0.0 && req.max_tokens > 0)
+    if !(req.temperature >= 0.0
+        && req.top_p > 0.0
+        && req.top_p <= 1.0
+        && req.min_p >= 0.0
+        && req.min_p <= 1.0
+        && req.presence_penalty >= 0.0
+        && req.repetition_penalty > 0.0
+        && req.max_tokens > 0)
     {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -248,14 +253,20 @@ pub async fn sampling_defaults(
     Json(json!({"status": "saved"})).into_response()
 }
 
-fn persist_sampling(path: &std::path::Path, d: &crate::config::SamplingDefaults) -> anyhow::Result<()> {
+fn persist_sampling(
+    path: &std::path::Path,
+    d: &crate::config::SamplingDefaults,
+) -> anyhow::Result<()> {
     let keys: Vec<(String, String)> = vec![
         ("TEMPERATURE".into(), d.temperature.to_string()),
         ("TOP_P".into(), d.top_p.to_string()),
         ("TOP_K".into(), d.top_k.to_string()),
         ("MIN_P".into(), d.min_p.to_string()),
         ("PRESENCE_PENALTY".into(), d.presence_penalty.to_string()),
-        ("REPETITION_PENALTY".into(), d.repetition_penalty.to_string()),
+        (
+            "REPETITION_PENALTY".into(),
+            d.repetition_penalty.to_string(),
+        ),
         ("MAX_TOKENS".into(), d.max_tokens.to_string()),
         ("THINKING".into(), d.thinking.to_string()),
     ];
@@ -290,10 +301,15 @@ pub async fn sampling_preset(
     State(state): State<AppState>,
     Json(req): Json<PresetRequest>,
 ) -> Response {
-    if req.name.trim().is_empty() || req.name.len() > 32
+    if req.name.trim().is_empty()
+        || req.name.len() > 32
         || !(req.values.temperature >= 0.0 && req.values.top_p > 0.0 && req.values.top_p <= 1.0)
     {
-        return api_error(StatusCode::BAD_REQUEST, "invalid_request_error", "invalid preset");
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "invalid preset",
+        );
     }
     {
         let mut presets = state.presets.write().expect("presets lock");
@@ -320,10 +336,7 @@ fn persist_presets(
     path: &std::path::Path,
     presets: &crate::config::SamplingPresets,
 ) -> anyhow::Result<()> {
-    let json_line = format!(
-        "PRESETS={}",
-        serde_json::to_string(presets)?
-    );
+    let json_line = format!("PRESETS={}", serde_json::to_string(presets)?);
     let existing = std::fs::read_to_string(path).unwrap_or_default();
     let mut replaced = false;
     let mut out: Vec<String> = existing
@@ -355,6 +368,7 @@ pub async fn unload_model(State(state): State<AppState>) -> Response {
     }
     let result = tokio::task::spawn_blocking({
         let switcher = state.switcher.clone();
+        #[cfg(feature = "cuda")]
         let cuda_device = state.cuda_device.clone();
         move || {
             // shutdown → dispatch выходит (poll 50мс) → take() возвращает последний
@@ -372,7 +386,11 @@ pub async fn unload_model(State(state): State<AppState>) -> Response {
                     let _ = c.synchronize();
                 }
             }
-            switcher.last_error.write().expect("last_error lock").clear();
+            switcher
+                .last_error
+                .write()
+                .expect("last_error lock")
+                .clear();
         }
     })
     .await;
@@ -384,11 +402,7 @@ pub async fn unload_model(State(state): State<AppState>) -> Response {
             format!("unload failed: {e}"),
         );
     }
-    (
-        StatusCode::OK,
-        Json(json!({"status": "unloaded"})),
-    )
-        .into_response()
+    (StatusCode::OK, Json(json!({"status": "unloaded"}))).into_response()
 }
 
 pub async fn switch_model(
@@ -539,6 +553,15 @@ pub async fn do_switch(
     state.switcher.shutdown();
     let old = state.switcher.take();
     drop(old);
+    #[cfg(feature = "cuda")]
+    if let Some(candle_core::Device::Cuda(cuda)) =
+        state.cuda_device.read().expect("cuda_device lock").as_ref()
+    {
+        use candle_core::backend::BackendDevice;
+        let _ = cuda.synchronize();
+        let _ = candle_core::cuda_backend::mem_pool::trim_default_mempool(cuda);
+        let _ = cuda.synchronize();
+    }
     if vram_plan::total_vram_mib().is_some() {
         // Адаптивное ожидание: старый dispatch-thread может ещё грузить адаптер
         // (35B ~60s внутри Qwen35BatchAdapter::load — shutdown там не виден).
@@ -555,19 +578,24 @@ pub async fn do_switch(
             stagnant = if free == last_free { stagnant + 1 } else { 0 };
             last_free = free;
             if stagnant >= 3 || std::time::Instant::now() > deadline {
-                eprintln!("[switch] VRAM wait done (free={free}MiB, stagnant={stagnant}), продолжаю");
+                eprintln!(
+                    "[switch] VRAM wait done (free={free}MiB, stagnant={stagnant}), продолжаю"
+                );
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
     }
 
-    // 3. Загрузить новый движок (всегда batched при slots>1, иначе single).
+    // 3. Qwen/Ornith используют continuous batching. Остальные архитектуры
+    // идут через соответствующий candle-transformers runtime под mutex.
+    let architecture = crate::engine::gguf_architecture(&path)?;
+    let qwen35 = matches!(architecture.as_str(), "qwen35" | "qwen35moe");
     eprintln!(
-        "[switch] loading {} ctx={ctx} slots={slots}",
+        "[switch] loading {} architecture={architecture} ctx={ctx} slots={slots}",
         path.display()
     );
-    let engine: Arc<dyn crate::engine::Engine> = if slots > 1 {
+    let engine: Arc<dyn crate::engine::Engine> = if qwen35 && slots > 1 {
         BatchedEngine::load(
             BatchConfig {
                 model_path: path.to_string_lossy().into_owned(),
@@ -604,7 +632,9 @@ pub async fn do_switch(
             presets: crate::config::default_presets(),
             env_file: std::path::PathBuf::from(".env"),
             batch_size: 2048,
-            threads: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8),
+            threads: std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(8),
             gpu_layers: 999,
             kv_cache_type: "q8_f16".into(),
             mmap: true,
@@ -619,13 +649,31 @@ pub async fn do_switch(
         };
         Arc::new(crate::engine::CandleEngine::load(&cfg)?)
     };
+    if qwen35 && slots > 1 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        loop {
+            if engine.ready() {
+                break;
+            }
+            if let Some(error) = engine.load_error() {
+                anyhow::bail!("model load failed: {error}");
+            }
+            if std::time::Instant::now() >= deadline {
+                anyhow::bail!("model load timed out after 600s");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
     let info = engine.model_info();
     eprintln!(
         "[switch] loaded: id={} ctx={} slots={}",
         info.id, info.context_length, info.slots
     );
     // Обновляем пресеты сэмплинга под специфику загруженной модели (например, Ornith 1.5 vs Qwen 3.8)
-    let model_name = path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
+    let model_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_default();
     let model_presets = crate::config::default_presets_for_model(&model_name);
     if let Ok(mut p) = state.presets.write() {
         *p = model_presets;

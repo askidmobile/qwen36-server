@@ -58,9 +58,13 @@ pub fn footprint_from_gguf(path: &Path) -> Result<ModelFootprint> {
             .map(|v| v as usize)
     };
     let block_count = g("block_count").ok_or_else(|| anyhow!("no block_count"))?;
-    let interval = g("full_attention_interval").unwrap_or(4).max(1);
-    let attn_blocks = (0..block_count).filter(|i| (i + 1) % interval == 0).count();
-    let delta_blocks = block_count - attn_blocks;
+    let (attn_blocks, delta_blocks) = if matches!(arch.as_str(), "qwen35" | "qwen35moe") {
+        let interval = g("full_attention_interval").unwrap_or(4).max(1);
+        let attn = (0..block_count).filter(|i| (i + 1) % interval == 0).count();
+        (attn, block_count - attn)
+    } else {
+        (block_count, 0)
+    };
     let kv_heads = g("attention.head_count_kv").unwrap_or(2);
     let head_dim = g("attention.key_length").unwrap_or(256);
     let n_v_heads = g("ssm.time_step_rank").unwrap_or(32);
@@ -85,10 +89,7 @@ pub fn footprint_from_gguf(path: &Path) -> Result<ModelFootprint> {
 /// (macOS/CPU — планер не применяется, unified memory).
 pub fn total_vram_mib() -> Option<usize> {
     let out = std::process::Command::new("nvidia-smi")
-        .args([
-            "--query-gpu=memory.total",
-            "--format=csv,noheader,nounits",
-        ])
+        .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -161,13 +162,18 @@ pub fn compute_dynamic(
     let budget = total_mib as f64 * BUDGET_FRAC;
     let state = state_mib_per_slot(fp);
     let kv_per_tok = kv_mib_per_slot(fp, 1);
-    let kv_budget = budget - fp.weights_mib as f64 - WORKSPACE_MIB as f64 - req_slots as f64 * state;
+    let kv_budget =
+        budget - fp.weights_mib as f64 - WORKSPACE_MIB as f64 - req_slots as f64 * state;
     if kv_budget < kv_per_tok * 2048.0 {
         return Err(anyhow!(
             "VRAM не хватает: после весов и workspace на KV остаётся {kv_budget:.0}MiB (<2K токенов на слот)"
         ));
     }
-    let ctx = req_ctx.min(if fp.native_ctx > 0 { fp.native_ctx } else { req_ctx });
+    let ctx = req_ctx.min(if fp.native_ctx > 0 {
+        fp.native_ctx
+    } else {
+        req_ctx
+    });
     // Сколько слотов могут быть одновременно заполнены ctx полностью.
     let full_concurrent = (kv_budget / (kv_per_tok * ctx as f64)).floor() as usize;
     let report = format!(
@@ -186,7 +192,12 @@ pub fn compute_dynamic(
 
 /// Подбор (ctx, slots): ctx вычисляется аналитически из остатка бюджета
 /// (линейно от KV/токен), slots режутся только если даже ctx=2048 не влезает.
-pub fn compute(total_mib: usize, fp: &ModelFootprint, req_ctx: usize, req_slots: usize) -> Result<Plan> {
+pub fn compute(
+    total_mib: usize,
+    fp: &ModelFootprint,
+    req_ctx: usize,
+    req_slots: usize,
+) -> Result<Plan> {
     let budget = total_mib as f64 * BUDGET_FRAC;
     let state = state_mib_per_slot(fp);
     // KV на 1 токен контекста на слот (MiB).
@@ -229,10 +240,7 @@ pub fn compute(total_mib: usize, fp: &ModelFootprint, req_ctx: usize, req_slots:
         );
         return Ok(Plan { ctx, slots, report });
     }
-    let min_need = fp.weights_mib as f64
-        + kv_mib_per_slot(fp, 2048)
-        + state
-        + WORKSPACE_MIB as f64;
+    let min_need = fp.weights_mib as f64 + kv_mib_per_slot(fp, 2048) + state + WORKSPACE_MIB as f64;
     Err(anyhow!(
         "VRAM не хватает даже для 1 слота × ctx 2048: нужно ~{min_need:.0}MiB, бюджет {budget:.0}MiB ({total_mib}MiB total)"
     ))

@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 use qwen35_batch::real::tokenizer::{self, ChatMsg};
-use qwen35_batch::real::ModelWeights;
+use qwen35_batch::real::ModelWeights as Qwen35Model;
 
 use crate::config::Config;
 use crate::sampler::{self, Rng, SamplingPreset};
@@ -274,10 +274,14 @@ pub trait Engine: Send + Sync {
     fn shutdown(&self) {}
     /// true = веса загружены, движок готов к generate. CandleEngine грузится
     /// синхронно → всегда true; BatchedEngine грузит адаптер в потоке.
-    fn ready(&self) -> bool { true }
+    fn ready(&self) -> bool {
+        true
+    }
     /// Ошибка асинхронной загрузки (None = ок). Для BatchedEngine — текст
     /// ошибки adapter load, иначе switch рапортует успех при мёртвом движке.
-    fn load_error(&self) -> Option<String> { None }
+    fn load_error(&self) -> Option<String> {
+        None
+    }
 }
 
 // ── CandleEngine ────────────────────────────────────────────────────────────
@@ -285,8 +289,37 @@ pub trait Engine: Send + Sync {
 /// Запас токенов под погрешность per-message оценки в sliding window.
 const TRIM_MARGIN: usize = 16;
 
+enum RuntimeModel {
+    Qwen35(Qwen35Model),
+    Gemma4(candle_transformers::models::quantized_gemma4::ModelWeights),
+    Llama(candle_transformers::models::quantized_llama::ModelWeights),
+}
+
+impl RuntimeModel {
+    fn forward(
+        &mut self,
+        ids: &candle_core::Tensor,
+        index_pos: usize,
+    ) -> Result<candle_core::Tensor> {
+        match self {
+            Self::Qwen35(model) => model.forward(ids, index_pos),
+            Self::Gemma4(model) => model.forward(ids, index_pos),
+            Self::Llama(model) => model.forward(ids, index_pos),
+        }
+        .map_err(Into::into)
+    }
+
+    fn clear_state(&mut self) {
+        match self {
+            Self::Qwen35(model) => model.clear_state(),
+            Self::Gemma4(model) => model.clear_kv_cache(),
+            Self::Llama(model) => model.clear_kv_cache(),
+        }
+    }
+}
+
 struct ModelState {
-    model: ModelWeights,
+    model: RuntimeModel,
     tokenizer: tokenizers::Tokenizer,
     /// Устройство модели (для создания входных тензоров без повторного probe).
     device: candle_core::Device,
@@ -308,19 +341,32 @@ pub struct CandleEngine {
     /// Параллелизм 4 слотов (BD-007) даст batched-планировщик форка
     /// (Qwen35BatchAdapter + BatchScheduler) — отдельная фаза (BD-019).
     state: Arc<Mutex<ModelState>>,
-    eos: u32,
+    stop_tokens: Vec<u32>,
     ctx: usize,
     info: ModelInfo,
+    architecture: String,
     chat_tpl: Option<crate::chat_template::ChatTemplate>,
 }
 
 impl CandleEngine {
     pub fn load(cfg: &Config) -> Result<Self> {
         let device = select_device()?;
+        let gpu_only = std::env::var("GPU_ONLY")
+            .or_else(|_| std::env::var("QWEN36_GPU_ONLY"))
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if gpu_only && !device.is_cuda() {
+            anyhow::bail!("GPU_ONLY=1 requires CUDA device");
+        }
+        let architecture = gguf_architecture(&cfg.model)?;
         let (model, eos) = load_model(&cfg.model, &device)?;
         #[cfg(feature = "cuda")]
         maybe_retain_mempool(&device);
         let tokenizer = tokenizer::load_from_gguf_path(&cfg.model)?;
+        let mut stop_tokens = vec![eos];
+        if let Some(turn_end) = tokenizer.token_to_id("<turn|>") {
+            stop_tokens.push(turn_end);
+        }
         let chat_tpl = crate::chat_template::ChatTemplate::from_gguf(&cfg.model);
         Ok(Self {
             state: Arc::new(Mutex::new(ModelState {
@@ -328,7 +374,7 @@ impl CandleEngine {
                 tokenizer,
                 device,
             })),
-            eos,
+            stop_tokens,
             ctx: cfg.ctx,
             info: ModelInfo {
                 id: model_id_from_filename(&cfg.model),
@@ -337,6 +383,7 @@ impl CandleEngine {
                 slots: cfg.slots,
                 modes: vec!["thinking".into(), "instruct".into()],
             },
+            architecture,
             chat_tpl,
         })
     }
@@ -394,7 +441,15 @@ impl Engine for CandleEngine {
             let rendered = self
                 .chat_tpl
                 .as_ref()
-                .and_then(|tpl| tpl.render(&kept, tools.as_ref(), params.thinking, reasoning_effort.as_deref()).ok());
+                .map(|tpl| {
+                    tpl.render(
+                        &kept,
+                        tools.as_ref(),
+                        params.thinking,
+                        reasoning_effort.as_deref(),
+                    )
+                })
+                .transpose()?;
             prompt_ids = match rendered {
                 Some(text) => st
                     .tokenizer
@@ -430,7 +485,8 @@ impl Engine for CandleEngine {
 
         let (tx, rx) = mpsc::channel(64);
         let state = Arc::clone(&self.state);
-        let eos = self.eos;
+        let stop_tokens = self.stop_tokens.clone();
+        let architecture = self.architecture.clone();
         // Инференс блокирующий и долгий — в blocking-пул, канал стримит наружу.
         tokio::task::spawn_blocking(move || {
             run_generation(
@@ -438,7 +494,8 @@ impl Engine for CandleEngine {
                 prompt_ids,
                 prompt_tokens,
                 params,
-                eos,
+                stop_tokens,
+                architecture,
                 truncated,
                 cancel,
                 tx,
@@ -464,7 +521,8 @@ fn run_generation(
     prompt_ids: Vec<u32>,
     prompt_tokens: usize,
     params: GenParams,
-    eos: u32,
+    stop_tokens: Vec<u32>,
+    architecture: String,
     truncated: bool,
     cancel: CancelFlag,
     tx: mpsc::Sender<StreamEvent>,
@@ -534,7 +592,7 @@ fn run_generation(
                 &generated,
                 &mut rng,
             );
-            if tok == eos {
+            if stop_tokens.contains(&tok) {
                 flush_tail!();
                 finish("stop", generated.len(), &tx);
                 return Ok(());
@@ -543,7 +601,13 @@ fn run_generation(
 
             // Decode всего вывода (корректно на границах многотокенных UTF-8).
             // ponytail: инкрементальный decode с буфером хвоста — добавить, если профилирование покажет.
-            full_text = tokenizer::decode_text(tokenizer, &generated).unwrap_or_default();
+            full_text = if architecture == "gemma4" {
+                // Gemma reasoning boundaries are special tokens. Preserve them
+                // here; API layer removes channel markers after splitting.
+                tokenizer.decode(&generated, false).unwrap_or_default()
+            } else {
+                tokenizer::decode_text(tokenizer, &generated).unwrap_or_default()
+            };
 
             // Stop-строки: ищем в хвосте длиной max_stop_len + последний кусок.
             let mut cut_at: Option<usize> = None;
@@ -619,7 +683,19 @@ pub fn floor_char_boundary(s: &str, mut i: usize) -> usize {
 
 /// Загрузка GGUF: веса через ModelWeights (zero-copy на macOS+Metal),
 /// EOS из metadata `tokenizer.ggml.eos_token_id` (default 151645, как в адаптере).
-fn load_model(path: &Path, device: &candle_core::Device) -> Result<(ModelWeights, u32)> {
+pub fn gguf_architecture(path: &Path) -> Result<String> {
+    use anyhow::anyhow;
+    use candle_core::quantized::gguf_file::{Content, Value};
+
+    let mut file = std::fs::File::open(path).map_err(|e| anyhow!("open GGUF {path:?}: {e}"))?;
+    let content = Content::read(&mut file).map_err(|e| anyhow!("read GGUF: {e}"))?;
+    match content.metadata.get("general.architecture") {
+        Some(Value::String(architecture)) => Ok(architecture.clone()),
+        value => Err(anyhow!("invalid general.architecture metadata: {value:?}")),
+    }
+}
+
+fn load_model(path: &Path, device: &candle_core::Device) -> Result<(RuntimeModel, u32)> {
     use anyhow::anyhow;
     use candle_core::quantized::gguf_file;
     use std::sync::Arc;
@@ -636,16 +712,39 @@ fn load_model(path: &Path, device: &candle_core::Device) -> Result<(ModelWeights
         .and_then(|v| v.to_u32().ok())
         .unwrap_or(151645);
 
-    #[cfg(all(target_os = "macos", feature = "metal"))]
-    let model = if matches!(device, candle_core::Device::Metal(_)) {
-        ModelWeights::from_gguf_zero_copy(ct, mmap, device)
-            .map_err(|e| anyhow!("load weights zero-copy: {e}"))?
-    } else {
-        ModelWeights::from_gguf(ct, mmap, device).map_err(|e| anyhow!("load weights: {e}"))?
+    let architecture = match ct.metadata.get("general.architecture") {
+        Some(gguf_file::Value::String(value)) => value.as_str(),
+        value => return Err(anyhow!("invalid general.architecture metadata: {value:?}")),
     };
-    #[cfg(not(all(target_os = "macos", feature = "metal")))]
-    let model =
-        ModelWeights::from_gguf(ct, mmap, device).map_err(|e| anyhow!("load weights: {e}"))?;
+    let model = match architecture {
+        "qwen35" | "qwen35moe" => {
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            let model = if matches!(device, candle_core::Device::Metal(_)) {
+                Qwen35Model::from_gguf_zero_copy(ct, mmap, device)
+                    .map_err(|e| anyhow!("load Qwen weights zero-copy: {e}"))?
+            } else {
+                Qwen35Model::from_gguf(ct, mmap, device)
+                    .map_err(|e| anyhow!("load Qwen weights: {e}"))?
+            };
+            #[cfg(not(all(target_os = "macos", feature = "metal")))]
+            let model = Qwen35Model::from_gguf(ct, mmap, device)
+                .map_err(|e| anyhow!("load Qwen weights: {e}"))?;
+            RuntimeModel::Qwen35(model)
+        }
+        "gemma4" => RuntimeModel::Gemma4(
+            candle_transformers::models::quantized_gemma4::ModelWeights::from_gguf(
+                ct, &mut c, device,
+            )
+            .map_err(|e| anyhow!("load Gemma 4 weights: {e}"))?,
+        ),
+        "llama" => RuntimeModel::Llama(
+            candle_transformers::models::quantized_llama::ModelWeights::from_gguf(
+                ct, &mut c, device,
+            )
+            .map_err(|e| anyhow!("load Llama weights: {e}"))?,
+        ),
+        other => return Err(anyhow!("unsupported GGUF architecture: {other}")),
+    };
     Ok((model, eos))
 }
 

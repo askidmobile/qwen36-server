@@ -8,6 +8,7 @@ description = "Qwen3.6-27B GGUF inference server на candle-fork-qwen35-batch (
 # Форк лежит соседней директорией (macOS/Windows/Linux одинаково):
 # <parent>/Qwen3.6 27B + <parent>/candle-fork
 qwen35-batch = { path = "../candle-fork/qwen35-batch", features = ["real-model"] }
+candle-transformers = { path = "../candle-fork/candle-transformers" }
 anyhow = "1"
 axum = { version = "0.8", features = ["multipart"] }
 tokio = { version = "1", features = ["full"] }
@@ -41,5 +42,5 @@ http-body-util = "0.1"
 [features]
 # Backend: metal на macOS (разработка), cuda на Windows (yttri-win), иначе CPU.
 default = []
-metal = ["qwen35-batch/metal", "candle-core/metal"]
-cuda = ["qwen35-batch/cuda", "candle-core/cuda"]
+metal = ["qwen35-batch/metal", "candle-core/metal", "candle-transformers/metal"]
+cuda = ["qwen35-batch/cuda", "candle-core/cuda", "candle-transformers/cuda"]

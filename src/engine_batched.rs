@@ -15,9 +15,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail};
-use qwen35_batch::model::{
-    MultimodalPrefill, Sampler as ForkSampler, SamplerCheckpoint,
-};
+use qwen35_batch::model::{MultimodalPrefill, Sampler as ForkSampler, SamplerCheckpoint};
 use qwen35_batch::real::multimodal::{build_position_plan, MediaKind as PackedMediaKind};
 use qwen35_batch::real::tokenizer::{self, ChatContent, ChatMsg, MultimodalChatMsg};
 use qwen35_batch::real::Qwen35BatchAdapter;
@@ -60,7 +58,11 @@ pub struct BatchConfig {
 
 impl BatchConfig {
     pub fn from_env() -> Self {
-        let get = |k: &str| std::env::var(k).or_else(|_| std::env::var(format!("QWEN36_{k}"))).ok();
+        let get = |k: &str| {
+            std::env::var(k)
+                .or_else(|_| std::env::var(format!("QWEN36_{k}")))
+                .ok()
+        };
         let num = |k: &str, d: usize| get(k).and_then(|v| v.parse().ok()).unwrap_or(d);
         let mut slots = num("SLOTS", 4);
         if slots > MAX_SLOTS {
@@ -68,8 +70,7 @@ impl BatchConfig {
             slots = MAX_SLOTS;
         }
         Self {
-            model_path: get("MODEL")
-                .unwrap_or_else(|| "models/qwen36-27b-q2_k_xl.gguf".into()),
+            model_path: get("MODEL").unwrap_or_else(|| "models/qwen36-27b-q2_k_xl.gguf".into()),
             slots,
             max_queue: num("MAX_QUEUE", 64),
             req_timeout: Duration::from_secs(num("REQ_TIMEOUT", 600) as u64),
@@ -263,7 +264,11 @@ impl Engine for BatchedEngine {
     }
     fn load_error(&self) -> Option<String> {
         let e = self.load_error.read().expect("load_error lock");
-        if e.is_empty() { None } else { Some(e.clone()) }
+        if e.is_empty() {
+            None
+        } else {
+            Some(e.clone())
+        }
     }
     async fn generate(
         &self,
@@ -411,9 +416,18 @@ impl Engine for BatchedEngine {
                 .collect();
             // Официальный Jinja-шаблон из GGUF (think-блок и tool calls в
             // формате обучения модели); fallback — встроенный ChatML-билдер.
-            let rendered = self.chat_tpl.as_ref().and_then(|tpl| {
-                tpl.render(&kept, tools.as_ref(), params.thinking, reasoning_effort.as_deref()).ok()
-            });
+            let rendered = self
+                .chat_tpl
+                .as_ref()
+                .map(|tpl| {
+                    tpl.render(
+                        &kept,
+                        tools.as_ref(),
+                        params.thinking,
+                        reasoning_effort.as_deref(),
+                    )
+                })
+                .transpose()?;
             let ids = match rendered {
                 Some(text) => tok
                     .encode(text.as_str(), false)
@@ -997,7 +1011,10 @@ impl ForkSampler for IndexedSampler {
         let checkpoint = checkpoint
             .downcast::<Option<(GenParams, Rng)>>()
             .map_err(|_| anyhow!("sampler checkpoint type mismatch"))?;
-        let mut params = self.params.lock().unwrap_or_else(|error| error.into_inner());
+        let mut params = self
+            .params
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         match *checkpoint {
             Some(state) => {
                 params.insert(slot_idx, state);
@@ -1066,7 +1083,8 @@ mod tests {
     #[tokio::test]
     async fn load_rejects_slots_above_fork_capacity_before_model_load() {
         let media = Arc::new(crate::media::MediaService::new(Default::default()).unwrap());
-        let err = match BatchedEngine::load(test_config(MAX_SLOTS + 1, 0), media, None, None).await {
+        let err = match BatchedEngine::load(test_config(MAX_SLOTS + 1, 0), media, None, None).await
+        {
             Ok(_) => panic!("slots above capacity must be rejected"),
             Err(err) => err.to_string(),
         };

@@ -1,8 +1,8 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 
-rem qwen36-server Windows CUDA build. Tested with VS 2022 + CUDA 12.4.
-if not defined CUDA_PATH set "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4"
+rem qwen36-server Windows CUDA build. Production: VS 2022 + CUDA 13.2.
+if not defined CUDA_PATH set "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2"
 if not defined CUDA_COMPUTE_CAP set "CUDA_COMPUTE_CAP=86"
 
 if not exist "%CUDA_PATH%\bin\nvcc.exe" (

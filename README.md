@@ -79,7 +79,7 @@ THINKING=true
 
 ## 🇷🇺 Быстрый старт и сборка
 
-### Windows (CUDA 12.4+):
+### Windows (CUDA 13.2):
 ```cmd
 call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=x64
 cargo build --release --features cuda

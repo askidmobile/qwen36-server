@@ -9,17 +9,36 @@
 //! функция-ошибка, как в llama.cpp.
 
 use anyhow::{anyhow, Result};
+use minijinja::value::ValueKind;
 use minijinja::{Environment, Error, ErrorKind};
 use serde_json::{json, Value};
 use std::path::Path;
 
 pub struct ChatTemplate {
     env: Environment<'static>,
+    bos_token: String,
+    eos_token: String,
 }
 
 fn preprocess(tpl: &str) -> String {
     tpl.replace(".startswith(", " is startswith(")
         .replace(".endswith(", " is endswith(")
+}
+
+fn python_mapping_get(
+    value: &minijinja::Value,
+    method: &str,
+    args: &[minijinja::Value],
+) -> Result<minijinja::Value, Error> {
+    if value.kind() != ValueKind::Map || method != "get" || !(1..=2).contains(&args.len()) {
+        return Err(Error::from(ErrorKind::UnknownMethod));
+    }
+    let found = value.get_item(&args[0])?;
+    if found.is_undefined() && args.len() == 2 {
+        Ok(args[1].clone())
+    } else {
+        Ok(found)
+    }
 }
 
 impl ChatTemplate {
@@ -32,18 +51,44 @@ impl ChatTemplate {
             Some(candle_core::quantized::gguf_file::Value::String(s)) => s.clone(),
             _ => return None,
         };
+        let token = |id_key: &str| -> String {
+            let id = content
+                .metadata
+                .get(id_key)
+                .and_then(|value| value.to_u32().ok())
+                .unwrap_or(u32::MAX) as usize;
+            content
+                .metadata
+                .get("tokenizer.ggml.tokens")
+                .and_then(|value| value.to_vec().ok())
+                .and_then(|tokens| tokens.get(id))
+                .and_then(|value| value.to_string().ok())
+                .cloned()
+                .unwrap_or_default()
+        };
+        let bos_token = token("tokenizer.ggml.bos_token_id");
+        let eos_token = token("tokenizer.ggml.eos_token_id");
         let mut env = Environment::new();
         env.set_undefined_behavior(minijinja::UndefinedBehavior::Lenient);
         env.add_function("raise_exception", |msg: String| -> Result<String, Error> {
             Err(Error::new(ErrorKind::InvalidOperation, msg))
         });
-        env.add_test("startswith", |v: String, prefix: String| v.starts_with(&prefix));
+        env.add_test("startswith", |v: String, prefix: String| {
+            v.starts_with(&prefix)
+        });
         env.add_test("endswith", |v: String, suffix: String| v.ends_with(&suffix));
+        env.set_unknown_method_callback(|_, value, method, args| {
+            python_mapping_get(value, method, args)
+        });
         // ponytail: leak источника шаблона — Environment<'static> требует 'static
         // источник. Шаблонов несколько штук за жизнь процесса, утечка ~10KB каждый.
         let src: &'static str = Box::leak(preprocess(&tpl).into_boxed_str());
         env.add_template("chat", src).ok()?;
-        Some(Self { env })
+        Some(Self {
+            env,
+            bos_token,
+            eos_token,
+        })
     }
 
     /// Отрендерить промпт. messages — JSON-массив {role, content, tool_calls?};
@@ -89,6 +134,8 @@ impl ChatTemplate {
             "add_generation_prompt": true,
             "enable_thinking": enable_thinking,
             "add_vision_id": false,
+            "bos_token": self.bos_token,
+            "eos_token": self.eos_token,
         });
         if let Some(effort) = reasoning_effort {
             ctx["reasoning_effort"] = json!(effort);
@@ -103,5 +150,29 @@ impl ChatTemplate {
             .map_err(|e| anyhow!("chat template: {e}"))?
             .render(&ctx)
             .map_err(|e| anyhow!("chat template render: {e}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn python_mapping_get_works_in_official_templates() {
+        let mut env = Environment::new();
+        env.set_unknown_method_callback(|_, value, method, args| {
+            python_mapping_get(value, method, args)
+        });
+        env.add_template(
+            "test",
+            "{{ message.get('content') }}|{{ message.get('missing', 'x') }}",
+        )
+        .unwrap();
+        let rendered = env
+            .get_template("test")
+            .unwrap()
+            .render(json!({"message": {"content": "ok"}}))
+            .unwrap();
+        assert_eq!(rendered, "ok|x");
     }
 }

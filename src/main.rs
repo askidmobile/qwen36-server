@@ -45,7 +45,9 @@ async fn main() -> Result<()> {
         cfg.model, cfg.profile, cfg.ctx, cfg.slots, cfg.host, cfg.port
     );
 
-    let engine: Arc<dyn Engine> = if cfg.slots > 1 {
+    let architecture = qwen36_server::engine::gguf_architecture(&cfg.model)?;
+    let qwen35 = matches!(architecture.as_str(), "qwen35" | "qwen35moe");
+    let engine: Arc<dyn Engine> = if qwen35 && cfg.slots > 1 {
         let bcfg = BatchConfig {
             model_path: cfg.model.to_string_lossy().into_owned(),
             slots: cfg.slots,
@@ -60,19 +62,24 @@ async fn main() -> Result<()> {
             qwen36_server::profile::ComponentArtifact::Available { path } => Some(path.clone()),
             _ => None,
         });
-        let mtp_enabled = match std::env::var("MTP").or_else(|_| std::env::var("QWEN36_MTP")).as_deref() {
+        let mtp_enabled = match std::env::var("MTP")
+            .or_else(|_| std::env::var("QWEN36_MTP"))
+            .as_deref()
+        {
             Ok("1") => true,
             Ok("0") | Err(_) => false,
             Ok(value) => anyhow::bail!("MTP must be 0 or 1, got {value:?}"),
         };
-        let mtp_path = mtp_enabled.then(|| {
-            profile.as_ref().and_then(|profile| match &profile.mtp {
-                qwen36_server::profile::ComponentArtifact::Available { path } => {
-                    Some(path.clone())
-                }
-                _ => None,
+        let mtp_path = mtp_enabled
+            .then(|| {
+                profile.as_ref().and_then(|profile| match &profile.mtp {
+                    qwen36_server::profile::ComponentArtifact::Available { path } => {
+                        Some(path.clone())
+                    }
+                    _ => None,
+                })
             })
-        }).flatten();
+            .flatten();
         BatchedEngine::load(bcfg, media.clone(), vision_path, mtp_path).await?
     } else {
         Arc::new(CandleEngine::load(&cfg)?)

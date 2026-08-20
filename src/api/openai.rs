@@ -4,9 +4,9 @@ use axum::{
     response::{sse::Event, IntoResponse, Response},
     Json,
 };
-use std::sync::atomic::Ordering;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::sync::atomic::Ordering;
 
 use crate::api::{
     bad_request, engine_error, generate_collect, parse_tool_calls, prepare_inference_request,
@@ -116,7 +116,11 @@ fn to_gen_params(
         "low" | "medium" | "high" | "xhigh" => Some(true),
         _ => None,
     };
-    let thinking = req.thinking.or(ctk).or(effort_thinking).unwrap_or(d.thinking);
+    let thinking = req
+        .thinking
+        .or(ctk)
+        .or(effort_thinking)
+        .unwrap_or(d.thinking);
 
     // 2. Выбираем базовый пресет сэмплинга в зависимости от режима:
     let preset_name = if thinking {
@@ -175,8 +179,9 @@ fn to_gen_params(
     if let Some(stop) = &req.stop {
         match stop {
             Value::String(s) => stop_list.push(s.clone()),
-            Value::Array(arr) => stop_list
-                .extend(arr.iter().filter_map(|v| v.as_str().map(String::from))),
+            Value::Array(arr) => {
+                stop_list.extend(arr.iter().filter_map(|v| v.as_str().map(String::from)))
+            }
             _ => {}
         }
     }
@@ -247,12 +252,9 @@ pub async fn chat_completions(
         let mut found: Vec<Value> = Vec::new();
         crate::api::admin::scan_gguf(&state.models_dir, 0, &mut found);
         let match_path = found.iter().find_map(|m| {
-            let name = m["name"].as_str()?;
             let path = m["path"].as_str()?;
             // Сравниваем по model_id_from_filename (нормализованное имя).
-            let file_id = crate::engine::model_id_from_filename(
-                std::path::Path::new(path),
-            );
+            let file_id = crate::engine::model_id_from_filename(std::path::Path::new(path));
             if file_id == requested {
                 Some(path.to_string())
             } else {
@@ -275,12 +277,12 @@ pub async fn chat_completions(
                 ).into_response();
             }
             // Текущие ctx/slots из state.switcher.current.
-            let (cur_path, cur_ctx, cur_slots) = state
+            let (cur_ctx, cur_slots) = state
                 .switcher
                 .current
                 .read()
-                .map(|c| c.clone())
-                .unwrap_or_else(|_| (std::path::PathBuf::new(), 8192, 4));
+                .map(|current| (current.1, current.2))
+                .unwrap_or((8192, 4));
             eprintln!(
                 "[auto-switch] req.model='{}' current='{}' → switching to {}",
                 requested, current_id, path
@@ -323,7 +325,11 @@ pub async fn chat_completions(
     {
         return bad_request("system messages cannot contain media");
     }
-    let params = to_gen_params(&req, &state.sampling.read().expect("sampling lock"), &state.presets.read().expect("presets lock"));
+    let params = to_gen_params(
+        &req,
+        &state.sampling.read().expect("sampling lock"),
+        &state.presets.read().expect("presets lock"),
+    );
     if params.max_tokens == 0 {
         return bad_request("max_tokens must be greater than 0");
     }
@@ -373,15 +379,8 @@ pub async fn chat_completions(
         Ok(o) => o,
         Err(r) => return r,
     };
-    // Отрезать мышление из content: thinking → message.reasoning_content.
-    let (reasoning, text_body) = match out.text.find("</think>") {
-        Some(pos) => {
-            let r = out.text[..pos].trim().to_string();
-            let t = out.text[pos + "</think>".len()..].trim_start().to_string();
-            (if r.is_empty() { None } else { Some(r) }, t)
-        }
-        None => (None, out.text.clone()),
-    };
+    // Отрезать Qwen </think> и Gemma 4 thought-channel из content.
+    let (reasoning, text_body) = split_reasoning(&out.text);
     let (text, calls) = parse_tool_calls(&text_body);
     let finish = if !calls.is_empty() {
         "tool_calls"
@@ -417,6 +416,55 @@ pub async fn chat_completions(
     .into_response()
 }
 
+fn split_reasoning(text: &str) -> (Option<String>, String) {
+    if let Some(close) = text.find("</think>") {
+        let reasoning = text[..close].trim().to_string();
+        let content = text[close + "</think>".len()..].trim_start().to_string();
+        return ((!reasoning.is_empty()).then_some(reasoning), content);
+    }
+    const GEMMA_OPEN: &str = "<|channel>thought";
+    const GEMMA_CLOSE: &str = "<channel|>";
+    if let Some(open) = text.rfind(GEMMA_OPEN) {
+        if let Some(relative_close) = text[open + GEMMA_OPEN.len()..].find(GEMMA_CLOSE) {
+            let close = open + GEMMA_OPEN.len() + relative_close;
+            let reasoning = text[open + GEMMA_OPEN.len()..close]
+                .trim_start_matches(['\r', '\n'])
+                .trim()
+                .to_string();
+            let tail = text[close + GEMMA_CLOSE.len()..].trim_start();
+            let content = tail
+                .strip_prefix("<|channel>final")
+                .unwrap_or(tail)
+                .trim_start_matches(['\r', '\n'])
+                .to_string();
+            return ((!reasoning.is_empty()).then_some(reasoning), content);
+        }
+        let reasoning = text[open + GEMMA_OPEN.len()..]
+            .trim_start_matches(['\r', '\n'])
+            .trim()
+            .to_string();
+        return ((!reasoning.is_empty()).then_some(reasoning), String::new());
+    }
+    (None, text.to_string())
+}
+
+#[cfg(test)]
+mod reasoning_tests {
+    use super::split_reasoning;
+
+    #[test]
+    fn splits_gemma_thought_and_final_channels() {
+        assert_eq!(
+            split_reasoning("<|channel>thought\nwork<channel|>\n<|channel>final\nanswer"),
+            (Some("work".into()), "answer".into())
+        );
+        assert_eq!(
+            split_reasoning("<|channel>thought\nunfinished"),
+            (Some("unfinished".into()), String::new())
+        );
+    }
+}
+
 pub(crate) fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -448,6 +496,7 @@ async fn stream_chat(
     // delta.reasoning_content, ответ — в delta.content. Модель генерит
     // мышление + </think> + ответ в одном потоке — делим здесь.
     let thinking = request.params.thinking;
+    let gemma_channel = model.starts_with("gemma-4");
     let rx = match state.engine.generate(request).await {
         Ok(r) => r,
         Err(e) => return engine_error(e),
@@ -462,6 +511,10 @@ async fn stream_chat(
     const THINK_CLOSE: &str = "</think>";
     sse_response(rx, cancel, move |ev, out| match ev {
         StreamEvent::Delta(d) => {
+            if gemma_channel {
+                acc.push_str(&d);
+                return true;
+            }
             if first {
                 first = false;
                 out.push(Event::default().data(chunk(
@@ -477,7 +530,9 @@ async fn stream_chat(
                 think_acc.push_str(&d);
                 if let Some(pos) = think_acc.find(THINK_CLOSE) {
                     let reasoning = think_acc[..pos].trim().to_string();
-                    content_owned = think_acc[pos + THINK_CLOSE.len()..].trim_start().to_string();
+                    content_owned = think_acc[pos + THINK_CLOSE.len()..]
+                        .trim_start()
+                        .to_string();
                     think_acc.clear();
                     if !reasoning.is_empty() {
                         out.push(Event::default().data(chunk(
@@ -533,10 +588,23 @@ async fn stream_chat(
                     None,
                 )));
             }
-            let (text, calls) = parse_tool_calls(&acc);
+            let (reasoning, text_body) = if gemma_channel {
+                split_reasoning(&acc)
+            } else {
+                (None, acc.clone())
+            };
+            if let Some(reasoning) = reasoning {
+                out.push(Event::default().data(chunk(
+                    &id,
+                    &model,
+                    json!({"reasoning_content": reasoning}),
+                    None,
+                )));
+            }
+            let (text, calls) = parse_tool_calls(&text_body);
             // tools в запросе: текст буферизован — эмитим его (без tool_call
             // разметки) одной дельтой до tool_calls-чанков.
-            if has_tools && !text.is_empty() {
+            if (has_tools || gemma_channel) && !text.is_empty() {
                 out.push(Event::default().data(chunk(&id, &model, json!({"content": text}), None)));
             }
             for (i, (name, args)) in calls.iter().enumerate() {
@@ -691,7 +759,11 @@ mod tests {
             "seed": 42
         }))
         .unwrap();
-        let params = to_gen_params(&req, &state.sampling.read().expect("sampling lock"), &state.presets.read().expect("presets lock"));
+        let params = to_gen_params(
+            &req,
+            &state.sampling.read().expect("sampling lock"),
+            &state.presets.read().expect("presets lock"),
+        );
         assert_eq!(params.top_k, 7);
         assert_eq!(params.min_p, 0.1);
         assert_eq!(params.presence_penalty, 1.5);
