@@ -63,13 +63,23 @@ impl ChatTemplate {
             .map(|m| {
                 let mut v = json!({
                     "role": m.role,
-                    // text_content_with_reasoning встраивает <think>…</think>
-                    // (preserve_thinking). Дополнительные поля (tool_calls) —
-                    // отдельно, как в шаблоне Qwen3.8.
-                    "content": m.text_content_with_reasoning(),
+                    // Для Jinja-шаблона: content — ТОЛЬКО текст (без thinking).
+                    // Шаблон Ornith-1.5/Qwen3.8 сам встраивает reasoning_content
+                    // из отдельного поля. Раньше мы клали его в content → двойной
+                    // thinking-блок ломал модель (agent-loop зацикливался).
+                    "content": m.text_content(),
                 });
                 if !m.tool_calls.is_empty() {
                     v["tool_calls"] = Value::Array(m.tool_calls.clone());
+                }
+                // preserve_thinking: reasoning_content — как отдельное поле
+                // для шаблона (Qwen3.8/Ornith 1.5).
+                if m.role == "assistant" {
+                    if let Some(r) = &m.reasoning_content {
+                        if !r.is_empty() {
+                            v["reasoning_content"] = json!(r);
+                        }
+                    }
                 }
                 v
             })
