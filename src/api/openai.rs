@@ -57,6 +57,8 @@ struct OaiMessage {
     /// OpenAI-история: прошлые вызовы инструментов — рендерим в текст,
     /// чтобы модель видела собственные <tool_call> в контексте.
     tool_calls: Option<Value>,
+    /// reasoning_content из истории (preserve_thinking, Qwen3.8).
+    reasoning_content: Option<String>,
 }
 
 fn parse_content(m: &OaiMessage) -> Result<Vec<ContentBlock>, Response> {
@@ -192,6 +194,7 @@ fn build_messages(req: &ChatCompletionRequest) -> Result<Vec<ChatMessage>, Respo
                 role: m.role.clone(),
                 content,
                 tool_calls,
+                reasoning_content: m.reasoning_content.clone(),
             })
         })
         .collect()

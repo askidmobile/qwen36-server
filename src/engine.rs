@@ -118,12 +118,15 @@ pub enum ContentBlock {
     },
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String, // system|user|assistant|tool
     pub content: Vec<ContentBlock>,
     /// OpenAI tool_calls из истории (структурно, для chat template).
     pub tool_calls: Vec<serde_json::Value>,
+    /// reasoning_content из истории (preserve_thinking: шаблон встраивает
+    /// в <think>…</think> — модель видит свои прошлые рассуждения).
+    pub reasoning_content: Option<String>,
 }
 
 impl ChatMessage {
@@ -132,9 +135,12 @@ impl ChatMessage {
             role: role.into(),
             content: vec![ContentBlock::Text { text: text.into() }],
             tool_calls: Vec::new(),
+            reasoning_content: None,
         }
     }
 
+    /// Текст с reasoning-trace: для assistant с reasoning_content вставляем
+    /// <think>…</think> (preserve_thinking). Нужен для template и estimate.
     pub fn text_content(&self) -> String {
         self.content
             .iter()
@@ -142,7 +148,20 @@ impl ChatMessage {
                 ContentBlock::Text { text } => Some(text.as_str()),
                 ContentBlock::Media { .. } => None,
             })
-            .collect()
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Контент с reasoning (preserve_thinking): assistant + reasoning_content →
+    /// <think>…</think>\n\ncontent. Для estimate (trim) и template.
+    pub fn text_content_with_reasoning(&self) -> String {
+        let text = self.text_content();
+        match (&self.reasoning_content, self.role.as_str()) {
+            (Some(r), "assistant") if !r.is_empty() => {
+                format!("<think>\n{}\n</think>\n\n{}", r, text)
+            }
+            _ => text,
+        }
     }
 
     pub fn has_media(&self) -> bool {
@@ -364,7 +383,7 @@ impl Engine for CandleEngine {
             truncated = was_trimmed;
             let msgs_text: Vec<(&str, String)> = kept
                 .iter()
-                .map(|m| (m.role.as_str(), m.text_content()))
+                .map(|m| (m.role.as_str(), m.text_content_with_reasoning()))
                 .collect();
             let msgs: Vec<ChatMsg> = msgs_text
                 .iter()

@@ -63,7 +63,10 @@ impl ChatTemplate {
             .map(|m| {
                 let mut v = json!({
                     "role": m.role,
-                    "content": m.text_content(),
+                    // text_content_with_reasoning встраивает <think>…</think>
+                    // (preserve_thinking). Дополнительные поля (tool_calls) —
+                    // отдельно, как в шаблоне Qwen3.8.
+                    "content": m.text_content_with_reasoning(),
                 });
                 if !m.tool_calls.is_empty() {
                     v["tool_calls"] = Value::Array(m.tool_calls.clone());

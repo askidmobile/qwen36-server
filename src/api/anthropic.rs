@@ -169,6 +169,7 @@ pub async fn messages(
             role: m.role.clone(),
             content,
             tool_calls: Vec::new(),
+            reasoning_content: None,
         });
     }
 

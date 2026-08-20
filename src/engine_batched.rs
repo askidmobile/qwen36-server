@@ -403,7 +403,7 @@ impl Engine for BatchedEngine {
             let (kept, was_trimmed) = trim_messages(&messages, budget, count);
             let msgs_text: Vec<(&str, String)> = kept
                 .iter()
-                .map(|m| (m.role.as_str(), m.text_content()))
+                .map(|m| (m.role.as_str(), m.text_content_with_reasoning()))
                 .collect();
             let msgs: Vec<ChatMsg> = msgs_text
                 .iter()
