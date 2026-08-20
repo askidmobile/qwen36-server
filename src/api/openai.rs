@@ -160,6 +160,12 @@ fn to_gen_params(
         _ => None,
     };
     p.thinking = req.thinking.or(ctk).or(effort_thinking).unwrap_or(d.thinking);
+    // В режиме thinking presence_penalty ОБЯЗАН быть 0.0 (иначе модель
+    // зацикливается между синонимами из-за штрафа на уже встреченные токены
+    // рассуждения). Штраф 1.5 допустим ТОЛЬКО для прямого instruct без thinking.
+    if p.thinking && req.presence_penalty.is_none() {
+        p.presence_penalty = 0.0;
+    }
     // Пресет по уровню рассуждений — значения из .env/WebUI пресетов;
     // explicit-поля запроса приоритетнее.
     if matches!(effort, "low" | "medium" | "high" | "xhigh") {

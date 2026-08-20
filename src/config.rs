@@ -40,14 +40,14 @@ pub struct SamplingDefaults {
 impl Default for SamplingDefaults {
     fn default() -> Self {
         Self {
-            temperature: 0.7,
-            top_p: 0.80,
+            temperature: 0.6,
+            top_p: 0.95,
             top_k: 20,
             min_p: 0.0,
-            presence_penalty: 1.5,
+            presence_penalty: 0.0,
             repetition_penalty: 1.0,
             max_tokens: 32768,
-            thinking: false,
+            thinking: true,
         }
     }
 }
