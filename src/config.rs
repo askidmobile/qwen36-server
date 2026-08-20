@@ -268,7 +268,7 @@ impl Config {
             Some(profile) => profile.text_path.clone(),
             None => get_env_var("MODEL")
                 .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from("models/qwen36-27b-q2_k_xl.gguf")),
+                .unwrap_or_else(|| PathBuf::from("models/qwen36-27b-q2_k_xl.gguf")),
         };
         let presets = presets_from_env(&model)?;
         let mut cfg = Self {
