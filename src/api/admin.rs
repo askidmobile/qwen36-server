@@ -81,7 +81,7 @@ fn scan_profiles(dir: &Path, depth: usize, out: &mut Vec<Value>) {
     }
 }
 
-fn scan_gguf(dir: &Path, depth: usize, out: &mut Vec<Value>) {
+pub fn scan_gguf(dir: &Path, depth: usize, out: &mut Vec<Value>) {
     if depth > 3 {
         return;
     }
@@ -504,7 +504,7 @@ pub async fn switch_model(
         .into_response()
 }
 
-async fn do_switch(
+pub async fn do_switch(
     state: &AppState,
     path: PathBuf,
     req_ctx: usize,
