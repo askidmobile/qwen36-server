@@ -4,6 +4,7 @@ use axum::{
     response::{sse::Event, IntoResponse, Response},
     Json,
 };
+use std::sync::atomic::Ordering;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -259,6 +260,20 @@ pub async fn chat_completions(
             }
         });
         if let Some(path) = match_path {
+            // Проверяем, не идёт ли уже переключение — если да, НЕ запускаем
+            // новое (предотвращает гонки: pi шлёт несколько запросов → OOM).
+            if state.switcher.loading.swap(true, Ordering::Relaxed) {
+                // Уже идёт загрузка — просто возвращаем 503.
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({
+                        "error": {
+                            "type": "model_switching",
+                            "message": format!("Model switch in progress, please retry in a few seconds"),
+                        }
+                    })),
+                ).into_response();
+            }
             // Текущие ctx/slots из state.switcher.current.
             let (cur_path, cur_ctx, cur_slots) = state
                 .switcher
@@ -270,8 +285,7 @@ pub async fn chat_completions(
                 "[auto-switch] req.model='{}' current='{}' → switching to {}",
                 requested, current_id, path
             );
-            // Запускаем switch в фоне (не блокируем текущий запрос —
-            // он пойдёт на старую модель, но следующий уже на новую).
+            // Запускаем switch в фоне.
             let state2 = state.clone();
             tokio::spawn(async move {
                 let result = crate::api::admin::do_switch(
@@ -284,6 +298,7 @@ pub async fn chat_completions(
                 if let Err(e) = result {
                     eprintln!("[auto-switch] FAILED: {e:#}");
                 }
+                state2.switcher.loading.store(false, Ordering::Relaxed);
             });
             // Возвращаем 503 с понятным сообщением — клиент повторит.
             return (
