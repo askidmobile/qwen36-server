@@ -95,34 +95,85 @@ impl Default for SamplingPresetValues {
 
 pub type SamplingPresets = std::collections::HashMap<String, SamplingPresetValues>;
 
-pub fn default_presets() -> SamplingPresets {
+pub fn default_presets_for_model(model_name: &str) -> SamplingPresets {
+    let lower = model_name.to_lowercase();
     let mut m = SamplingPresets::new();
-    m.insert("instruct".into(), SamplingPresetValues::default());
-    m.insert(
-        "thinking".into(),
-        SamplingPresetValues {
-            temperature: 1.0,
-            top_p: 0.95,
-            presence_penalty: 0.0,
-            ..Default::default()
-        },
-    );
-    m.insert(
-        "thinking-coding".into(),
-        SamplingPresetValues {
-            temperature: 0.6,
-            top_p: 0.95,
-            presence_penalty: 0.0,
-            ..Default::default()
-        },
-    );
+
+    if lower.contains("ornith-1.5") || lower.contains("ornith_1.5") || lower.contains("ornith1.5") {
+        // Рекомендованные параметры из официального model card Ornith-1.5:
+        // - General tasks: temp=1.0, top_p=0.95, top_k=20, min_p=0.0, presence_penalty=1.5, rep_penalty=1.0
+        // - Precise coding tasks: temp=0.6, top_p=0.95, top_k=20, min_p=0.0, presence_penalty=0.0, rep_penalty=1.0
+        m.insert(
+            "thinking".into(),
+            SamplingPresetValues {
+                temperature: 1.0,
+                top_p: 0.95,
+                top_k: 20,
+                min_p: 0.0,
+                presence_penalty: 1.5,
+                repetition_penalty: 1.0,
+            },
+        );
+        m.insert(
+            "thinking-coding".into(),
+            SamplingPresetValues {
+                temperature: 0.6,
+                top_p: 0.95,
+                top_k: 20,
+                min_p: 0.0,
+                presence_penalty: 0.0,
+                repetition_penalty: 1.0,
+            },
+        );
+        m.insert(
+            "instruct".into(),
+            SamplingPresetValues {
+                temperature: 0.7,
+                top_p: 0.80,
+                top_k: 20,
+                min_p: 0.0,
+                presence_penalty: 1.5,
+                repetition_penalty: 1.0,
+            },
+        );
+    } else {
+        // Qwen3.8 / Qwen3.5 / Qwen3.6 / General LLM default:
+        m.insert("instruct".into(), SamplingPresetValues::default());
+        m.insert(
+            "thinking".into(),
+            SamplingPresetValues {
+                temperature: 1.0,
+                top_p: 0.95,
+                top_k: 20,
+                min_p: 0.0,
+                presence_penalty: 0.0,
+                repetition_penalty: 1.0,
+            },
+        );
+        m.insert(
+            "thinking-coding".into(),
+            SamplingPresetValues {
+                temperature: 0.6,
+                top_p: 0.95,
+                top_k: 20,
+                min_p: 0.0,
+                presence_penalty: 0.0,
+                repetition_penalty: 1.0,
+            },
+        );
+    }
     m
+}
+
+pub fn default_presets() -> SamplingPresets {
+    default_presets_for_model("")
 }
 
 /// QWEN36_PRESETS: JSON-объект {name: {temperature,...}} — частичный merge
 /// поверх встроенных пресетов.
-fn presets_from_env() -> Result<SamplingPresets> {
-    let mut presets = default_presets();
+fn presets_from_env(model_path: &Path) -> Result<SamplingPresets> {
+    let model_name = model_path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
+    let mut presets = default_presets_for_model(&model_name);
     if let Ok(raw) = std::env::var("QWEN36_PRESETS") {
         let overrides: SamplingPresets = serde_json::from_str(&raw)
             .map_err(|e| anyhow!("QWEN36_PRESETS: невалидный JSON: {e}"))?;
@@ -223,7 +274,7 @@ impl Config {
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| std::env::temp_dir().join("qwen36-media")),
             sampling: SamplingDefaults::from_env()?,
-            presets: presets_from_env()?,
+            presets: presets_from_env(&model)?,
             env_file,
         };
         cfg.apply_vram_plan()?;

@@ -457,7 +457,10 @@ async function loadModels() {
         const d = m.sampling_defaults;
         for (const k of PARAM_IDS) if (d[k] !== undefined) $("p_" + k).value = d[k];
       }
-      if (m.sampling_presets) Object.assign(SERVER_PRESETS, m.sampling_presets);
+      if (m.sampling_presets) {
+        Object.assign(SERVER_PRESETS, m.sampling_presets);
+        applyPreset($("mode").value);
+      }
       if (m.context_length) ctxLen = m.context_length;
       if (m.id) modelId = m.id;
       $("modelinfo").textContent =

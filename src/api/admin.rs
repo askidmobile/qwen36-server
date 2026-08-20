@@ -608,6 +608,12 @@ async fn do_switch(
         "[switch] loaded: id={} ctx={} slots={}",
         info.id, info.context_length, info.slots
     );
+    // Обновляем пресеты сэмплинга под специфику загруженной модели (например, Ornith 1.5 vs Qwen 3.8)
+    let model_name = path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
+    let model_presets = crate::config::default_presets_for_model(&model_name);
+    if let Ok(mut p) = state.presets.write() {
+        *p = model_presets;
+    }
     state.switcher.install(engine, path, ctx, slots);
     Ok(())
 }
