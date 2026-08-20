@@ -56,14 +56,14 @@ impl SamplingDefaults {
     fn from_env() -> Result<Self> {
         let d = Self::default();
         Ok(Self {
-            temperature: parse_env("QWEN36_TEMPERATURE", d.temperature)?,
-            top_p: parse_env("QWEN36_TOP_P", d.top_p)?,
-            top_k: parse_env("QWEN36_TOP_K", d.top_k)?,
-            min_p: parse_env("QWEN36_MIN_P", d.min_p)?,
-            presence_penalty: parse_env("QWEN36_PRESENCE_PENALTY", d.presence_penalty)?,
-            repetition_penalty: parse_env("QWEN36_REPETITION_PENALTY", d.repetition_penalty)?,
-            max_tokens: parse_env("QWEN36_MAX_TOKENS", d.max_tokens)?,
-            thinking: parse_env("QWEN36_THINKING", d.thinking)?,
+            temperature: parse_env("TEMPERATURE", d.temperature)?,
+            top_p: parse_env("TOP_P", d.top_p)?,
+            top_k: parse_env("TOP_K", d.top_k)?,
+            min_p: parse_env("MIN_P", d.min_p)?,
+            presence_penalty: parse_env("PRESENCE_PENALTY", d.presence_penalty)?,
+            repetition_penalty: parse_env("REPETITION_PENALTY", d.repetition_penalty)?,
+            max_tokens: parse_env("MAX_TOKENS", d.max_tokens)?,
+            thinking: parse_env("THINKING", d.thinking)?,
         })
     }
 }
@@ -101,8 +101,10 @@ pub fn default_presets_for_model(model_name: &str) -> SamplingPresets {
 
     if lower.contains("ornith-1.5") || lower.contains("ornith_1.5") || lower.contains("ornith1.5") {
         // Рекомендованные параметры из официального model card Ornith-1.5:
-        // - General tasks: temp=1.0, top_p=0.95, top_k=20, min_p=0.0, presence_penalty=1.5, rep_penalty=1.0
-        // - Precise coding tasks: temp=0.6, top_p=0.95, top_k=20, min_p=0.0, presence_penalty=0.0, rep_penalty=1.0
+        // - Thinking mode for general tasks: temp=1.0, top_p=0.95, top_k=20, min_p=0.0, presence_penalty=1.5, rep_penalty=1.0
+        // - Thinking mode for precise coding tasks (WebDev): temp=0.6, top_p=0.95, top_k=20, min_p=0.0, presence_penalty=0.0, rep_penalty=1.0
+        // - Instruct mode for general tasks: temp=0.7, top_p=0.80, top_k=20, min_p=0.0, presence_penalty=1.5, rep_penalty=1.0
+        // - Instruct mode for reasoning tasks: temp=1.0, top_p=0.95, top_k=20, min_p=0.0, presence_penalty=1.5, rep_penalty=1.0
         m.insert(
             "thinking".into(),
             SamplingPresetValues {
@@ -130,6 +132,17 @@ pub fn default_presets_for_model(model_name: &str) -> SamplingPresets {
             SamplingPresetValues {
                 temperature: 0.7,
                 top_p: 0.80,
+                top_k: 20,
+                min_p: 0.0,
+                presence_penalty: 1.5,
+                repetition_penalty: 1.0,
+            },
+        );
+        m.insert(
+            "instruct-reasoning".into(),
+            SamplingPresetValues {
+                temperature: 1.0,
+                top_p: 0.95,
                 top_k: 20,
                 min_p: 0.0,
                 presence_penalty: 1.5,
@@ -174,9 +187,9 @@ pub fn default_presets() -> SamplingPresets {
 fn presets_from_env(model_path: &Path) -> Result<SamplingPresets> {
     let model_name = model_path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
     let mut presets = default_presets_for_model(&model_name);
-    if let Ok(raw) = std::env::var("QWEN36_PRESETS") {
+    if let Some(raw) = get_env_var("PRESETS") {
         let overrides: SamplingPresets = serde_json::from_str(&raw)
-            .map_err(|e| anyhow!("QWEN36_PRESETS: невалидный JSON: {e}"))?;
+            .map_err(|e| anyhow!("PRESETS: невалидный JSON: {e}"))?;
         presets.extend(overrides);
     }
     Ok(presets)
@@ -229,22 +242,21 @@ impl Config {
     }
 
     fn from_env_with_path(env_file: PathBuf) -> Result<Self> {
-        let api_keys =
-            parse_api_keys(&std::env::var("QWEN36_API_KEYS").map_err(|_| {
-                anyhow!("QWEN36_API_KEYS обязателен: JSON-массив объектов key/name")
-            })?)?;
-        let prefix_cache_mib = parse_env("QWEN36_PREFIX_CACHE_MIB", 0usize)?;
+        let api_keys_raw = get_env_var("API_KEYS")
+            .ok_or_else(|| anyhow!("API_KEYS (или QWEN36_API_KEYS) обязателен: JSON-массив объектов key/name"))?;
+        let api_keys = parse_api_keys(&api_keys_raw)?;
+        let prefix_cache_mib = parse_env("PREFIX_CACHE_MIB", 0usize)?;
         if prefix_cache_mib != 0 {
-            anyhow::bail!("prefix cache temporarily disabled (QWEN36_PREFIX_CACHE_MIB must be 0)");
+            anyhow::bail!("prefix cache temporarily disabled (PREFIX_CACHE_MIB must be 0)");
         }
-        let profile = std::env::var("QWEN36_PROFILE").ok().map(PathBuf::from);
+        let profile = get_env_var("PROFILE").map(PathBuf::from);
         let resolved_profile = profile
             .as_deref()
             .map(crate::profile::ResolvedProfile::load)
             .transpose()
             .with_context(|| {
                 format!(
-                    "QWEN36_PROFILE {}",
+                    "PROFILE {}",
                     profile
                         .as_deref()
                         .unwrap_or_else(|| Path::new(""))
@@ -254,7 +266,7 @@ impl Config {
             .map(std::sync::Arc::new);
         let model = match &resolved_profile {
             Some(profile) => profile.text_path.clone(),
-            None => std::env::var("QWEN36_MODEL")
+            None => get_env_var("MODEL")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from("models/qwen36-27b-q2_k_xl.gguf")),
         };
@@ -263,17 +275,17 @@ impl Config {
             profile,
             resolved_profile,
             model,
-            host: std::env::var("QWEN36_HOST").unwrap_or_else(|_| "0.0.0.0".into()),
-            port: parse_env("QWEN36_PORT", 8080u16)?,
+            host: get_env_var("HOST").unwrap_or_else(|| "0.0.0.0".into()),
+            port: parse_env("PORT", 18099u16)?,
             api_keys,
-            ctx: parse_env("QWEN36_CTX", 81920usize)?,
-            slots: parse_env("QWEN36_SLOTS", 4usize)?,
+            ctx: parse_env("CTX", 131072usize)?,
+            slots: parse_env("SLOTS", 4usize)?,
             kv_budget_mib: 0.0,
             kv_per_tok_mib: 0.0,
             prefix_cache_mib,
-            media_temp: std::env::var("QWEN36_MEDIA_TEMP")
+            media_temp: get_env_var("MEDIA_TEMP")
                 .map(PathBuf::from)
-                .unwrap_or_else(|_| std::env::temp_dir().join("qwen36-media")),
+                .unwrap_or_else(|| std::env::temp_dir().join("yttri-media")),
             sampling: SamplingDefaults::from_env()?,
             presets,
             env_file,
@@ -376,15 +388,22 @@ fn valid_env_name(name: &str) -> bool {
         && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
+fn get_env_var(name: &str) -> Option<String> {
+    std::env::var(name)
+        .or_else(|_| std::env::var(format!("QWEN36_{name}")))
+        .or_else(|_| std::env::var(format!("YTTRI_{name}")))
+        .ok()
+}
+
 fn parse_env<T: std::str::FromStr>(name: &str, default: T) -> Result<T>
 where
     T::Err: std::fmt::Display,
 {
-    match std::env::var(name) {
-        Ok(v) => v
+    match get_env_var(name) {
+        Some(v) => v
             .parse()
             .map_err(|e: T::Err| anyhow!("{name}: некорректное значение {v:?}: {e}")),
-        Err(_) => Ok(default),
+        None => Ok(default),
     }
 }
 

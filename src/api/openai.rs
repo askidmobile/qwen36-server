@@ -103,51 +103,7 @@ fn to_gen_params(
     d: &crate::config::SamplingDefaults,
     presets: &crate::config::SamplingPresets,
 ) -> GenParams {
-    // База — дефолты из .env (QWEN36_*), не хардкод; поля запроса перекрывают.
-    let mut p = GenParams {
-        temperature: d.temperature,
-        top_p: d.top_p,
-        top_k: d.top_k,
-        min_p: d.min_p,
-        presence_penalty: d.presence_penalty,
-        repetition_penalty: d.repetition_penalty,
-        max_tokens: d.max_tokens,
-        thinking: d.thinking,
-        ..GenParams::default()
-    };
-    if let Some(t) = req.temperature {
-        p.temperature = t;
-    }
-    if let Some(t) = req.top_p {
-        p.top_p = t;
-    }
-    if let Some(k) = req.top_k {
-        p.top_k = k;
-    }
-    if let Some(m) = req.min_p {
-        p.min_p = m;
-    }
-    if let Some(penalty) = req.presence_penalty {
-        p.presence_penalty = penalty;
-    }
-    if let Some(penalty) = req.repetition_penalty {
-        p.repetition_penalty = penalty;
-    }
-    p.seed = req.seed;
-    if let Some(m) = req.max_tokens {
-        p.max_tokens = m;
-    }
-    if let Some(stop) = &req.stop {
-        match stop {
-            Value::String(s) => p.stop.push(s.clone()),
-            Value::Array(arr) => p
-                .stop
-                .extend(arr.iter().filter_map(|v| v.as_str().map(String::from))),
-            _ => {}
-        }
-    }
-    // thinking: прямой флаг приоритетнее chat_template_kwargs; default из .env.
-    // reasoning_effort: none → выкл; low/medium/high/xhigh → вкл (+пресет ниже).
+    // 1. Определяем флаг thinking и уровень рассуждений (reasoning_effort)
     let ctk = req
         .chat_template_kwargs
         .as_ref()
@@ -159,31 +115,83 @@ fn to_gen_params(
         "low" | "medium" | "high" | "xhigh" => Some(true),
         _ => None,
     };
-    p.thinking = req.thinking.or(ctk).or(effort_thinking).unwrap_or(d.thinking);
-    // В режиме thinking presence_penalty ОБЯЗАН быть 0.0 (иначе модель
-    // зацикливается между синонимами из-за штрафа на уже встреченные токены
-    // рассуждения). Штраф 1.5 допустим ТОЛЬКО для прямого instruct без thinking.
-    if p.thinking && req.presence_penalty.is_none() {
-        p.presence_penalty = 0.0;
-    }
-    // Пресет по уровню рассуждений — значения из .env/WebUI пресетов;
-    // explicit-поля запроса приоритетнее.
-    if matches!(effort, "low" | "medium" | "high" | "xhigh") {
-        let preset_name = if matches!(effort, "high" | "xhigh") {
+    let thinking = req.thinking.or(ctk).or(effort_thinking).unwrap_or(d.thinking);
+
+    // 2. Выбираем базовый пресет сэмплинга в зависимости от режима:
+    let preset_name = if thinking {
+        if matches!(effort, "high" | "xhigh") {
             "thinking-coding"
         } else {
             "thinking"
-        };
+        }
+    } else {
+        "instruct"
+    };
+
+    // 3. Базовые параметры: пресет модели или дефолты из .env
+    let (mut temp, mut top_p, mut top_k, mut min_p, mut presence_p, mut rep_p) =
         if let Some(pv) = presets.get(preset_name) {
-            if req.temperature.is_none() { p.temperature = pv.temperature; }
-            if req.top_p.is_none() { p.top_p = pv.top_p; }
-            if req.top_k.is_none() { p.top_k = pv.top_k; }
-            if req.min_p.is_none() { p.min_p = pv.min_p; }
-            if req.presence_penalty.is_none() { p.presence_penalty = pv.presence_penalty; }
-            if req.repetition_penalty.is_none() { p.repetition_penalty = pv.repetition_penalty; }
+            (
+                pv.temperature,
+                pv.top_p,
+                pv.top_k,
+                pv.min_p,
+                pv.presence_penalty,
+                pv.repetition_penalty,
+            )
+        } else {
+            (
+                d.temperature,
+                d.top_p,
+                d.top_k,
+                d.min_p,
+                d.presence_penalty,
+                d.repetition_penalty,
+            )
+        };
+
+    // 4. НАИВЫСШИЙ ПРИОРИТЕТ: явные параметры из запроса клиента (pi, WebUI, curl)
+    if let Some(t) = req.temperature {
+        temp = t;
+    }
+    if let Some(t) = req.top_p {
+        top_p = t;
+    }
+    if let Some(k) = req.top_k {
+        top_k = k;
+    }
+    if let Some(m) = req.min_p {
+        min_p = m;
+    }
+    if let Some(penalty) = req.presence_penalty {
+        presence_p = penalty;
+    }
+    if let Some(penalty) = req.repetition_penalty {
+        rep_p = penalty;
+    }
+
+    let mut stop_list = Vec::new();
+    if let Some(stop) = &req.stop {
+        match stop {
+            Value::String(s) => stop_list.push(s.clone()),
+            Value::Array(arr) => stop_list
+                .extend(arr.iter().filter_map(|v| v.as_str().map(String::from))),
+            _ => {}
         }
     }
-    p
+
+    GenParams {
+        temperature: temp,
+        top_p,
+        top_k,
+        min_p,
+        presence_penalty: presence_p,
+        repetition_penalty: rep_p,
+        max_tokens: req.max_tokens.unwrap_or(d.max_tokens),
+        stop: stop_list,
+        seed: req.seed,
+        thinking,
+    }
 }
 
 fn build_messages(req: &ChatCompletionRequest) -> Result<Vec<ChatMessage>, Response> {
