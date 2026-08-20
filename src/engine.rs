@@ -107,7 +107,8 @@ pub enum MediaSource {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content")]
 pub enum ContentBlock {
     Text {
         text: String,
