@@ -1,5 +1,6 @@
 use axum::{
     extract::{Extension, State},
+    http::StatusCode,
     response::{sse::Event, IntoResponse, Response},
     Json,
 };
@@ -225,7 +226,7 @@ pub async fn chat_completions(
     // Авто-переключение модели: если req.model не совпадает с текущей —
     // ищем GGUF по имени в available_models и запускаем switch_model.
     let current_id = state.engine.model_info().id;
-    let requested = req.model.trim().to_lowercase();
+    let requested = req.model.as_deref().unwrap_or("").trim().to_lowercase();
     if !requested.is_empty() && requested != current_id.to_lowercase() {
         // Ищем matching GGUF в models_dir.
         let mut found: Vec<Value> = Vec::new();
