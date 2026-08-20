@@ -6,84 +6,93 @@
 
 ---
 
-## 🇷🇺 Инструкция на русском языке
+## 🇷🇺 Конфигурация и параметры запуска (.env)
 
-### Возможности
-- **Поддержка архитектур**: Qwen 3.5 (4B/9B), Qwen 3.6 (35B-A3B MoE), Qwen 3.8 (27B), Ornith 1.0/1.5 (9B/35B).
-- **Совместимость с OpenAI & Anthropic API**: Эндпоинты `/v1/chat/completions`, `/v1/responses`, `/v1/messages`.
-- **Автоматическое переключение моделей (Hot-Switching)**: Сервер автоматически переключает модель при поступлении запроса с другим `model` id.
-- **Официальный Jinja Chat Template**: Рендеринг встроенного шаблона из GGUF с поддержкой `reasoning_effort` (`low`/`medium`/`xhigh`), `preserve_thinking` и вызова инструментов (tool calling).
-- **Встроенный WebUI**: Современный интерфейс со сплиттером мышления, live-счетчиком tok/s, управлением сервером и интеграцией с Hugging Face.
-- **Поддержка квантов**: Q4_K_M, Q5_K_M, Q6_K, Q8_0, IQ2_XXS, IQ3_M, IQ4_XS.
-
----
-
-### Требования к системе
-- **ОС**: Windows 10/11 x64, Linux (Ubuntu 22.04+), macOS (Apple Silicon).
-- **GPU**: NVIDIA GPU с CUDA Compute Capability ≥ 8.0 (RTX 3060/3070/3080/4090 и др., CUDA 12.4+). Для macOS — Apple Silicon (Metal).
-- **Инструменты**: 
-  - Rust stable (1.80+)
-  - Python 3.10+
-  - CMake & MSVC C++ Build Tools (на Windows) / gcc & g++ (на Linux)
-
----
-
-### Быстрый старт
-
-#### 1. Клонирование репозитория
-```bash
-git clone https://github.com/askidmobile/qwen36-server.git
-cd qwen36-server
-```
-
-#### 2. Настройка конфигурации (.env)
-Создайте файл `.env` в корневой директории проекта (см. `.env.example`):
+Сервер поддерживает чистые имена переменных (без устаревшего префикса `QWEN36_`, но сохраняет полную обратную совместимость с ним).
 
 ```env
-# Именованные API-ключи для авторизации
-QWEN36_API_KEYS='[{"key":"yttri-secret-key-12345","name":"admin"}]'
+# ==============================================================================
+# 1. СЕТЬ И АВТОРИЗАЦИЯ
+# ==============================================================================
+# JSON-массив авторизованных API-ключей и их клиентов
+API_KEYS='[{"key":"yttri-api-Grt6l4bjIm-97jkoPxFFq4FGpiCmkn3ZUULIjYPc8Tg","name":"primary"}]'
+# IP-адрес для прослушивания (0.0.0.0 — доступен в локальной сети)
+HOST=0.0.0.0
+# Порт сервера
+PORT=18099
 
-# Путь к стартовой GGUF-модели
-QWEN36_MODEL=D:\Models\deepreinforce-ai\Ornith-1.5-9B-GGUF\Ornith-1.5-9B-Q6_K.gguf
+# ==============================================================================
+# 2. ПУТИ К МОДЕЛЯМ
+# ==============================================================================
+# Путь к стартовому файлу GGUF-модели
+MODEL=D:\Models\deepreinforce-ai\Ornith-1.5-9B-GGUF\Ornith-1.5-9B-Q6_K.gguf
+# Корневая папка с локальными моделями для сканирования и авто-переключения
+MODELS_DIR=D:\Models
 
-# Директория с локальными моделями для сканирования и авто-переключения
-QWEN36_MODELS_DIR=D:\Models
+# ==============================================================================
+# 3. ПАМЯТЬ И ПРОИЗВОДИТЕЛЬНОСТЬ
+# ==============================================================================
+# Размер контекстного окна в токенах (131072 = 128K)
+CTX=131072
+# Количество параллельных непрерывных слотов инференса (1..4)
+SLOTS=4
+# Максимальное число генерируемых токенов по умолчанию
+MAX_TOKENS=32768
+# Включение спекулятивного декодинга MTP (0 = выкл, 1 = вкл)
+MTP=0
+# Таймаут запроса в секундах
+REQ_TIMEOUT=600
 
-# Сетевые параметры
-QWEN36_HOST=0.0.0.0
-QWEN36_PORT=18099
-
-# Контекстное окно и количество параллельных слотов
-QWEN36_CTX=131072
-QWEN36_SLOTS=4
-QWEN36_MAX_TOKENS=32768
-
-# Дефолтные параметры сэмплинга
-QWEN36_TEMPERATURE=0.6
-QWEN36_TOP_P=0.95
-QWEN36_TOP_K=20
-QWEN36_MIN_P=0.0
-QWEN36_PRESENCE_PENALTY=0.0
-QWEN36_REPETITION_PENALTY=1.0
-QWEN36_THINKING=true
+# ==============================================================================
+# 4. ДЕФОЛТНЫЕ ПАРАМЕТРЫ СЭМПЛИНГА (OpenAI-стандарт)
+# Примечание: Любой параметр, переданный клиентом в запросе, имеет наивысший приоритет!
+# ==============================================================================
+# Температура сэмплинга (0.6 для точного кодинга, 1.0 для общих задач)
+TEMPERATURE=0.6
+# Nucleus sampling порог
+TOP_P=0.95
+# Top-K фильтрация (топ наиболее вероятных токенов)
+TOP_K=20
+# Min-P фильтрация относительно вероятности лучшего токена
+MIN_P=0.0
+# Штраф за присутствие (0.0 в режиме рассуждений для предотвращения зацикливаний!)
+PRESENCE_PENALTY=0.0
+# Штраф за повторение
+REPETITION_PENALTY=1.0
+# Режим рассуждений по умолчанию (true = <think>...</think>, false = прямой ответ)
+THINKING=true
 ```
 
-#### 3. Сборка и запуск
+---
 
-##### Windows (CUDA):
+## 🇷🇺 Режимы сэмплинга моделей (Official Model Cards)
+
+### 🐦 Ornith 1.5 (9B / 35B)
+1. **Thinking mode for precise coding tasks (WebDev / Agentic)**:
+   - `temperature = 0.6`, `top_p = 0.95`, `top_k = 20`, `min_p = 0.0`, `presence_penalty = 0.0`, `repetition_penalty = 1.0`
+2. **Thinking mode for general tasks**:
+   - `temperature = 1.0`, `top_p = 0.95`, `top_k = 20`, `min_p = 0.0`, `presence_penalty = 1.5`, `repetition_penalty = 1.0`
+3. **Instruct (non-thinking) mode**:
+   - `temperature = 0.7`, `top_p = 0.80`, `top_k = 20`, `min_p = 0.0`, `presence_penalty = 1.5`, `repetition_penalty = 1.0`
+
+---
+
+## 🇷🇺 Быстрый старт и сборка
+
+### Windows (CUDA 12.4+):
 ```cmd
 call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=x64
 cargo build --release --features cuda
 target\release\qwen36-server.exe
 ```
 
-##### Linux (CUDA):
+### Linux (CUDA):
 ```bash
 cargo build --release --features cuda
 ./target/release/qwen36-server
 ```
 
-##### macOS (Apple Silicon Metal):
+### macOS (Apple Silicon Metal):
 ```bash
 cargo build --release --features metal
 ./target/release/qwen36-server
@@ -91,173 +100,31 @@ cargo build --release --features metal
 
 ---
 
-### Подключение клиентов (pi-coding-agent / Cline / OpenCode)
-
-Добавьте в `~/.pi/agent/models.json`:
-
-```json
-{
-  "providers": {
-    "yttri-local": {
-      "baseUrl": "http://127.0.0.1:18099/v1",
-      "api": "openai-completions",
-      "apiKey": "yttri-secret-key-12345",
-      "compat": {
-        "supportsDeveloperRole": false,
-        "supportsReasoningEffort": false,
-        "thinkingFormat": "qwen-chat-template"
-      },
-      "models": [
-        {
-          "id": "ornith-1.5-9b",
-          "name": "Ornith 1.5 9B Q6_K",
-          "reasoning": true,
-          "input": ["text", "image"],
-          "contextWindow": 131072,
-          "maxTokens": 32768
-        },
-        {
-          "id": "qwen3.8-27b",
-          "name": "Qwen3.8 27B",
-          "reasoning": true,
-          "input": ["text"],
-          "contextWindow": 131072,
-          "maxTokens": 32768
-        }
-      ]
-    }
-  }
-}
-```
-
----
----
-
-## 🇬🇧 English Documentation
-
-### Features
-- **Supported Architectures**: Qwen 3.5 (4B/9B), Qwen 3.6 (35B-A3B MoE), Qwen 3.8 (27B), Ornith 1.0/1.5 (9B/35B).
-- **OpenAI & Anthropic API Compatible**: `/v1/chat/completions`, `/v1/responses`, `/v1/messages`.
-- **Automatic Model Hot-Switching**: The server automatically switches models on incoming requests when the requested `model` changes.
-- **Native GGUF Jinja Chat Template**: Uses embedded Jinja chat templates with `reasoning_effort` (`low`/`medium`/`xhigh`), `preserve_thinking`, and tool calling support.
-- **Built-in WebUI**: Web interface with thought-folding, live tok/s counters, server management panel, and Hugging Face GGUF downloader.
-- **Supported Quant Types**: Q4_K_M, Q5_K_M, Q6_K, Q8_0, IQ2_XXS, IQ3_M, IQ4_XS.
-
----
-
-### Prerequisites
-- **OS**: Windows 10/11 x64, Linux (Ubuntu 22.04+), macOS (Apple Silicon).
-- **GPU**: NVIDIA GPU with CUDA Compute Capability ≥ 8.0 (RTX 3060/3070/3080/4090, CUDA 12.4+). macOS requires Apple Silicon (Metal).
-- **Tools**:
-  - Rust stable (1.80+)
-  - Python 3.10+
-  - CMake & MSVC C++ Build Tools (Windows) / gcc & g++ (Linux)
-
----
-
-### Quick Start
-
-#### 1. Clone the repository
-```bash
-git clone https://github.com/askidmobile/qwen36-server.git
-cd qwen36-server
-```
-
-#### 2. Configure environment (.env)
-Create a `.env` file in the root directory:
+## 🇬🇧 English Configuration (.env)
 
 ```env
-# Named API keys for client authorization
-QWEN36_API_KEYS='[{"key":"yttri-secret-key-12345","name":"admin"}]'
+# Authentication & Network
+API_KEYS='[{"key":"your-api-key","name":"primary"}]'
+HOST=0.0.0.0
+PORT=18099
 
-# Path to the initial GGUF model
-QWEN36_MODEL=D:\Models\deepreinforce-ai\Ornith-1.5-9B-GGUF\Ornith-1.5-9B-Q6_K.gguf
+# Model paths
+MODEL=D:\Models\deepreinforce-ai\Ornith-1.5-9B-GGUF\Ornith-1.5-9B-Q6_K.gguf
+MODELS_DIR=D:\Models
 
-# Directory containing local models for scanning and auto-switching
-QWEN36_MODELS_DIR=D:\Models
+# Compute & Context
+CTX=131072
+SLOTS=4
+MAX_TOKENS=32768
+MTP=0
+REQ_TIMEOUT=600
 
-# Network options
-QWEN36_HOST=0.0.0.0
-QWEN36_PORT=18099
-
-# Context length and continuous batch slots
-QWEN36_CTX=131072
-QWEN36_SLOTS=4
-QWEN36_MAX_TOKENS=32768
-
-# Default sampling parameters
-QWEN36_TEMPERATURE=0.6
-QWEN36_TOP_P=0.95
-QWEN36_TOP_K=20
-QWEN36_MIN_P=0.0
-QWEN36_PRESENCE_PENALTY=0.0
-QWEN36_REPETITION_PENALTY=1.0
-QWEN36_THINKING=true
+# Sampling Defaults
+TEMPERATURE=0.6
+TOP_P=0.95
+TOP_K=20
+MIN_P=0.0
+PRESENCE_PENALTY=0.0
+REPETITION_PENALTY=1.0
+THINKING=true
 ```
-
-#### 3. Build and Run
-
-##### Windows (CUDA):
-```cmd
-call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=x64
-cargo build --release --features cuda
-target\release\qwen36-server.exe
-```
-
-##### Linux (CUDA):
-```bash
-cargo build --release --features cuda
-./target/release/qwen36-server
-```
-
-##### macOS (Apple Silicon Metal):
-```bash
-cargo build --release --features metal
-./target/release/qwen36-server
-```
-
----
-
-### Connecting Agents & Coding Assistants
-
-Add to your `~/.pi/agent/models.json` (or equivalent client configuration):
-
-```json
-{
-  "providers": {
-    "yttri-local": {
-      "baseUrl": "http://127.0.0.1:18099/v1",
-      "api": "openai-completions",
-      "apiKey": "yttri-secret-key-12345",
-      "compat": {
-        "supportsDeveloperRole": false,
-        "supportsReasoningEffort": false,
-        "thinkingFormat": "qwen-chat-template"
-      },
-      "models": [
-        {
-          "id": "ornith-1.5-9b",
-          "name": "Ornith 1.5 9B Q6_K",
-          "reasoning": true,
-          "input": ["text", "image"],
-          "contextWindow": 131072,
-          "maxTokens": 32768
-        },
-        {
-          "id": "qwen3.8-27b",
-          "name": "Qwen3.8 27B",
-          "reasoning": true,
-          "input": ["text"],
-          "contextWindow": 131072,
-          "maxTokens": 32768
-        }
-      ]
-    }
-  }
-}
-```
-
----
-
-### License
-Dual-licensed under MIT and Apache 2.0.
