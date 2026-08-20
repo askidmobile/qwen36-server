@@ -258,6 +258,7 @@ impl Config {
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from("models/qwen36-27b-q2_k_xl.gguf")),
         };
+        let presets = presets_from_env(&model)?;
         let mut cfg = Self {
             profile,
             resolved_profile,
@@ -274,7 +275,7 @@ impl Config {
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| std::env::temp_dir().join("qwen36-media")),
             sampling: SamplingDefaults::from_env()?,
-            presets: presets_from_env(&model)?,
+            presets,
             env_file,
         };
         cfg.apply_vram_plan()?;
