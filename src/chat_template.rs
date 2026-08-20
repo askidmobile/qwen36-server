@@ -25,20 +25,64 @@ fn preprocess(tpl: &str) -> String {
         .replace(".endswith(", " is endswith(")
 }
 
-fn python_mapping_get(
+fn python_method_callback(
     value: &minijinja::Value,
     method: &str,
     args: &[minijinja::Value],
 ) -> Result<minijinja::Value, Error> {
-    if value.kind() != ValueKind::Map || method != "get" || !(1..=2).contains(&args.len()) {
-        return Err(Error::from(ErrorKind::UnknownMethod));
+    // Python mapping.get(key[, default])
+    if value.kind() == ValueKind::Map && method == "get" && (1..=2).contains(&args.len()) {
+        let found = value.get_item(&args[0])?;
+        if found.is_undefined() && args.len() == 2 {
+            return Ok(args[1].clone());
+        }
+        return Ok(found);
     }
-    let found = value.get_item(&args[0])?;
-    if found.is_undefined() && args.len() == 2 {
-        Ok(args[1].clone())
-    } else {
-        Ok(found)
+    // Python str.split([sep[, maxsplit]]) — без аргументов splits on whitespace
+    if value.kind() == ValueKind::String {
+        if let Some(s) = value.as_str() {
+            let s: &str = s;
+            match method {
+                "split" => {
+                    let sep = args.first().and_then(|a| a.as_str());
+                    let maxsplit: i64 = args.get(1).and_then(|a| a.as_i64()).unwrap_or(-1);
+                    let parts: Vec<minijinja::Value> = if let Some(sep) = sep {
+                        let mut iter = s.splitn(maxsplit.max(0) as usize + 1, sep);
+                        let mut v = Vec::new();
+                        while let Some(p) = iter.next() {
+                            v.push(minijinja::Value::from(p));
+                        }
+                        v
+                    } else {
+                        s.split_whitespace().map(minijinja::Value::from).collect()
+                    };
+                    return Ok(minijinja::Value::from(parts));
+                }
+                "strip" => {
+                    if args.is_empty() {
+                        return Ok(minijinja::Value::from(s.trim()));
+                    }
+                }
+                "replace" if args.len() == 2 => {
+                    let from = args[0].as_str().unwrap_or("");
+                    let to = args[1].as_str().unwrap_or("");
+                    return Ok(minijinja::Value::from(s.replace(from, to)));
+                }
+                "startswith" if args.len() == 1 => {
+                    return Ok(minijinja::Value::from(
+                        s.starts_with(args[0].as_str().unwrap_or(""))
+                    ));
+                }
+                "endswith" if args.len() == 1 => {
+                    return Ok(minijinja::Value::from(
+                        s.ends_with(args[0].as_str().unwrap_or(""))
+                    ));
+                }
+                _ => {}
+            }
+        }
     }
+    Err(Error::from(ErrorKind::UnknownMethod))
 }
 
 impl ChatTemplate {
@@ -78,7 +122,7 @@ impl ChatTemplate {
         });
         env.add_test("endswith", |v: String, suffix: String| v.ends_with(&suffix));
         env.set_unknown_method_callback(|_, value, method, args| {
-            python_mapping_get(value, method, args)
+            python_method_callback(value, method, args)
         });
         // ponytail: leak источника шаблона — Environment<'static> требует 'static
         // источник. Шаблонов несколько штук за жизнь процесса, утечка ~10KB каждый.
@@ -158,10 +202,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn python_mapping_get_works_in_official_templates() {
+    fn python_method_callback_works_in_official_templates() {
         let mut env = Environment::new();
         env.set_unknown_method_callback(|_, value, method, args| {
-            python_mapping_get(value, method, args)
+            python_method_callback(value, method, args)
         });
         env.add_template(
             "test",
