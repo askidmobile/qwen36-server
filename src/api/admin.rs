@@ -98,9 +98,7 @@ pub fn scan_gguf(dir: &Path, depth: usize, out: &mut Vec<Value>) {
             if is_split_part(name) || name.starts_with("mmproj") {
                 continue;
             }
-            // Пропускаем файлы, которые прямо сейчас докачиваются (mtime < 30s):
-            // частичный GGUF валиден по заголовку, но тензоры = мусор
-            // (поймано: чат выдавал token ids вместо текста).
+            // Пропускаем файлы, которые прямо сейчас докачиваются (mtime < 30s)
             if let Ok(meta) = e.metadata() {
                 if let Ok(mtime) = meta.modified() {
                     if mtime.elapsed().map(|d| d.as_secs() < 30).unwrap_or(false) {
@@ -108,11 +106,18 @@ pub fn scan_gguf(dir: &Path, depth: usize, out: &mut Vec<Value>) {
                     }
                 }
             }
+            // Быстрая проверка совместимости по имени файла: наш сервер оптимизирован
+            // под архитектуры Qwen 3.5 / 3.6 / 3.8 и Ornith 1.0 / 1.5.
+            // Модели сторонних архитектур (Gemma, GPT-OSS) помечаем флагом supported=false.
+            let lower = name.to_lowercase();
+            let is_supported = lower.contains("qwen") || lower.contains("ornith");
+
             let size_mib = e.metadata().map(|m| m.len() / 1024 / 1024).unwrap_or(0);
             out.push(json!({
                 "name": name,
                 "path": p.to_string_lossy(),
                 "size_mib": size_mib,
+                "supported": is_supported,
             }));
         }
     }
