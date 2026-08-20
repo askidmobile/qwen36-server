@@ -250,14 +250,14 @@ pub async fn sampling_defaults(
 
 fn persist_sampling(path: &std::path::Path, d: &crate::config::SamplingDefaults) -> anyhow::Result<()> {
     let keys: Vec<(String, String)> = vec![
-        ("QWEN36_TEMPERATURE".into(), d.temperature.to_string()),
-        ("QWEN36_TOP_P".into(), d.top_p.to_string()),
-        ("QWEN36_TOP_K".into(), d.top_k.to_string()),
-        ("QWEN36_MIN_P".into(), d.min_p.to_string()),
-        ("QWEN36_PRESENCE_PENALTY".into(), d.presence_penalty.to_string()),
-        ("QWEN36_REPETITION_PENALTY".into(), d.repetition_penalty.to_string()),
-        ("QWEN36_MAX_TOKENS".into(), d.max_tokens.to_string()),
-        ("QWEN36_THINKING".into(), d.thinking.to_string()),
+        ("TEMPERATURE".into(), d.temperature.to_string()),
+        ("TOP_P".into(), d.top_p.to_string()),
+        ("TOP_K".into(), d.top_k.to_string()),
+        ("MIN_P".into(), d.min_p.to_string()),
+        ("PRESENCE_PENALTY".into(), d.presence_penalty.to_string()),
+        ("REPETITION_PENALTY".into(), d.repetition_penalty.to_string()),
+        ("MAX_TOKENS".into(), d.max_tokens.to_string()),
+        ("THINKING".into(), d.thinking.to_string()),
     ];
     let existing = std::fs::read_to_string(path).unwrap_or_default();
     let mut seen = std::collections::HashSet::new();
@@ -265,9 +265,11 @@ fn persist_sampling(path: &std::path::Path, d: &crate::config::SamplingDefaults)
         .lines()
         .map(|line| {
             let name = line.split('=').next().unwrap_or("").trim();
-            if let Some((_, v)) = keys.iter().find(|(k, _)| k == name) {
-                seen.insert(name.to_string());
-                format!("{name}={v}")
+            // Очищаем и старый префикс QWEN36_ если встречаем
+            let pure_name = name.strip_prefix("QWEN36_").unwrap_or(name);
+            if let Some((k, v)) = keys.iter().find(|(k, _)| k == pure_name) {
+                seen.insert(k.to_string());
+                format!("{k}={v}")
             } else {
                 line.to_string()
             }
@@ -319,7 +321,7 @@ fn persist_presets(
     presets: &crate::config::SamplingPresets,
 ) -> anyhow::Result<()> {
     let json_line = format!(
-        "QWEN36_PRESETS={}",
+        "PRESETS={}",
         serde_json::to_string(presets)?
     );
     let existing = std::fs::read_to_string(path).unwrap_or_default();
@@ -327,7 +329,8 @@ fn persist_presets(
     let mut out: Vec<String> = existing
         .lines()
         .map(|line| {
-            if line.trim_start().starts_with("QWEN36_PRESETS=") {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("PRESETS=") || trimmed.starts_with("QWEN36_PRESETS=") {
                 replaced = true;
                 json_line.clone()
             } else {
@@ -596,10 +599,23 @@ pub async fn do_switch(
             kv_budget_mib,
             kv_per_tok_mib,
             prefix_cache_mib: 0,
-            media_temp: std::env::temp_dir().join("qwen36-media"),
+            media_temp: std::env::temp_dir().join("yttri-media"),
             sampling: crate::config::SamplingDefaults::default(),
             presets: crate::config::default_presets(),
             env_file: std::path::PathBuf::from(".env"),
+            batch_size: 2048,
+            threads: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8),
+            gpu_layers: 999,
+            kv_cache_type: "q8_f16".into(),
+            mmap: true,
+            rope_scale: 1.0,
+            rope_scale_type: "none".into(),
+            seed: 0,
+            ctx_overflow: "sliding_window".into(),
+            frequency_penalty: 0.0,
+            max_queue: 64,
+            req_timeout: 600,
+            flash_attn: true,
         };
         Arc::new(crate::engine::CandleEngine::load(&cfg)?)
     };

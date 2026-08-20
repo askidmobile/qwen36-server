@@ -60,10 +60,10 @@ async fn main() -> Result<()> {
             qwen36_server::profile::ComponentArtifact::Available { path } => Some(path.clone()),
             _ => None,
         });
-        let mtp_enabled = match std::env::var("QWEN36_MTP").as_deref() {
+        let mtp_enabled = match std::env::var("MTP").or_else(|_| std::env::var("QWEN36_MTP")).as_deref() {
             Ok("1") => true,
             Ok("0") | Err(_) => false,
-            Ok(value) => anyhow::bail!("QWEN36_MTP must be 0 or 1, got {value:?}"),
+            Ok(value) => anyhow::bail!("MTP must be 0 or 1, got {value:?}"),
         };
         let mtp_path = mtp_enabled.then(|| {
             profile.as_ref().and_then(|profile| match &profile.mtp {
@@ -89,9 +89,10 @@ async fn main() -> Result<()> {
         info.id, info.quant, info.context_length, info.slots
     );
 
-    // Корень сканирования моделей: QWEN36_MODELS_DIR или родитель директории
+    // Корень сканирования моделей: MODELS_DIR (или QWEN36_MODELS_DIR) или родитель директории
     // модели (D:\Models\org\repo\model.gguf → D:\Models).
-    let models_dir = std::env::var("QWEN36_MODELS_DIR")
+    let models_dir = std::env::var("MODELS_DIR")
+        .or_else(|_| std::env::var("QWEN36_MODELS_DIR"))
         .map(std::path::PathBuf::from)
         .ok()
         .or_else(|| {

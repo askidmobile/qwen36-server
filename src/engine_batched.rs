@@ -60,23 +60,23 @@ pub struct BatchConfig {
 
 impl BatchConfig {
     pub fn from_env() -> Self {
-        let get = |k: &str| std::env::var(k).ok();
+        let get = |k: &str| std::env::var(k).or_else(|_| std::env::var(format!("QWEN36_{k}"))).ok();
         let num = |k: &str, d: usize| get(k).and_then(|v| v.parse().ok()).unwrap_or(d);
-        let mut slots = num("QWEN36_SLOTS", 4);
+        let mut slots = num("SLOTS", 4);
         if slots > MAX_SLOTS {
-            eprintln!("[batch] QWEN36_SLOTS={slots} > {MAX_SLOTS} (DECODE_BATCH_CAPACITY), clamp");
+            eprintln!("[batch] SLOTS={slots} > {MAX_SLOTS} (DECODE_BATCH_CAPACITY), clamp");
             slots = MAX_SLOTS;
         }
         Self {
-            model_path: get("QWEN36_MODEL")
+            model_path: get("MODEL")
                 .unwrap_or_else(|| "models/qwen36-27b-q2_k_xl.gguf".into()),
             slots,
-            max_queue: num("QWEN36_MAX_QUEUE", 64),
-            req_timeout: Duration::from_secs(num("QWEN36_REQ_TIMEOUT", 600) as u64),
-            context_length: num("QWEN36_CTX", 81920),
+            max_queue: num("MAX_QUEUE", 64),
+            req_timeout: Duration::from_secs(num("REQ_TIMEOUT", 600) as u64),
+            context_length: num("CTX", 131072),
             kv_budget_mib: 0.0,
             kv_per_tok_mib: 0.0,
-            prefix_cache_mib: num("QWEN36_PREFIX_CACHE_MIB", 0),
+            prefix_cache_mib: num("PREFIX_CACHE_MIB", 0),
         }
     }
 }

@@ -35,6 +35,7 @@ pub struct SamplingDefaults {
     pub repetition_penalty: f32,
     pub max_tokens: usize,
     pub thinking: bool,
+    pub frequency_penalty: f32,
 }
 
 impl Default for SamplingDefaults {
@@ -46,6 +47,7 @@ impl Default for SamplingDefaults {
             min_p: 0.0,
             presence_penalty: 0.0,
             repetition_penalty: 1.0,
+            frequency_penalty: 0.0,
             max_tokens: 32768,
             thinking: true,
         }
@@ -64,6 +66,7 @@ impl SamplingDefaults {
             repetition_penalty: parse_env("REPETITION_PENALTY", d.repetition_penalty)?,
             max_tokens: parse_env("MAX_TOKENS", d.max_tokens)?,
             thinking: parse_env("THINKING", d.thinking)?,
+            frequency_penalty: parse_env("FREQUENCY_PENALTY", d.frequency_penalty)?,
         })
     }
 }
@@ -196,43 +199,54 @@ fn presets_from_env(model_path: &Path) -> Result<SamplingPresets> {
 }
 
 pub struct Config {
-    /// Manifest/current pointer (`QWEN36_PROFILE`), если задан.
+    /// Manifest/current pointer (`PROFILE`), если задан.
     pub profile: Option<PathBuf>,
-    /// Один раз validated profile; исключает повторное хеширование artifacts.
     pub resolved_profile: Option<std::sync::Arc<crate::profile::ResolvedProfile>>,
-    /// Путь к GGUF (`QWEN36_MODEL`) или Text artifact resolved profile.
     pub model: PathBuf,
-    /// Host (`QWEN36_HOST`, default 0.0.0.0).
     pub host: String,
-    /// Port (`QWEN36_PORT`, default 8080).
     pub port: u16,
-    /// Именованные API-ключи (`QWEN36_API_KEYS`, JSON-массив; обязателен).
     pub api_keys: Vec<ApiKey>,
-    /// Контекст (`QWEN36_CTX`, default 81920).
     pub ctx: usize,
-    /// Слоты (`QWEN36_SLOTS`, default 4).
     pub slots: usize,
-    /// Общий KV-бюджет всех слотов (MiB). 0 = без лимита (macOS/CPU).
     pub kv_budget_mib: f64,
-    /// MiB KV на токен на слот (для admission).
     pub kv_per_tok_mib: f64,
-    /// Бюджет prefix cache (MiB). 0 = выключен (`QWEN36_PREFIX_CACHE_MIB`, default 0 (выключен: primed admit восстанавливает snapshot против stale state)).
     pub prefix_cache_mib: usize,
-    /// Временный media root (`QWEN36_MEDIA_TEMP`). Limits фиксированы release contract.
     pub media_temp: PathBuf,
-    /// Дефолты сэмплинга из .env (QWEN36_TEMPERATURE/.../QWEN36_MAX_TOKENS/...).
     pub sampling: SamplingDefaults,
-    /// Пресеты режимов (QWEN36_PRESETS JSON, merge поверх встроенных).
     pub presets: SamplingPresets,
-    /// Путь к .env (для записи «сохранить по умолчанию» из WebUI).
     pub env_file: PathBuf,
+    /// Batch size для prefill (`BATCH_SIZE`, default 2048).
+    pub batch_size: usize,
+    /// CPU threads (`THREADS`, default = количество ядер).
+    pub threads: usize,
+    /// GPU layers to offload (`GPU_LAYERS`, default 999 = все).
+    pub gpu_layers: usize,
+    /// KV cache type (`KV_CACHE_TYPE`, default "q8_f16").
+    pub kv_cache_type: String,
+    /// Mmap (`MMAP`, default 1 = включен).
+    pub mmap: bool,
+    /// RoPE scale (`ROPE_SCALE`, default 1.0).
+    pub rope_scale: f32,
+    /// RoPE scale type (`ROPE_SCALE_TYPE`, default "none").
+    pub rope_scale_type: String,
+    /// Seed (`SEED`, default 0 = random).
+    pub seed: u64,
+    /// Context overflow policy (`CTX_OVERFLOW`, default "sliding_window").
+    pub ctx_overflow: String,
+    /// Frequency penalty (`FREQUENCY_PENALTY`, default 0.0).
+    pub frequency_penalty: f32,
+    /// Max queue length (`MAX_QUEUE`, default 64).
+    pub max_queue: usize,
+    /// Request timeout in seconds (`REQ_TIMEOUT`, default 600).
+    pub req_timeout: u64,
+    /// Flash Attention (`FLASH_ATTN`, default 1 = включен).
+    pub flash_attn: bool,
 }
 
 impl Config {
-    /// Загрузить `.env`, затем разобрать конфигурацию. Уже заданные process env
-    /// имеют приоритет. Путь: `QWEN36_ENV_FILE`, иначе `.env` в cwd.
+    /// Загрузить `.env`, затем разобрать конфигурацию. Путь: `ENV_FILE`, иначе `.env`.
     pub fn load() -> Result<Self> {
-        let path = std::env::var("QWEN36_ENV_FILE").unwrap_or_else(|_| ".env".into());
+        let path = get_env_var("ENV_FILE").unwrap_or_else(|| ".env".into());
         load_env_file(Path::new(&path))?;
         Self::from_env_with_path(PathBuf::from(path))
     }
@@ -289,6 +303,19 @@ impl Config {
             sampling: SamplingDefaults::from_env()?,
             presets,
             env_file,
+            batch_size: parse_env("BATCH_SIZE", 2048usize)?,
+            threads: parse_env("THREADS", num_cpus())?,
+            gpu_layers: parse_env("GPU_LAYERS", 999usize)?,
+            kv_cache_type: get_env_var("KV_CACHE_TYPE").unwrap_or_else(|| "q8_f16".into()),
+            mmap: parse_env("MMAP", 1u8)? != 0,
+            rope_scale: parse_env("ROPE_SCALE", 1.0f32)?,
+            rope_scale_type: get_env_var("ROPE_SCALE_TYPE").unwrap_or_else(|| "none".into()),
+            seed: parse_env("SEED", 0u64)?,
+            ctx_overflow: get_env_var("CTX_OVERFLOW").unwrap_or_else(|| "sliding_window".into()),
+            frequency_penalty: parse_env("FREQUENCY_PENALTY", 0.0f32)?,
+            max_queue: parse_env("MAX_QUEUE", 64usize)?,
+            req_timeout: parse_env("REQ_TIMEOUT", 600u64)?,
+            flash_attn: parse_env("FLASH_ATTN", 1u8)? != 0,
         };
         cfg.apply_vram_plan()?;
         Ok(cfg)
@@ -393,6 +420,12 @@ fn get_env_var(name: &str) -> Option<String> {
         .or_else(|_| std::env::var(format!("QWEN36_{name}")))
         .or_else(|_| std::env::var(format!("YTTRI_{name}")))
         .ok()
+}
+
+fn num_cpus() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(8)
 }
 
 fn parse_env<T: std::str::FromStr>(name: &str, default: T) -> Result<T>
