@@ -728,6 +728,8 @@ function readParams() {
 }
 
 let thinkingEnabled = true;
+let abortCtrl = null;
+let userPinned = true;
 
 function updateThinkBtn() {
   const btn = $("thinkbtn");
@@ -748,7 +750,6 @@ $("thinkbtn").onclick = () => {
   updateThinkBtn();
   toast(thinkingEnabled ? "Режим рассуждений включен" : "Режим рассуждений отключен (прямой ответ)");
 };
-let userPinned = true;
 $("messages").addEventListener("scroll", () => {
   const el = $("messages");
   userPinned = el.scrollTop + el.clientHeight >= el.scrollHeight - 60;
