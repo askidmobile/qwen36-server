@@ -47,7 +47,10 @@ pub fn footprint_from_gguf(path: &Path) -> Result<ModelFootprint> {
     let prefix = match arch.as_str() {
         "qwen35" => "qwen35",
         "qwen35moe" => "qwen35moe",
-        other => return Err(anyhow!("unsupported architecture for vram plan: {other}")),
+        // Стандартные трансформеры (Gemma, Llama, Mistral, Qwen2, Phi и др.):
+        // KV = 2 × n_layers × n_kv_heads × head_dim × ctx × dtype_bytes.
+        // Нет DeltaNet (delta_blocks=0, ssm_state=0). Префикс в GGUF = arch.
+        other => other,
     };
     let g = |k: &str| -> Option<usize> {
         md.get(&format!("{prefix}.{k}"))
