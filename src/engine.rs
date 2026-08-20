@@ -107,8 +107,7 @@ pub enum MediaSource {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "content")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContentBlock {
     Text {
         text: String,
@@ -119,7 +118,7 @@ pub enum ContentBlock {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct ChatMessage {
     pub role: String, // system|user|assistant|tool
     pub content: Vec<ContentBlock>,
