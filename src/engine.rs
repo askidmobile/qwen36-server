@@ -695,6 +695,22 @@ pub fn gguf_architecture(path: &Path) -> Result<String> {
     }
 }
 
+/// Runtime support registry. Только архитектуры с реальным graph route
+/// и прошедшим smoke получают supported=true. Новая архитектура
+/// должна пройти полный gate (build/load/logits/generate/API/switch)
+/// перед добавлением сюда — см. docs/lessons/2026-08-21-gguf-runtime-support-gate.md.
+///
+/// ponytail: переехать на enum+match когда route count >8; сейчас строка дешевле.
+pub fn architecture_capability(arch: &str) -> (bool, &'static str, &'static str) {
+    match arch {
+        "qwen35" | "qwen35moe" => (true, "qwen35", "BatchedEngine continuous batching"),
+        "gemma4" => (true, "gemma4", "CandleEngine serialized"),
+        "llama" => (true, "llama", "CandleEngine serialized"),
+        "gpt-oss" => (false, "gpt-oss", "no Candle graph runtime; MXFP4 storage/dispatch unimplemented"),
+        _ => (false, "unknown", "unknown GGUF architecture; no runtime route"),
+    }
+}
+
 fn load_model(path: &Path, device: &candle_core::Device) -> Result<(RuntimeModel, u32)> {
     use anyhow::anyhow;
     use candle_core::quantized::gguf_file;

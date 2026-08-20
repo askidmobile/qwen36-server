@@ -1297,7 +1297,9 @@ async function loadAvailableModels() {
     for (const m of j.models || []) {
       const o = document.createElement("option");
       o.value = m.path;
-      o.textContent = m.name + " (" + m.size_mib + " MiB)";
+      const flag = m.supported === false ? " ⚠ unsupported" : "";
+      o.textContent = m.name + " (" + m.size_mib + " MiB)" + flag;
+      if (m.supported === false) o.disabled = true;
       if (j.current && j.current.path && m.path === j.current.path) o.selected = true;
       sel.append(o);
     }

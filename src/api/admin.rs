@@ -106,13 +106,22 @@ pub fn scan_gguf(dir: &Path, depth: usize, out: &mut Vec<Value>) {
                     }
                 }
             }
-            // Все валидные GGUF модели поддерживаются сервером
+            // Capability registry: только архитектуры с реальным runtime route
+            // получают supported=true. Прочие честно помечаются unsupported с reason.
             let size_mib = e.metadata().map(|m| m.len() / 1024 / 1024).unwrap_or(0);
+            let (supported, backend, reason) = match crate::engine::gguf_architecture(
+                &p,
+            ) {
+                Ok(a) => crate::engine::architecture_capability(&a),
+                Err(_) => (false, "unknown", "cannot read GGUF architecture"),
+            };
             out.push(json!({
                 "name": name,
                 "path": p.to_string_lossy(),
                 "size_mib": size_mib,
-                "supported": true,
+                "supported": supported,
+                "architecture": backend,
+                "reason": reason,
             }));
         }
     }
@@ -590,6 +599,12 @@ pub async fn do_switch(
     // 3. Qwen/Ornith используют continuous batching. Остальные архитектуры
     // идут через соответствующий candle-transformers runtime под mutex.
     let architecture = crate::engine::gguf_architecture(&path)?;
+    let (supported, _backend, reason) = crate::engine::architecture_capability(&architecture);
+    if !supported {
+        return Err(anyhow::anyhow!(
+            "architecture '{architecture}' is not runtime-supported: {reason}"
+        ));
+    }
     let qwen35 = matches!(architecture.as_str(), "qwen35" | "qwen35moe");
     eprintln!(
         "[switch] loading {} architecture={architecture} ctx={ctx} slots={slots}",
