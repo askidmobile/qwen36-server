@@ -827,7 +827,16 @@ async function send(regen) {
   const sys = $("sysprompt").value.trim() || (c.system || "");
   c.system = sys;
   if (sys) apiMessages.push({ role: "system", content: sys });
-  for (const m of c.messages) apiMessages.push({ role: m.role, content: m.content });
+  for (const m of c.messages) {
+    const history = { role: m.role, content: m.content || "" };
+    if (m.role === "assistant" && m.thinkText) {
+      // Старые версии UI сохраняли весь Gemma-ответ только в thinkText.
+      // Не отправляем такой assistant как пустое сообщение.
+      if (!history.content.trim()) history.content = m.thinkText;
+      else history.reasoning_content = m.thinkText;
+    }
+    apiMessages.push(history);
+  }
   if (!regen && contentBlocks.length) {
     apiMessages[apiMessages.length - 1] = { role: "user", content: contentBlocks };
   }
@@ -906,6 +915,7 @@ async function send(regen) {
           if (data === "[DONE]") continue;
           let j;
           try { j = JSON.parse(data); } catch { continue; }
+          if (j.error) throw new Error(j.error.message || "stream error");
           const ch = j.choices && j.choices[0];
           const delta = ch && ch.delta;
           if (delta && delta.reasoning_content) {
@@ -951,6 +961,11 @@ async function send(regen) {
     if (!asst.content.trim() && asst.thinkText && asst.thinkText.trim()) {
       asst.content = asst.thinkText;
       asst.thinkText = "";
+    }
+    if (!asst.content.trim() && !asst.thinkText.trim()) {
+      asst.content = finishReason
+        ? `[модель завершила генерацию без текстового ответа: ${finishReason}]`
+        : "[поток завершился без ответа модели]";
     }
 
     const totalSecs = (performance.now() - t0) / 1000;

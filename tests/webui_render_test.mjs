@@ -19,5 +19,9 @@ assert.deepEqual(parseThinking("<think>план</think>ответ"), [
 
 assert.match(html, /attachbtn"\)\.disabled = !enabled/);
 assert.match(html, /Gemma 4 GGUF сейчас загружена без vision mmproj runtime/);
+assert.match(html, /history\.reasoning_content = m\.thinkText/);
+assert.match(html, /if \(!history\.content\.trim\(\)\) history\.content = m\.thinkText/);
+assert.match(html, /if \(j\.error\) throw new Error/);
+assert.match(html, /модель завершила генерацию без текстового ответа/);
 
 console.log("webui render regression: ok");
