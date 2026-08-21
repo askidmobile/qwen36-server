@@ -349,6 +349,7 @@ pub struct CandleEngine {
     info: ModelInfo,
     architecture: String,
     chat_tpl: Option<crate::chat_template::ChatTemplate>,
+    prefill_chunk: usize,
 }
 
 impl CandleEngine {
@@ -399,6 +400,8 @@ impl CandleEngine {
             },
             architecture,
             chat_tpl,
+            // Без FlashAttention q×kv матрица для 2K chunk на Q8_0 близка к VRAM ceiling.
+            prefill_chunk: cfg.batch_size.clamp(1, 1024),
         })
     }
 }
@@ -501,6 +504,7 @@ impl Engine for CandleEngine {
         let state = Arc::clone(&self.state);
         let stop_tokens = self.stop_tokens.clone();
         let architecture = self.architecture.clone();
+        let prefill_chunk = self.prefill_chunk;
         // Инференс блокирующий и долгий — в blocking-пул, канал стримит наружу.
         tokio::task::spawn_blocking(move || {
             run_generation(
@@ -511,6 +515,7 @@ impl Engine for CandleEngine {
                 stop_tokens,
                 architecture,
                 truncated,
+                prefill_chunk,
                 cancel,
                 tx,
             );
@@ -538,6 +543,7 @@ fn run_generation(
     stop_tokens: Vec<u32>,
     architecture: String,
     truncated: bool,
+    prefill_chunk: usize,
     cancel: CancelFlag,
     tx: mpsc::Sender<StreamEvent>,
 ) {
@@ -562,10 +568,15 @@ fn run_generation(
         } = &mut *st;
         model.clear_state();
 
-        let ids =
-            candle_core::Tensor::from_vec(prompt_ids.clone(), (1usize, prompt_ids.len()), dev)?;
-        let logits_t = model.forward(&ids, 0)?;
-        let mut logits = last_logits(&logits_t)?;
+        let mut logits = Vec::new();
+        for (chunk_index, chunk) in prompt_ids.chunks(prefill_chunk).enumerate() {
+            if cancel.is_cancelled() || tx.is_closed() {
+                return Ok(());
+            }
+            let offset = chunk_index * prefill_chunk;
+            let ids = candle_core::Tensor::from_vec(chunk.to_vec(), (1usize, chunk.len()), dev)?;
+            logits = last_logits(&model.forward(&ids, offset)?)?;
+        }
 
         let seed = params.seed.unwrap_or_else(|| {
             std::time::SystemTime::now()

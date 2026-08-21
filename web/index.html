@@ -854,6 +854,7 @@ async function send(regen) {
   let liveTok = 0, liveT0 = null;
   const liveEl = document.createElement("div");
   liveEl.className = "meta"; liveEl.style.marginTop = "4px";
+  liveEl.textContent = "обработка контекста…";
 
   const el = $("messages");
   let msgEl = el.lastElementChild;
