@@ -67,13 +67,24 @@ THINKING=true
 
 ## 🇷🇺 Режимы сэмплинга моделей (Official Model Cards)
 
-### 🐦 Ornith 1.5 (9B / 35B)
-1. **Thinking mode for precise coding tasks (WebDev / Agentic)**:
-   - `temperature = 0.6`, `top_p = 0.95`, `top_k = 20`, `min_p = 0.0`, `presence_penalty = 0.0`, `repetition_penalty = 1.0`
-2. **Thinking mode for general tasks**:
-   - `temperature = 1.0`, `top_p = 0.95`, `top_k = 20`, `min_p = 0.0`, `presence_penalty = 1.5`, `repetition_penalty = 1.0`
-3. **Instruct (non-thinking) mode**:
-   - `temperature = 0.7`, `top_p = 0.80`, `top_k = 20`, `min_p = 0.0`, `presence_penalty = 1.5`, `repetition_penalty = 1.0`
+Сервер определяет семейство по имени активного GGUF и при старте/переключении
+полностью заменяет набор пресетов. WebUI получает этот же набор через
+`GET /v1/models`; значения предыдущей модели не переносятся.
+
+| Семейство | Режим | temperature | top_p | top_k | presence_penalty |
+|---|---|---:|---:|---:|---:|
+| Gemma 4 | любой | 1.0 | 0.95 | 64 | 0.0 |
+| Ornith 1.5 | general | 1.0 | 0.95 | 20 | 1.5 |
+| Ornith 1.5 | precise coding | 0.6 | 0.95 | 20 | 0.0 |
+| Qwen 3.6 / 3.8 | thinking | 1.0 | 0.95 | 20 | 0.0 |
+| Qwen 3.6 / 3.8 | instruct | 0.7 | 0.80 | 20 | 1.5 |
+| Qwen 3.6 MoE (35B-A3B) | thinking | 1.0 | 0.95 | 20 | 1.5 |
+| Qwen 3.5 | thinking | 1.0 | 0.95 | 20 | 1.5 |
+
+Во всех встроенных пресетах `min_p=0.0` и `repetition_penalty=1.0`.
+Пользовательские изменения кнопкой «Сохранить как пресет режима» хранятся
+раздельно по семействам в `MODEL_PRESETS`, поэтому настройка Gemma не меняет
+Qwen или Ornith.
 
 ---
 

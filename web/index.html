@@ -221,7 +221,7 @@ html[data-theme="dark"] .codewrap .codebar { background: #0b0f1a; }
       </div>
       <div style="padding: 0 24px 14px; display:flex; gap:10px; align-items:center; flex-wrap:wrap">
         <button id="savedefaults" title="Записать текущие параметры в .env как дефолтные">Сохранить по умолчанию</button>
-        <button id="savepreset" title="Записать текущие параметры как пресет выбранного режима">Сохранить как пресет режима</button>
+        <button id="savepreset" title="Записать текущие параметры как пресет выбранного режима для активной модели">Сохранить как пресет режима</button>
       </div>
       <div style="padding: 0 24px 14px">
         <label for="sysprompt" style="font-size:12px;color:var(--dim)">System prompt (для текущего чата)</label>
@@ -287,10 +287,19 @@ const PRESETS = {
   "thinking":        { temperature: 1.0, top_p: 0.95, top_k: 20, min_p: 0, presence_penalty: 0,   repetition_penalty: 1.0, max_tokens: 4096 },
   "thinking-coding": { temperature: 0.6, top_p: 0.95, top_k: 20, min_p: 0, presence_penalty: 0,   repetition_penalty: 1.0, max_tokens: 4096 },
   "instruct":        { temperature: 0.7, top_p: 0.80, top_k: 20, min_p: 0, presence_penalty: 1.5, repetition_penalty: 1.0, max_tokens: 4096 },
+  "instruct-reasoning": { temperature: 0.7, top_p: 0.80, top_k: 20, min_p: 0, presence_penalty: 1.5, repetition_penalty: 1.0, max_tokens: 4096 },
 };
-// Серверные пресеты (.env) перекрывают встроенные при загрузке модели.
+// Сервер отдаёт effective presets именно для активного семейства модели.
 const SERVER_PRESETS = {};
+let samplingModelKey = "";
 const PARAM_IDS = ["temperature","top_p","top_k","min_p","presence_penalty","repetition_penalty","max_tokens"];
+
+function setParamValue(name, value) {
+  const numeric = Number(value);
+  $("p_" + name).value = Number.isFinite(numeric)
+    ? String(Math.round(numeric * 1e6) / 1e6)
+    : value;
+}
 
 const store = {
   get key() { return localStorage.getItem("q36_api_key") || ""; },
@@ -463,16 +472,20 @@ async function loadModels() {
       lastModelInfo = m;
       renderCurInfo();
       updateMediaControls();
-      // Дефолты сэмплинга с сервера (.env) — заполняем поля, если пользователь
-      // не менял режим вручную в этой сессии.
-      if (m.sampling_defaults && !sessionStorage.getItem("q36_params_dirty")) {
+      const nextSamplingModelKey = [m.sampling_family || "generic", m.id || "", m.path || ""].join("|");
+      const modelChanged = samplingModelKey !== nextSamplingModelKey;
+      samplingModelKey = nextSamplingModelKey;
+      // Сначала общий лимит/effective default, затем точный mode preset.
+      if (m.sampling_defaults) {
         const d = m.sampling_defaults;
-        for (const k of PARAM_IDS) if (d[k] !== undefined) $("p_" + k).value = d[k];
+        for (const k of PARAM_IDS) if (d[k] !== undefined) setParamValue(k, d[k]);
       }
+      for (const name of Object.keys(SERVER_PRESETS)) delete SERVER_PRESETS[name];
       if (m.sampling_presets) {
         Object.assign(SERVER_PRESETS, m.sampling_presets);
-        applyPreset($("mode").value);
       }
+      applyPreset($("mode").value);
+      if (modelChanged) sessionStorage.removeItem("q36_params_dirty");
       if (m.context_length) ctxLen = m.context_length;
       if (m.id) modelId = m.id;
       $("modelinfo").textContent =
@@ -728,7 +741,7 @@ function updateCtxBar() {
 function applyPreset(name) {
   const p = SERVER_PRESETS[name] || PRESETS[name];
   if (!p) return;
-  for (const k of PARAM_IDS) if (p[k] !== undefined) $("p_" + k).value = p[k];
+  for (const k of PARAM_IDS) if (p[k] !== undefined) setParamValue(k, p[k]);
 }
 function readParams() {
   const o = {};
@@ -742,10 +755,16 @@ let thinkingEnabled = true;
 let abortCtrl = null;
 let userPinned = true;
 
+function modeUsesThinking(name) {
+  return name === "thinking" || name === "thinking-coding";
+}
+
 function updateThinkBtn() {
   const btn = $("thinkbtn");
   if (!btn) return;
-  if (thinkingEnabled) {
+  const supported = modeUsesThinking($("mode").value);
+  btn.disabled = !supported;
+  if (supported && thinkingEnabled) {
     btn.textContent = "🧠 ВКЛ";
     btn.classList.add("think-active");
     btn.title = "Рассуждения включены (кликните, чтобы отключить)";
@@ -757,6 +776,7 @@ function updateThinkBtn() {
 }
 
 $("thinkbtn").onclick = () => {
+  if (!modeUsesThinking($("mode").value)) return;
   thinkingEnabled = !thinkingEnabled;
   updateThinkBtn();
   toast(thinkingEnabled ? "Режим рассуждений включен" : "Режим рассуждений отключен (прямой ответ)");
@@ -841,7 +861,7 @@ async function send(regen) {
     apiMessages[apiMessages.length - 1] = { role: "user", content: contentBlocks };
   }
 
-  let enableThink = thinkingEnabled && (mode !== "instruct");
+  const enableThink = thinkingEnabled && modeUsesThinking(mode);
   const body = Object.assign({
     model: modelId,
     messages: apiMessages,
@@ -999,7 +1019,7 @@ $("savedefaults").onclick = async () => {
     const r = await api("/v1/sampling_defaults", {
       method: "POST",
       body: JSON.stringify(Object.assign(readParams(), {
-        thinking: $("mode").value !== "instruct",
+        thinking: modeUsesThinking($("mode").value),
       })),
     });
     if (r.ok) {
@@ -1062,11 +1082,7 @@ document.addEventListener("keydown", e => {
 $("mode").onchange = () => {
   store.mode = $("mode").value;
   applyPreset($("mode").value);
-  if ($("mode").value === "instruct") {
-    thinkingEnabled = false;
-  } else {
-    thinkingEnabled = true;
-  }
+  thinkingEnabled = modeUsesThinking($("mode").value);
   updateThinkBtn();
 };
 $("newchat").onclick = () => {
@@ -1134,7 +1150,8 @@ function renderCurInfo() {
   const media = m.capabilities && (m.capabilities.vision || m.capabilities.video)
     ? "vision"
     : "text-only";
-  q.textContent = [m.quant, "ctx " + (m.context_length || "?"), "slots " + (m.slots ?? "?"), media].filter(Boolean).join(" · ");
+  const sampling = m.sampling_family ? "sampling " + m.sampling_family : "";
+  q.textContent = [m.quant, "ctx " + (m.context_length || "?"), "slots " + (m.slots ?? "?"), media, sampling].filter(Boolean).join(" · ");
   el.append(t, q);
 }
 let lastModelInfo = null;

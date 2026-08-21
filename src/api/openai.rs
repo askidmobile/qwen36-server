@@ -916,6 +916,24 @@ pub async fn list_models(State(state): State<AppState>) -> Response {
     .await
     .unwrap_or((0, 0));
     let d = state.sampling.read().expect("sampling lock").clone();
+    let presets = state.presets.read().expect("presets lock").clone();
+    let default_mode = if d.thinking { "thinking" } else { "instruct" };
+    let effective_default = presets
+        .get(default_mode)
+        .cloned()
+        .unwrap_or(crate::config::SamplingPresetValues {
+            temperature: d.temperature,
+            top_p: d.top_p,
+            top_k: d.top_k,
+            min_p: d.min_p,
+            presence_penalty: d.presence_penalty,
+            repetition_penalty: d.repetition_penalty,
+        });
+    let model_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    let sampling_family = crate::config::sampling_family_for_model(&model_name);
     let profile = state.profile.as_ref();
     let mut capabilities = profile.map(|profile| profile.capabilities()).unwrap_or(
         crate::profile::EffectiveCapabilities {
@@ -955,7 +973,10 @@ pub async fn list_models(State(state): State<AppState>) -> Response {
                 "thinking": true,
                 "apis": ["chat_completions", "responses", "messages"],
             },
-            // дефолты сэмплинга (если клиент не задаёт)
+            // Effective defaults: ровно тот пресет, который использует API,
+            // если клиент не передал параметры явно.
+            "sampling_family": sampling_family,
+            "sampling_default_mode": default_mode,
             "profile": profile.map(|profile| json!({
                 "id": profile.manifest.profile_id,
                 "release_version": profile.manifest.release_version,
@@ -967,16 +988,16 @@ pub async fn list_models(State(state): State<AppState>) -> Response {
                 "media_limits": profile.manifest.limits,
             })),
             "sampling_defaults": {
-                "temperature": d.temperature,
-                "top_p": d.top_p,
-                "top_k": d.top_k,
-                "min_p": d.min_p,
-                "presence_penalty": d.presence_penalty,
-                "repetition_penalty": d.repetition_penalty,
+                "temperature": effective_default.temperature,
+                "top_p": effective_default.top_p,
+                "top_k": effective_default.top_k,
+                "min_p": effective_default.min_p,
+                "presence_penalty": effective_default.presence_penalty,
+                "repetition_penalty": effective_default.repetition_penalty,
                 "max_tokens": d.max_tokens,
             },
             // пресеты из model card (BD-016)
-            "sampling_presets": state.presets.read().expect("presets lock").clone(),
+            "sampling_presets": presets,
         }],
     }))
     .into_response()
@@ -1009,5 +1030,23 @@ mod tests {
         assert_eq!(params.presence_penalty, 1.5);
         assert_eq!(params.repetition_penalty, 1.2);
         assert_eq!(params.seed, Some(42));
+    }
+
+    #[test]
+    fn gemma_uses_its_model_preset_when_request_has_no_sampling_overrides() {
+        let req: ChatCompletionRequest = serde_json::from_value(json!({
+            "messages": [],
+            "chat_template_kwargs": {"enable_thinking": false}
+        }))
+        .unwrap();
+        let defaults = crate::config::SamplingDefaults::default();
+        let presets = crate::config::default_presets_for_model("gemma-4-E4B-it-Q8_0.gguf");
+        let params = to_gen_params(&req, &defaults, &presets);
+
+        assert_eq!(params.temperature, 1.0);
+        assert_eq!(params.top_p, 0.95);
+        assert_eq!(params.top_k, 64);
+        assert_eq!(params.presence_penalty, 0.0);
+        assert_eq!(params.repetition_penalty, 1.0);
     }
 }

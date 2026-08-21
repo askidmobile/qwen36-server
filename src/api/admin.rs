@@ -373,15 +373,21 @@ fn persist_sampling(
     Ok(())
 }
 
-/// Сохранить пресет режима (instruct/thinking/thinking-coding) в .env
-/// (QWEN36_PRESETS JSON) + runtime. WebUI «Сохранить как пресет».
+/// Сохранить пресет режима для семейства активной модели в .env
+/// (QWEN36_MODEL_PRESETS JSON) + runtime. WebUI «Сохранить как пресет».
 pub async fn sampling_preset(
     State(state): State<AppState>,
     Json(req): Json<PresetRequest>,
 ) -> Response {
     if req.name.trim().is_empty()
         || req.name.len() > 32
-        || !(req.values.temperature >= 0.0 && req.values.top_p > 0.0 && req.values.top_p <= 1.0)
+        || !(req.values.temperature >= 0.0
+            && req.values.top_p > 0.0
+            && req.values.top_p <= 1.0
+            && req.values.min_p >= 0.0
+            && req.values.min_p <= 1.0
+            && req.values.presence_penalty >= 0.0
+            && req.values.repetition_penalty > 0.0)
     {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -389,19 +395,40 @@ pub async fn sampling_preset(
             "invalid preset",
         );
     }
-    {
-        let mut presets = state.presets.write().expect("presets lock");
-        presets.insert(req.name.clone(), req.values.clone());
-    }
-    let all = state.presets.read().expect("presets lock").clone();
-    if let Err(e) = persist_presets(&state.env_file, &all) {
+    let (model_path, _, _) = state
+        .switcher
+        .current
+        .read()
+        .map(|current| current.clone())
+        .unwrap_or_default();
+    let model_name = model_path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    let family = crate::config::sampling_family_for_model(&model_name);
+    if let Err(e) = persist_model_preset(
+        &state.env_file,
+        family,
+        &req.name,
+        &req.values,
+    ) {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "api_error",
             format!(".env write failed: {e}"),
         );
     }
-    Json(json!({"status": "saved", "preset": req.name})).into_response()
+    state
+        .presets
+        .write()
+        .expect("presets lock")
+        .insert(req.name.clone(), req.values.clone());
+    Json(json!({
+        "status": "saved",
+        "preset": req.name,
+        "sampling_family": family,
+    }))
+    .into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -410,18 +437,37 @@ pub struct PresetRequest {
     values: crate::config::SamplingPresetValues,
 }
 
-fn persist_presets(
+fn persist_model_preset(
     path: &std::path::Path,
-    presets: &crate::config::SamplingPresets,
+    family: &str,
+    name: &str,
+    values: &crate::config::SamplingPresetValues,
 ) -> anyhow::Result<()> {
-    let json_line = format!("PRESETS={}", serde_json::to_string(presets)?);
     let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let existing_json = existing.lines().find_map(|line| {
+        let trimmed = line.trim_start();
+        ["MODEL_PRESETS=", "QWEN36_MODEL_PRESETS=", "YTTRI_MODEL_PRESETS="]
+            .iter()
+            .find_map(|prefix| trimmed.strip_prefix(prefix))
+            .map(|raw| raw.trim().trim_matches(['\'', '"']))
+    });
+    let inherited_json = std::env::var("MODEL_PRESETS")
+        .or_else(|_| std::env::var("QWEN36_MODEL_PRESETS"))
+        .or_else(|_| std::env::var("YTTRI_MODEL_PRESETS"))
+        .ok();
+    let raw = existing_json.or(inherited_json.as_deref());
+    let model_presets = updated_model_presets(raw, family, name, values)?;
+    let json = serde_json::to_string(&model_presets)?;
+    let json_line = format!("MODEL_PRESETS={json}");
     let mut replaced = false;
     let mut out: Vec<String> = existing
         .lines()
         .map(|line| {
             let trimmed = line.trim_start();
-            if trimmed.starts_with("PRESETS=") || trimmed.starts_with("QWEN36_PRESETS=") {
+            if trimmed.starts_with("MODEL_PRESETS=")
+                || trimmed.starts_with("QWEN36_MODEL_PRESETS=")
+                || trimmed.starts_with("YTTRI_MODEL_PRESETS=")
+            {
                 replaced = true;
                 json_line.clone()
             } else {
@@ -433,7 +479,27 @@ fn persist_presets(
         out.push(json_line);
     }
     std::fs::write(path, out.join("\n") + "\n")?;
+    // do_switch читает env в том же процессе; обновляем его после успешной записи.
+    std::env::set_var("MODEL_PRESETS", json);
     Ok(())
+}
+
+fn updated_model_presets(
+    raw: Option<&str>,
+    family: &str,
+    name: &str,
+    values: &crate::config::SamplingPresetValues,
+) -> anyhow::Result<crate::config::ModelSamplingPresets> {
+    let mut model_presets: crate::config::ModelSamplingPresets = raw
+        .filter(|raw| !raw.is_empty())
+        .map(serde_json::from_str)
+        .transpose()?
+        .unwrap_or_default();
+    model_presets
+        .entry(family.to_string())
+        .or_default()
+        .insert(name.to_string(), values.clone());
+    Ok(model_presets)
 }
 
 pub async fn unload_model(State(state): State<AppState>) -> Response {
@@ -605,6 +671,13 @@ pub async fn do_switch(
     req_ctx: usize,
     req_slots: usize,
 ) -> anyhow::Result<()> {
+    let model_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    let sampling_family = crate::config::sampling_family_for_model(&model_name);
+    let model_presets = crate::config::presets_from_env(&path)?;
+
     // 1. VRAM-план для новой модели (dynamic: ctx до native, бюджет в движок).
     // Pending/claimed media belongs to old profile and must never survive switch.
     state.media.store.purge_all();
@@ -713,7 +786,7 @@ pub async fn do_switch(
             prefix_cache_mib: 0,
             media_temp: std::env::temp_dir().join("yttri-media"),
             sampling: crate::config::SamplingDefaults::default(),
-            presets: crate::config::default_presets(),
+            presets: model_presets.clone(),
             env_file: std::path::PathBuf::from(".env"),
             batch_size: 2048,
             threads: std::thread::available_parallelism()
@@ -753,15 +826,47 @@ pub async fn do_switch(
         "[switch] loaded: id={} ctx={} slots={}",
         info.id, info.context_length, info.slots
     );
-    // Обновляем пресеты сэмплинга под специфику загруженной модели (например, Ornith 1.5 vs Qwen 3.8)
-    let model_name = path
-        .file_name()
-        .map(|n| n.to_string_lossy())
-        .unwrap_or_default();
-    let model_presets = crate::config::default_presets_for_model(&model_name);
+    eprintln!("[sampling] family={sampling_family} presets=model-specific");
     if let Ok(mut p) = state.presets.write() {
         *p = model_presets;
     }
     state.switcher.install(engine, path, ctx, slots);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn values(temperature: f32, top_k: usize) -> crate::config::SamplingPresetValues {
+        crate::config::SamplingPresetValues {
+            temperature,
+            top_p: 0.95,
+            top_k,
+            min_p: 0.0,
+            presence_penalty: 0.0,
+            repetition_penalty: 1.0,
+        }
+    }
+
+    #[test]
+    fn custom_sampling_presets_are_isolated_by_model_family() {
+        let qwen = values(0.6, 20);
+        let initial = serde_json::json!({
+            "qwen-3.8": {"thinking-coding": qwen}
+        })
+        .to_string();
+        let gemma = values(1.0, 64);
+        let updated = updated_model_presets(
+            Some(&initial),
+            "gemma-4",
+            "thinking",
+            &gemma,
+        )
+        .unwrap();
+
+        assert_eq!(updated["gemma-4"]["thinking"], gemma);
+        assert_eq!(updated["qwen-3.8"]["thinking-coding"], qwen);
+        assert!(!updated["qwen-3.8"].contains_key("thinking"));
+    }
 }

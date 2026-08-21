@@ -71,9 +71,9 @@ impl SamplingDefaults {
     }
 }
 
-/// Пресет режима (instruct/thinking/thinking-coding). У разных моделей
-/// оптимум разный — переопределяются через QWEN36_PRESETS (JSON) и WebUI.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// Пресет режима. Встроенные значения выбираются по семейству модели;
+/// пользовательские переопределения хранятся в QWEN36_MODEL_PRESETS.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SamplingPresetValues {
     pub temperature: f32,
     pub top_p: f32,
@@ -97,124 +97,141 @@ impl Default for SamplingPresetValues {
 }
 
 pub type SamplingPresets = std::collections::HashMap<String, SamplingPresetValues>;
+pub type ModelSamplingPresets = std::collections::HashMap<String, SamplingPresets>;
+
+fn preset(
+    temperature: f32,
+    top_p: f32,
+    top_k: usize,
+    presence_penalty: f32,
+) -> SamplingPresetValues {
+    SamplingPresetValues {
+        temperature,
+        top_p,
+        top_k,
+        min_p: 0.0,
+        presence_penalty,
+        repetition_penalty: 1.0,
+    }
+}
+
+fn insert_modes(
+    presets: &mut SamplingPresets,
+    thinking: SamplingPresetValues,
+    thinking_coding: SamplingPresetValues,
+    instruct: SamplingPresetValues,
+    instruct_reasoning: SamplingPresetValues,
+) {
+    presets.insert("thinking".into(), thinking);
+    presets.insert("thinking-coding".into(), thinking_coding);
+    presets.insert("instruct".into(), instruct);
+    presets.insert("instruct-reasoning".into(), instruct_reasoning);
+}
+
+/// Стабильный ключ семейства для встроенных и пользовательских пресетов.
+/// Квант, размер модели и оформление имени файла на выбор параметров не влияют.
+pub fn sampling_family_for_model(model_name: &str) -> &'static str {
+    let compact = model_name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+
+    if compact.contains("ornith15") {
+        "ornith-1.5"
+    } else if compact.contains("ornith") {
+        "ornith"
+    } else if compact.contains("gemma4") {
+        "gemma-4"
+    } else if compact.contains("qwen38") {
+        "qwen-3.8"
+    } else if compact.contains("qwen36")
+        && (compact.contains("a3b") || compact.contains("moe"))
+    {
+        "qwen-3.6-moe"
+    } else if compact.contains("qwen36") {
+        "qwen-3.6"
+    } else if compact.contains("qwen35") {
+        "qwen-3.5"
+    } else if compact.contains("qwen") {
+        "qwen"
+    } else {
+        "generic"
+    }
+}
 
 pub fn default_presets_for_model(model_name: &str) -> SamplingPresets {
-    let lower = model_name.to_lowercase();
     let mut m = SamplingPresets::new();
-
-    if lower.contains("ornith-1.5") || lower.contains("ornith_1.5") || lower.contains("ornith1.5") {
-        // Рекомендованные параметры из официального model card Ornith-1.5:
-        // - Thinking mode for general tasks: temp=1.0, top_p=0.95, top_k=20, min_p=0.0, presence_penalty=1.5, rep_penalty=1.0
-        // - Thinking mode for precise coding tasks (WebDev): temp=0.6, top_p=0.95, top_k=20, min_p=0.0, presence_penalty=0.0, rep_penalty=1.0
-        // - Instruct mode for general tasks: temp=0.7, top_p=0.80, top_k=20, min_p=0.0, presence_penalty=1.5, rep_penalty=1.0
-        // - Instruct mode for reasoning tasks: temp=1.0, top_p=0.95, top_k=20, min_p=0.0, presence_penalty=1.5, rep_penalty=1.0
-        m.insert(
-            "thinking".into(),
-            SamplingPresetValues {
-                temperature: 1.0,
-                top_p: 0.95,
-                top_k: 20,
-                min_p: 0.0,
-                presence_penalty: 1.5,
-                repetition_penalty: 1.0,
-            },
-        );
-        m.insert(
-            "thinking-coding".into(),
-            SamplingPresetValues {
-                temperature: 0.6,
-                top_p: 0.95,
-                top_k: 20,
-                min_p: 0.0,
-                presence_penalty: 0.0,
-                repetition_penalty: 1.0,
-            },
-        );
-        m.insert(
-            "instruct".into(),
-            SamplingPresetValues {
-                temperature: 0.7,
-                top_p: 0.80,
-                top_k: 20,
-                min_p: 0.0,
-                presence_penalty: 1.5,
-                repetition_penalty: 1.0,
-            },
-        );
-        m.insert(
-            "instruct-reasoning".into(),
-            SamplingPresetValues {
-                temperature: 1.0,
-                top_p: 0.95,
-                top_k: 20,
-                min_p: 0.0,
-                presence_penalty: 1.5,
-                repetition_penalty: 1.0,
-            },
-        );
-    } else if lower.contains("gemma-4") || lower.contains("gemma_4") || lower.contains("gemma4") {
-        // Gemma 4 E4B — official generation_config: temp=1.0, top_k=64, top_p=0.95.
-        // temp=1.0 ломает transition thought→final: модель пишет ответ внутри
-        // reasoning без <|channel>final, клиент видит только «рассуждения» без ответа.
-        // temp=0.6 стабилизирует переход.
-        m.insert(
-            "thinking".into(),
-            SamplingPresetValues {
-                temperature: 0.6,
-                top_p: 0.95,
-                top_k: 64,
-                min_p: 0.0,
-                presence_penalty: 0.0,
-                repetition_penalty: 1.0,
-            },
-        );
-        m.insert(
-            "thinking-coding".into(),
-            SamplingPresetValues {
-                temperature: 0.6,
-                top_p: 0.95,
-                top_k: 64,
-                min_p: 0.0,
-                presence_penalty: 0.0,
-                repetition_penalty: 1.0,
-            },
-        );
-        m.insert(
-            "instruct".into(),
-            SamplingPresetValues {
-                temperature: 0.6,
-                top_p: 0.80,
-                top_k: 64,
-                min_p: 0.0,
-                presence_penalty: 1.5,
-                repetition_penalty: 1.0,
-            },
-        );
-    } else {
-        // Qwen3.8 / Qwen3.5 / Qwen3.6 / General LLM default:
-        m.insert("instruct".into(), SamplingPresetValues::default());
-        m.insert(
-            "thinking".into(),
-            SamplingPresetValues {
-                temperature: 1.0,
-                top_p: 0.95,
-                top_k: 20,
-                min_p: 0.0,
-                presence_penalty: 0.0,
-                repetition_penalty: 1.0,
-            },
-        );
-        m.insert(
-            "thinking-coding".into(),
-            SamplingPresetValues {
-                temperature: 0.6,
-                top_p: 0.95,
-                top_k: 20,
-                min_p: 0.0,
-                presence_penalty: 0.0,
-                repetition_penalty: 1.0,
-            },
-        );
+    match sampling_family_for_model(model_name) {
+        "ornith-1.5" => {
+            // Official Ornith 1.5 card: general 1.0/.95/20/presence 1.5;
+            // precise coding .6/.95/20/presence 0.0.
+            let general = preset(1.0, 0.95, 20, 1.5);
+            insert_modes(
+                &mut m,
+                general.clone(),
+                preset(0.6, 0.95, 20, 0.0),
+                general.clone(),
+                general,
+            );
+        }
+        "ornith" => {
+            // Ornith 1.0 card recommends .6/.95/20 for normal serving.
+            let general = preset(0.6, 0.95, 20, 0.0);
+            insert_modes(
+                &mut m,
+                general.clone(),
+                general.clone(),
+                general.clone(),
+                general,
+            );
+        }
+        "gemma-4" => {
+            // Official Gemma 4 generation_config has one sampling profile;
+            // thinking is controlled by the chat template, not Qwen presets.
+            let official = preset(1.0, 0.95, 64, 0.0);
+            insert_modes(
+                &mut m,
+                official.clone(),
+                official.clone(),
+                official.clone(),
+                official,
+            );
+        }
+        "qwen-3.5" | "qwen-3.6-moe" => {
+            // Qwen 3.5 and Qwen 3.6 MoE differ from dense 3.6/3.8:
+            // general thinking uses presence 1.5.
+            insert_modes(
+                &mut m,
+                preset(1.0, 0.95, 20, 1.5),
+                preset(0.6, 0.95, 20, 0.0),
+                preset(0.7, 0.80, 20, 1.5),
+                preset(1.0, 0.95, 20, 1.5),
+            );
+        }
+        "qwen-3.8" => {
+            // Qwen 3.8 publishes thinking and instruct profiles only.
+            let thinking = preset(1.0, 0.95, 20, 0.0);
+            let instruct = preset(0.7, 0.80, 20, 1.5);
+            insert_modes(
+                &mut m,
+                thinking.clone(),
+                thinking,
+                instruct.clone(),
+                instruct,
+            );
+        }
+        _ => {
+            // Official Qwen 3.6 profiles and safe generic Qwen fallback.
+            let instruct = preset(0.7, 0.80, 20, 1.5);
+            insert_modes(
+                &mut m,
+                preset(1.0, 0.95, 20, 0.0),
+                preset(0.6, 0.95, 20, 0.0),
+                instruct.clone(),
+                instruct,
+            );
+        }
     }
     m
 }
@@ -223,15 +240,22 @@ pub fn default_presets() -> SamplingPresets {
     default_presets_for_model("")
 }
 
-/// QWEN36_PRESETS: JSON-объект {name: {temperature,...}} — частичный merge
-/// поверх встроенных пресетов.
-fn presets_from_env(model_path: &Path) -> Result<SamplingPresets> {
+/// QWEN36_PRESETS: legacy global override.
+/// QWEN36_MODEL_PRESETS: {family: {mode: values}} — model-specific override.
+pub fn presets_from_env(model_path: &Path) -> Result<SamplingPresets> {
     let model_name = model_path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
     let mut presets = default_presets_for_model(&model_name);
     if let Some(raw) = get_env_var("PRESETS") {
         let overrides: SamplingPresets = serde_json::from_str(&raw)
             .map_err(|e| anyhow!("PRESETS: невалидный JSON: {e}"))?;
         presets.extend(overrides);
+    }
+    if let Some(raw) = get_env_var("MODEL_PRESETS") {
+        let overrides: ModelSamplingPresets = serde_json::from_str(&raw)
+            .map_err(|e| anyhow!("MODEL_PRESETS: невалидный JSON: {e}"))?;
+        if let Some(model_overrides) = overrides.get(sampling_family_for_model(&model_name)) {
+            presets.extend(model_overrides.clone());
+        }
     }
     Ok(presets)
 }
@@ -483,6 +507,80 @@ where
 mod tests {
     use super::*;
     use std::env;
+
+    fn assert_preset(
+        presets: &SamplingPresets,
+        name: &str,
+        temperature: f32,
+        top_p: f32,
+        top_k: usize,
+        presence_penalty: f32,
+    ) {
+        let value = presets.get(name).unwrap_or_else(|| panic!("missing preset {name}"));
+        assert_eq!(value.temperature, temperature, "{name}.temperature");
+        assert_eq!(value.top_p, top_p, "{name}.top_p");
+        assert_eq!(value.top_k, top_k, "{name}.top_k");
+        assert_eq!(value.min_p, 0.0, "{name}.min_p");
+        assert_eq!(value.presence_penalty, presence_penalty, "{name}.presence_penalty");
+        assert_eq!(value.repetition_penalty, 1.0, "{name}.repetition_penalty");
+    }
+
+    #[test]
+    fn sampling_family_ignores_quant_and_filename_separators() {
+        assert_eq!(
+            sampling_family_for_model("gemma-4-E4B-it-Q8_0.gguf"),
+            "gemma-4"
+        );
+        assert_eq!(
+            sampling_family_for_model("Ornith_1.5_9B_Q6_K.gguf"),
+            "ornith-1.5"
+        );
+        assert_eq!(
+            sampling_family_for_model("Qwen3.8-27B-UD-Q4_K_XL.gguf"),
+            "qwen-3.8"
+        );
+        assert_eq!(
+            sampling_family_for_model("Qwen3.5-4B-Q4_K_M.gguf"),
+            "qwen-3.5"
+        );
+        assert_eq!(
+            sampling_family_for_model("Qwen3.6-35B-A3B-Q4_K_M.gguf"),
+            "qwen-3.6-moe"
+        );
+    }
+
+    #[test]
+    fn model_sampling_presets_match_official_recommendations() {
+        let gemma = default_presets_for_model("gemma-4-E4B-it-Q8_0.gguf");
+        for mode in ["thinking", "thinking-coding", "instruct", "instruct-reasoning"] {
+            assert_preset(&gemma, mode, 1.0, 0.95, 64, 0.0);
+        }
+
+        let ornith = default_presets_for_model("Ornith-1.5-9B-Q6_K.gguf");
+        assert_preset(&ornith, "thinking", 1.0, 0.95, 20, 1.5);
+        assert_preset(&ornith, "thinking-coding", 0.6, 0.95, 20, 0.0);
+        assert_preset(&ornith, "instruct", 1.0, 0.95, 20, 1.5);
+        assert_preset(&ornith, "instruct-reasoning", 1.0, 0.95, 20, 1.5);
+
+        let qwen38 = default_presets_for_model("Qwen3.8-27B-Q8_0.gguf");
+        assert_preset(&qwen38, "thinking", 1.0, 0.95, 20, 0.0);
+        assert_preset(&qwen38, "thinking-coding", 1.0, 0.95, 20, 0.0);
+        assert_preset(&qwen38, "instruct", 0.7, 0.80, 20, 1.5);
+        assert_preset(&qwen38, "instruct-reasoning", 0.7, 0.80, 20, 1.5);
+
+        let qwen36 = default_presets_for_model("Qwen3.6-27B-Q8_0.gguf");
+        assert_preset(&qwen36, "thinking", 1.0, 0.95, 20, 0.0);
+        assert_preset(&qwen36, "thinking-coding", 0.6, 0.95, 20, 0.0);
+        assert_preset(&qwen36, "instruct", 0.7, 0.80, 20, 1.5);
+        assert_preset(&qwen36, "instruct-reasoning", 0.7, 0.80, 20, 1.5);
+
+        let qwen35 = default_presets_for_model("Qwen3.5-4B-Q4_K_M.gguf");
+        assert_preset(&qwen35, "thinking", 1.0, 0.95, 20, 1.5);
+
+        let qwen36_moe = default_presets_for_model("Qwen3.6-35B-A3B-Q4_K_M.gguf");
+        assert_preset(&qwen36_moe, "thinking", 1.0, 0.95, 20, 1.5);
+        assert_preset(&qwen36_moe, "thinking-coding", 0.6, 0.95, 20, 0.0);
+    }
 
     // Тесты гоняют env процесса — сериализуем вручную через один тест.
     #[test]

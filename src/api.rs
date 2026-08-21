@@ -41,9 +41,10 @@ pub struct AppState {
     pub cuda_device: Arc<RwLock<Option<candle_core::Device>>>,
     /// Прогресс фоновых HF-загрузок (repo/file → state).
     pub hf_downloads: hf::Downloads,
-    /// Дефолты сэмплинга из .env; меняются через POST /v1/sampling_defaults.
+    /// Глобальные fallback/limit defaults из .env; режимные значения берутся
+    /// из model-specific `presets`.
     pub sampling: Arc<RwLock<crate::config::SamplingDefaults>>,
-    /// Пресеты режимов (instruct/thinking/thinking-coding), QWEN36_PRESETS.
+    /// Effective presets активного семейства (built-in + MODEL_PRESETS).
     pub presets: Arc<RwLock<crate::config::SamplingPresets>>,
     /// Путь к .env для персистентности дефолтов.
     pub env_file: std::path::PathBuf,
