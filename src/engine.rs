@@ -364,8 +364,18 @@ impl CandleEngine {
         maybe_retain_mempool(&device);
         let tokenizer = tokenizer::load_from_gguf_path(&cfg.model)?;
         let mut stop_tokens = vec![eos];
+        // GGUF metadata eos для Gemma 4 сломан (200002='▁veal', не <eos>).
+        // Настоящий <eos>=1 (HF). <turn|>=106 — end-of-turn (eot_token).
+        // Добавляем оба по имени, если они есть в словаре.
+        if let Some(t) = tokenizer.token_to_id("<eos>") {
+            if !stop_tokens.contains(&t) {
+                stop_tokens.push(t);
+            }
+        }
         if let Some(turn_end) = tokenizer.token_to_id("<turn|>") {
-            stop_tokens.push(turn_end);
+            if !stop_tokens.contains(&turn_end) {
+                stop_tokens.push(turn_end);
+            }
         }
         let chat_tpl = crate::chat_template::ChatTemplate::from_gguf(&cfg.model);
         Ok(Self {
