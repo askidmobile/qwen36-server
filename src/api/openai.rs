@@ -506,8 +506,13 @@ fn split_reasoning(text: &str) -> (Option<String>, String) {
             .trim_start_matches(['\r', '\n'])
             .trim()
             .to_string();
-        let fallback_content = extract_gemma_fallback_content(&reasoning).unwrap_or_default();
-        return ((!reasoning.is_empty()).then_some(reasoning), fallback_content);
+        let fallback_content = extract_gemma_fallback_content(&reasoning)
+            .unwrap_or_else(|| reasoning.clone());
+        if fallback_content == reasoning {
+            return (None, reasoning);
+        } else {
+            return ((!reasoning.is_empty()).then_some(reasoning), fallback_content);
+        }
     }
     (None, text.to_string())
 }
@@ -793,13 +798,16 @@ async fn stream_chat(
                                 None,
                             )));
                         }
-                        // Если за всю генерацию не было отправлено ни одного чанка content:
-                        // извлекаем финальный ответ из мыслей и эмитим его как content!
-                        if let Some(content_extracted) = extract_gemma_fallback_content(&acc) {
+                        // Если за весь стрим не было отправлено ни одного байта контента:
+                        // извлекаем ответ или отдаем накопленный текст как content!
+                        let fallback = extract_gemma_fallback_content(&acc)
+                            .unwrap_or_else(|| acc.clone());
+                        let fallback = fallback.trim().to_string();
+                        if !fallback.is_empty() {
                             out.push(Event::default().data(chunk(
                                 &id,
                                 &model,
-                                json!({"content": content_extracted}),
+                                json!({"content": fallback}),
                                 None,
                             )));
                         }

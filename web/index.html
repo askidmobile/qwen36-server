@@ -938,6 +938,12 @@ async function send(regen) {
     $("stopbtn").disabled = true;
     $("send").disabled = false;
 
+    // Если модель не прислала content, но прислала thinkText (например, Gemma 4 ответила внутри мысли)
+    if (!asst.content.trim() && asst.thinkText && asst.thinkText.trim()) {
+      asst.content = asst.thinkText;
+      asst.thinkText = "";
+    }
+
     const totalSecs = (performance.now() - t0) / 1000;
     const parts = [];
     if (usage) {
