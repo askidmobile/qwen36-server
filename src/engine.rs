@@ -364,9 +364,10 @@ impl CandleEngine {
         maybe_retain_mempool(&device);
         let tokenizer = tokenizer::load_from_gguf_path(&cfg.model)?;
         let mut stop_tokens = vec![eos];
-        // GGUF metadata eos для Gemma 4 сломан (200002='▁veal', не <eos>).
-        // Настоящий <eos>=1 (HF). <turn|>=106 — end-of-turn (eot_token).
-        // Добавляем оба по имени, если они есть в словаре.
+        // Gemma 4: GGUF eos сломан (200002). Настоящий <eos>=1 (HF).
+        // <turn|>=106 (eot_token) — end-of-turn, ОБЯЗАТЕЛЬНЫЙ stop:
+        // без него модель зацикливается на <turn|> после content
+        // (4096 токенов <turn|><turn|>... loop подтверждён логом).
         if let Some(t) = tokenizer.token_to_id("<eos>") {
             if !stop_tokens.contains(&t) {
                 stop_tokens.push(t);
@@ -602,7 +603,11 @@ fn run_generation(
                 &generated,
                 &mut rng,
             );
+            if generated.len() < 10 {
+                eprintln!("[gemma-tok] first #{} tok={} ({:?})", generated.len(), tok, tokenizer.id_to_token(tok));
+            }
             if stop_tokens.contains(&tok) {
+                eprintln!("[gemma-tok] STOP AT #{} tok={} ({:?})", generated.len(), tok, tokenizer.id_to_token(tok));
                 flush_tail!();
                 finish("stop", generated.len(), &tx);
                 return Ok(());
@@ -612,8 +617,9 @@ fn run_generation(
             // Decode всего вывода (корректно на границах многотокенных UTF-8).
             // ponytail: инкрементальный decode с буфером хвоста — добавить, если профилирование покажет.
             full_text = if architecture == "gemma4" {
-                // Gemma reasoning boundaries are special tokens. Preserve them
-                // here; API layer removes channel markers after splitting.
+                // KEEP special tokens: <|channel>thought, <channel|>, <|channel>final, <turn|>
+                // нужны API-слою для split_reasoning / streaming splitter.
+                // decode(..., false) = skip_special_tokens=false = KEEP special markers.
                 tokenizer.decode(&generated, false).unwrap_or_default()
             } else {
                 tokenizer::decode_text(tokenizer, &generated).unwrap_or_default()

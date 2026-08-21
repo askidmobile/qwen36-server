@@ -198,9 +198,14 @@ where
         }
         guard.disarm();
     });
-    Sse::new(tokio_stream::wrappers::ReceiverStream::new(out_rx))
+    let mut resp = Sse::new(tokio_stream::wrappers::ReceiverStream::new(out_rx))
         .keep_alive(KeepAlive::default())
-        .into_response()
+        .into_response();
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/event-stream; charset=utf-8"),
+    );
+    resp
 }
 
 /// Генерация с накоплением всего текста и финальных метрик.

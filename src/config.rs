@@ -152,6 +152,43 @@ pub fn default_presets_for_model(model_name: &str) -> SamplingPresets {
                 repetition_penalty: 1.0,
             },
         );
+    } else if lower.contains("gemma-4") || lower.contains("gemma_4") || lower.contains("gemma4") {
+        // Gemma 4 E4B — reasoning model. temp=1.0 ломает transition
+        // thought→final (модель —забывает” закрыть <|channel>thought и
+        // пишет ответ внутри reasoning без <|channel>final). temp=0.7 stable.
+        m.insert(
+            "thinking".into(),
+            SamplingPresetValues {
+                temperature: 0.7,
+                top_p: 0.95,
+                top_k: 20,
+                min_p: 0.0,
+                presence_penalty: 0.0,
+                repetition_penalty: 1.0,
+            },
+        );
+        m.insert(
+            "thinking-coding".into(),
+            SamplingPresetValues {
+                temperature: 0.6,
+                top_p: 0.95,
+                top_k: 20,
+                min_p: 0.0,
+                presence_penalty: 0.0,
+                repetition_penalty: 1.0,
+            },
+        );
+        m.insert(
+            "instruct".into(),
+            SamplingPresetValues {
+                temperature: 0.7,
+                top_p: 0.80,
+                top_k: 20,
+                min_p: 0.0,
+                presence_penalty: 1.5,
+                repetition_penalty: 1.0,
+            },
+        );
     } else {
         // Qwen3.8 / Qwen3.5 / Qwen3.6 / General LLM default:
         m.insert("instruct".into(), SamplingPresetValues::default());
@@ -198,6 +235,7 @@ fn presets_from_env(model_path: &Path) -> Result<SamplingPresets> {
     Ok(presets)
 }
 
+#[derive(Debug, Clone)]
 pub struct Config {
     /// Manifest/current pointer (`PROFILE`), если задан.
     pub profile: Option<PathBuf>,

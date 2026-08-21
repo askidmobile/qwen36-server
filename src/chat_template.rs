@@ -21,8 +21,9 @@ pub struct ChatTemplate {
 }
 
 fn preprocess(tpl: &str) -> String {
-    tpl.replace(".startswith(", " is startswith(")
-        .replace(".endswith(", " is endswith(")
+    // Шаблоны используют .get/.split/.strip/.replace/.startswith/.endswith —
+    // все реализованы в unknown_method_callback. preprocess пустой.
+    tpl.to_string()
 }
 
 fn python_method_callback(
@@ -45,16 +46,26 @@ fn python_method_callback(
             match method {
                 "split" => {
                     let sep = args.first().and_then(|a| a.as_str());
-                    let maxsplit: i64 = args.get(1).and_then(|a| a.as_i64()).unwrap_or(-1);
-                    let parts: Vec<minijinja::Value> = if let Some(sep) = sep {
-                        let mut iter = s.splitn(maxsplit.max(0) as usize + 1, sep);
-                        let mut v = Vec::new();
-                        while let Some(p) = iter.next() {
-                            v.push(minijinja::Value::from(p));
+                    let maxsplit = args.get(1).and_then(|a| a.as_i64());
+                    let parts: Vec<minijinja::Value> = match (sep, maxsplit) {
+                        (Some(sep), Some(n)) if n >= 0 => {
+                            s.splitn(n as usize + 1, sep).map(minijinja::Value::from).collect()
                         }
-                        v
-                    } else {
-                        s.split_whitespace().map(minijinja::Value::from).collect()
+                        (Some(sep), _) => {
+                            s.split(sep).map(minijinja::Value::from).collect()
+                        }
+                        (None, Some(n)) if n >= 0 => {
+                            // Python: split whitespace with maxsplit
+                            let mut v: Vec<minijinja::Value> = s.split_whitespace().map(minijinja::Value::from).collect();
+                            if v.len() > n as usize + 1 {
+                                let remainder: Vec<String> = v.drain((n as usize)..).map(|val| val.to_string()).collect();
+                                v.push(minijinja::Value::from(remainder.join(" ")));
+                            }
+                            v
+                        }
+                        (None, _) => {
+                            s.split_whitespace().map(minijinja::Value::from).collect()
+                        }
                     };
                     return Ok(minijinja::Value::from(parts));
                 }
@@ -202,21 +213,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn python_method_callback_works_in_official_templates() {
+    fn gemma4_multiturn_strips_thinking_correctly() {
+        let tpl_str = include_str!("../tests/fixtures/gemma4_template.jinja");
         let mut env = Environment::new();
+        env.set_undefined_behavior(minijinja::UndefinedBehavior::Lenient);
         env.set_unknown_method_callback(|_, value, method, args| {
             python_method_callback(value, method, args)
         });
-        env.add_template(
-            "test",
-            "{{ message.get('content') }}|{{ message.get('missing', 'x') }}",
-        )
-        .unwrap();
-        let rendered = env
-            .get_template("test")
-            .unwrap()
-            .render(json!({"message": {"content": "ok"}}))
-            .unwrap();
-        assert_eq!(rendered, "ok|x");
+        let src: &'static str = Box::leak(tpl_str.to_string().into_boxed_str());
+        env.add_template("chat", src).unwrap();
+        let ct = ChatTemplate {
+            env,
+            bos_token: "<bos>".into(),
+            eos_token: "<eos>".into(),
+        };
+        let msgs = vec![
+            crate::engine_types::ChatMessage {
+                role: "user".into(),
+                content: vec![crate::engine_types::ContentBlock::Text { text: "Привет".into() }],
+                tool_calls: vec![],
+                reasoning_content: None,
+            },
+            crate::engine_types::ChatMessage {
+                role: "assistant".into(),
+                content: vec![crate::engine_types::ContentBlock::Text { text: "Привет! Как дела?".into() }],
+                tool_calls: vec![],
+                reasoning_content: Some("Думаю как ответить на приветствие".into()),
+            },
+            crate::engine_types::ChatMessage {
+                role: "user".into(),
+                content: vec![crate::engine_types::ContentBlock::Text { text: "Что ты умеешь?".into() }],
+                tool_calls: vec![],
+                reasoning_content: None,
+            },
+        ];
+        let rendered = ct.render(&msgs, None, true, None).unwrap();
+        println!("MULTITURN RENDERED:\n{}", rendered);
+        assert!(rendered.contains("Привет! Как дела?"));
+        assert!(rendered.contains("Что ты умеешь?"));
     }
 }

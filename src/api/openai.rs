@@ -425,6 +425,60 @@ pub async fn chat_completions(
     .into_response()
 }
 
+pub fn extract_gemma_fallback_content(reasoning: &str) -> Option<String> {
+    let text = reasoning.trim();
+    if text.is_empty() {
+        return None;
+    }
+    // Маркеры финального ответа в CoT Gemma 4
+    let markers = [
+        "**Final Output Generation:**",
+        "**Final Output Generation.**",
+        "**Final Output:**",
+        "**Output Generation:**",
+        "Final Output Generation:",
+        "Final Output Generation.",
+        "Final Output:",
+        "Final Answer Generation:",
+        "Final Answer Construction",
+        "Final Answer:",
+        "Select the best option:",
+        "Select the final response:",
+        "Output:",
+    ];
+    for m in markers {
+        if let Some(pos) = text.rfind(m) {
+            let tail = text[pos + m.len()..].trim();
+            // Отрезаем скобки типа (In Russian): или (Privet):
+            let candidate = tail.lines().next().unwrap_or(tail).trim();
+            let candidate = candidate.trim_matches(['*', '_', ' ']);
+            // Если ответ в кавычках типа "Привет! Как дела?", извлекаем из кавычек
+            if let Some(start) = candidate.find('"') {
+                if let Some(end) = candidate[start + 1..].find('"') {
+                    let inside = &candidate[start + 1..start + 1 + end];
+                    if !inside.trim().is_empty() {
+                        return Some(inside.trim().to_string());
+                    }
+                }
+            }
+            if !candidate.is_empty() && !candidate.starts_with('(') {
+                return Some(candidate.to_string());
+            }
+        }
+    }
+    // Fallback: последняя строка в кавычках в тексте мыслей
+    if let Some(last_quote_start) = text.rfind('"') {
+        if let Some(prev_quote) = text[..last_quote_start].rfind('"') {
+            let inside = &text[prev_quote + 1..last_quote_start];
+            // Проверяем, что внутри есть буквы и это осмысленный ответ
+            if inside.chars().any(char::is_alphabetic) && inside.len() < 500 && !inside.contains('\n') {
+                return Some(inside.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
 fn split_reasoning(text: &str) -> (Option<String>, String) {
     if let Some(close) = text.find("</think>") {
         let reasoning = text[..close].trim().to_string();
@@ -452,7 +506,8 @@ fn split_reasoning(text: &str) -> (Option<String>, String) {
             .trim_start_matches(['\r', '\n'])
             .trim()
             .to_string();
-        return ((!reasoning.is_empty()).then_some(reasoning), String::new());
+        let fallback_content = extract_gemma_fallback_content(&reasoning).unwrap_or_default();
+        return ((!reasoning.is_empty()).then_some(reasoning), fallback_content);
     }
     (None, text.to_string())
 }
@@ -601,19 +656,23 @@ async fn stream_chat(
                             }
                         }
                         2 => {
-                            // Ищем <|channel>final. Пропускаем whitespace между.
+                            // Ищем <|channel>final или переход к прямому тексту после <channel|>
                             if let Some(p) = gemma_buf.find(GEMMA_FINAL_OPEN) {
                                 gemma_buf.drain(..p + GEMMA_FINAL_OPEN.len());
-                                // Съедаем leading newlines
+                                while let Some(c) = gemma_buf.chars().next() {
+                                    if c == '\n' || c == '\r' || c == ' ' { gemma_buf.drain(..c.len_utf8()); } else { break; }
+                                }
+                                gemma_phase = 3;
+                            } else if gemma_buf.starts_with("<|channel>") || GEMMA_FINAL_OPEN.starts_with(&gemma_buf) {
+                                // Частичный тег <|channel>final — ждем продолжения
+                                break;
+                            } else if !gemma_buf.trim().is_empty() && !gemma_buf.contains('<') {
+                                // Модель не выделила тег final, а сразу начала отвечать текстом
                                 while let Some(c) = gemma_buf.chars().next() {
                                     if c == '\n' || c == '\r' || c == ' ' { gemma_buf.drain(..c.len_utf8()); } else { break; }
                                 }
                                 gemma_phase = 3;
                             } else {
-                                let safe = gemma_buf.len().saturating_sub(GEMMA_FINAL_OPEN.len());
-                                let boundary = gemma_buf.floor_char_boundary(safe);
-                                gemma_buf.drain(..boundary);
-                                // если буфер мал и нет final-open, ждём больше
                                 break;
                             }
                         }
@@ -713,6 +772,17 @@ async fn stream_chat(
             let finish = if gemma_channel {
                 // Добиваем хвост gemma_buf по текущей фазе.
                 match gemma_phase {
+                    0 => {
+                        let c = gemma_buf.trim().to_string();
+                        if !c.is_empty() {
+                            out.push(Event::default().data(chunk(
+                                &id,
+                                &model,
+                                json!({"content": c}),
+                                None,
+                            )));
+                        }
+                    }
                     1 => {
                         let r = gemma_buf.trim().to_string();
                         if !r.is_empty() {
@@ -723,8 +793,18 @@ async fn stream_chat(
                                 None,
                             )));
                         }
+                        // Если за всю генерацию не было отправлено ни одного чанка content:
+                        // извлекаем финальный ответ из мыслей и эмитим его как content!
+                        if let Some(content_extracted) = extract_gemma_fallback_content(&acc) {
+                            out.push(Event::default().data(chunk(
+                                &id,
+                                &model,
+                                json!({"content": content_extracted}),
+                                None,
+                            )));
+                        }
                     }
-                    3 => {
+                    2 | 3 => {
                         let c = gemma_buf.trim().to_string();
                         if !c.is_empty() {
                             out.push(Event::default().data(chunk(
@@ -907,10 +987,12 @@ mod tests {
             "seed": 42
         }))
         .unwrap();
+        let defaults = crate::config::SamplingDefaults::default();
+        let presets = crate::config::default_presets();
         let params = to_gen_params(
             &req,
-            &state.sampling.read().expect("sampling lock"),
-            &state.presets.read().expect("presets lock"),
+            &defaults,
+            &presets,
         );
         assert_eq!(params.top_k, 7);
         assert_eq!(params.min_p, 0.1);
