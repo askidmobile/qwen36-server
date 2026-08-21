@@ -571,7 +571,7 @@ function inlineMd(s) {
     .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
 }
 
-function parseThinking(text, assumeThinking) {
+function parseThinking(text) {
   const close = text.search(/<\/(think|thinking)>/i);
   const open = text.search(/<(think|thinking)>/i);
   if (close >= 0 && (open < 0 || open > close)) {
@@ -582,7 +582,6 @@ function parseThinking(text, assumeThinking) {
     if (after.trim()) parts.push({ kind: "text", text: after.replace(/^\n+/, "") });
     if (parts.length) return parts;
   }
-  if (assumeThinking && open < 0 && close < 0 && text.trim()) return [{ kind: "think", text }];
   const re = /<(think|thinking)>([\s\S]*?)(?:<\/\1>|$)/i;
   const m = text.match(re);
   if (m) {
@@ -679,8 +678,9 @@ function fillBubble(bubble, msg, streaming) {
       bubble.append(det);
       if (streaming) tc.scrollTop = tc.scrollHeight;
     }
-    const assumeThinking = msg.thinking === true && !msg.thinkText;
-    for (const part of parseThinking(msg.content || "", assumeThinking)) {
+    // `thinking` означает режим запроса, не тип `content`. Reasoning приходит
+    // отдельно в thinkText; обычный content всегда показываем как ответ.
+    for (const part of parseThinking(msg.content || "")) {
       if (part.kind === "think") {
         const det = document.createElement("details");
         det.className = "think";
