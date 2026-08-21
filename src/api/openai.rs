@@ -382,13 +382,22 @@ pub async fn chat_completions(
     // Отрезать Qwen </think> и Gemma 4 thought-channel из content.
     let (reasoning, text_body) = split_reasoning(&out.text);
     let (text, calls) = parse_tool_calls(&text_body);
+    // Gemma fallback: если content пустой, но reasoning есть —
+    // переносим reasoning в content, чтобы пользователь не получил пустой ответ
+    // (модель часто пишет весь ответ внутри reasoning без перехода к <|channel>final).
+    let is_gemma = state.engine.model_info().id.starts_with("gemma-4");
+    let (final_content, final_reasoning) = if text.is_empty() && reasoning.is_some() && is_gemma {
+        (reasoning.clone(), None)
+    } else {
+        ((!text.is_empty()).then_some(text), reasoning)
+    };
     let finish = if !calls.is_empty() {
         "tool_calls"
     } else {
         out.finish_reason.as_str()
     };
-    let mut message = json!({"role": "assistant", "content": if text.is_empty() { Value::Null } else { json!(text) }});
-    if let Some(r) = reasoning {
+    let mut message = json!({"role": "assistant", "content": final_content.map(Value::String).unwrap_or(Value::Null)});
+    if let Some(r) = final_reasoning {
         message["reasoning_content"] = json!(r);
     }
     if !calls.is_empty() {

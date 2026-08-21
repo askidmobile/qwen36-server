@@ -667,7 +667,9 @@ function fillBubble(bubble, msg, streaming) {
     if (msg.thinkText) {
       const det = document.createElement("details");
       det.className = "think";
-      det.open = !!streaming;
+      // Если content пустой (модель написала ответ внутри reasoning без final-канала),
+      // оставляем рассуждения открытыми после завершения стрима.
+      det.open = streaming || !msg.content || !msg.content.trim();
       const sum = document.createElement("summary");
       const words = msg.thinkText.trim().split(/\s+/).filter(Boolean).length;
       sum.textContent = "Рассуждения" + (words ? " · " + words + " слов" : "");
@@ -682,7 +684,8 @@ function fillBubble(bubble, msg, streaming) {
       if (part.kind === "think") {
         const det = document.createElement("details");
         det.className = "think";
-        det.open = !!streaming;
+        // Оставляем открытым если нет последующего контента
+        det.open = streaming || !msg.content || !msg.content.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
         const sum = document.createElement("summary");
         const words = part.text.trim().split(/\s+/).filter(Boolean).length;
         sum.textContent = "Рассуждения" + (words ? " · " + words + " слов" : "");
@@ -897,6 +900,13 @@ async function send(regen) {
           const ch = j.choices && j.choices[0];
           const delta = ch && ch.delta;
           if (delta && delta.reasoning_content) {
+            if (!firstDeltaAt) firstDeltaAt = performance.now();
+            if (!liveT0) liveT0 = performance.now();
+            liveTok++;
+            const ls = (performance.now() - liveT0) / 1000;
+            if (ls > 0.5) {
+              liveEl.textContent = "⚡ " + (liveTok / ls >= 10 ? (liveTok / ls).toFixed(0) : (liveTok / ls).toFixed(1)) + " tok/s";
+            }
             asst.thinkText = (asst.thinkText || "") + delta.reasoning_content;
             scheduleRedraw();
           }
