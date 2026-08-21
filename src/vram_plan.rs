@@ -32,6 +32,35 @@ pub struct ModelFootprint {
     pub ssm_state_mib_per_block: f64,
 }
 
+/// Кэш footprint по (path, mtime, size): антивирус тормозит открытие GGUF на 1-3с.
+static FP_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, (u64, u64, ModelFootprint)>>,
+> = std::sync::OnceLock::new();
+
+pub fn footprint_from_gguf_cached(path: &Path) -> Result<ModelFootprint> {
+    let meta = std::fs::metadata(path)?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let size = meta.len();
+    let cache = FP_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Ok(guard) = cache.lock() {
+        if let Some((m, sz, fp)) = guard.get(path) {
+            if *m == mtime && *sz == size {
+                return Ok(fp.clone());
+            }
+        }
+    }
+    let fp = footprint_from_gguf(path)?;
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(path.to_path_buf(), (mtime, size, fp.clone()));
+    }
+    Ok(fp)
+}
+
 /// Чтение footprint из GGUF (только metadata + tensor_infos, без данных).
 pub fn footprint_from_gguf(path: &Path) -> Result<ModelFootprint> {
     use candle_core::quantized::gguf_file::Content;

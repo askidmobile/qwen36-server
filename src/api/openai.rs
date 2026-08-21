@@ -908,7 +908,7 @@ pub async fn list_models(State(state): State<AppState>) -> Response {
     let (native_ctx, size_mib) = tokio::task::spawn_blocking({
         let p = path.clone();
         move || {
-            crate::vram_plan::footprint_from_gguf(&p)
+            crate::vram_plan::footprint_from_gguf_cached(&p)
                 .map(|fp| (fp.native_ctx, fp.weights_mib))
                 .unwrap_or((0, 0))
         }

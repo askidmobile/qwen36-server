@@ -20,11 +20,34 @@ use std::sync::Arc;
 
 use super::{api_error, AppState};
 
-/// Кэш сканирования моделей: (mtime-маркер корня, список моделей).
-/// Скан D:\\Models с 20+ GGUF на 300GB диске занимает 5-20 секунд
-/// (глубокие деревья + stat каждого файла). Кэш держит последний результат.
+/// Кэш сканирования моделей: (unixtime сек сохранения, список моделей).
+/// Скан D:\\Models с 20+ GGUF занимает 30+ секунд (антивирус, глубокие деревья).
+/// TTL 60 сек: WebUI поллит каждые 2с — повторные запросы мгновенные.
 static SCAN_CACHE: std::sync::OnceLock<std::sync::Mutex<Option<(u64, Vec<Value>)>>> =
     std::sync::OnceLock::new();
+const SCAN_CACHE_TTL: u64 = 60;
+
+/// Кэш architecture по (path, mtime, size): чтение GGUF-заголовка у антивируса
+/// занимает ~1.6s на файл. Файлы не меняются годами — читаем один раз.
+static ARCH_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, (u64, u64, String)>>,
+> = std::sync::OnceLock::new();
+
+fn cached_architecture(p: &std::path::Path, mtime: u64, size: u64) -> String {
+    let cache = ARCH_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Ok(guard) = cache.lock() {
+        if let Some((m, sz, arch)) = guard.get(p) {
+            if *m == mtime && *sz == size {
+                return arch.clone();
+            }
+        }
+    }
+    let arch = crate::engine::gguf_architecture(p).unwrap_or_else(|_| "unknown".into());
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(p.to_path_buf(), (mtime, size, arch.clone()));
+    }
+    arch
+}
 use crate::engine::Engine;
 use crate::engine_batched::{BatchConfig, BatchedEngine};
 use crate::vram_plan;
@@ -119,12 +142,12 @@ pub fn scan_gguf_cached(dir: &Path, depth: usize, out: &mut Vec<Value>, use_cach
             // Capability registry: только архитектуры с реальным runtime route
             // получают supported=true. Прочие честно помечаются unsupported с reason.
             let size_mib = e.metadata().map(|m| m.len() / 1024 / 1024).unwrap_or(0);
-            let (supported, backend, reason) = match crate::engine::gguf_architecture(
-                &p,
-            ) {
-                Ok(a) => crate::engine::architecture_capability(&a),
-                Err(_) => (false, "unknown", "cannot read GGUF architecture"),
-            };
+            let mtime = e.metadata().and_then(|m| m.modified()).ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs()).unwrap_or(0);
+            let file_size = e.metadata().map(|m| m.len()).unwrap_or(0);
+            let arch = cached_architecture(&p, mtime, file_size);
+            let (supported, backend, reason) = crate::engine::architecture_capability(&arch);
             out.push(json!({
                 "name": name,
                 "path": p.to_string_lossy(),
@@ -150,7 +173,7 @@ pub async fn model_native_ctx(
         return Json(json!({"native_ctx": 0, "error": "outside models_dir"}));
     }
     let nc = tokio::task::spawn_blocking(move || {
-        crate::vram_plan::footprint_from_gguf(&p)
+        crate::vram_plan::footprint_from_gguf_cached(&p)
             .map(|fp| fp.native_ctx)
             .unwrap_or(0)
     })
@@ -172,7 +195,7 @@ pub async fn ctx_matrix(
     }
     let total = vram_plan::total_vram_mib();
     let r = tokio::task::spawn_blocking(move || {
-        let fp = vram_plan::footprint_from_gguf(&p)?;
+        let fp = vram_plan::footprint_from_gguf_cached(&p)?;
         let (kv_budget_mib, kv_per_tok_mib) = match total {
             Some(t) => {
                 let plan = vram_plan::compute_dynamic(t, &fp, 262144, 4)?;
@@ -196,18 +219,24 @@ pub async fn ctx_matrix(
 }
 
 pub async fn available_models(State(state): State<AppState>) -> Json<Value> {
+    let t0 = std::time::Instant::now();
     let mut out = Vec::new();
-    let marker = state
-        .models_dir
-        .metadata()
-        .and_then(|m| m.modified())
-        .map(|t| t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0))
+    let t_scan = std::time::Instant::now();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
         .unwrap_or(0);
     let cached = SCAN_CACHE
         .get()
         .and_then(|c| c.lock().ok())
         .and_then(|guard| {
-            guard.as_ref().and_then(|(m, models)| if *m == marker { Some(models.clone()) } else { None })
+            guard.as_ref().and_then(|(saved_at, models)| {
+                if now.saturating_sub(*saved_at) < SCAN_CACHE_TTL {
+                    Some(models.clone())
+                } else {
+                    None
+                }
+            })
         });
     let mut out = match cached {
         Some(models) => models,
@@ -217,10 +246,11 @@ pub async fn available_models(State(state): State<AppState>) -> Json<Value> {
             let _ = SCAN_CACHE
                 .get_or_init(|| std::sync::Mutex::new(None))
                 .lock()
-                .map(|mut guard| *guard = Some((marker, out.clone())));
+                .map(|mut guard| *guard = Some((now, out.clone())));
             out
         }
     };
+    let t_prof = std::time::Instant::now();
     let mut profiles = Vec::new();
     scan_profiles(&state.models_dir, 0, &mut profiles);
     profiles.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
@@ -238,6 +268,13 @@ pub async fn available_models(State(state): State<AppState>) -> Json<Value> {
         Value::Null
     };
     let (ready, load_err) = (state.switcher.ready(), state.switcher.load_error());
+    eprintln!(
+        "[avail] total={:.1}s scan={:.1}s profiles={:.1}s models={}",
+        t0.elapsed().as_secs_f64(),
+        t_scan.elapsed().as_secs_f64(),
+        t_prof.elapsed().as_secs_f64(),
+        out.len()
+    );
     Json(json!({
         "models_dir": state.models_dir.to_string_lossy(),
         "current": current_json,
@@ -571,7 +608,7 @@ pub async fn do_switch(
     // 1. VRAM-план для новой модели (dynamic: ctx до native, бюджет в движок).
     // Pending/claimed media belongs to old profile and must never survive switch.
     state.media.store.purge_all();
-    let fp = vram_plan::footprint_from_gguf(&path)?;
+    let fp = vram_plan::footprint_from_gguf_cached(&path)?;
     let (ctx, slots, kv_budget_mib, kv_per_tok_mib) = match vram_plan::total_vram_mib() {
         Some(total) => {
             let plan = vram_plan::compute_dynamic(total, &fp, req_ctx, req_slots)?;
