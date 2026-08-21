@@ -19,6 +19,12 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use super::{api_error, AppState};
+
+/// Кэш сканирования моделей: (mtime-маркер корня, список моделей).
+/// Скан D:\\Models с 20+ GGUF на 300GB диске занимает 5-20 секунд
+/// (глубокие деревья + stat каждого файла). Кэш держит последний результат.
+static SCAN_CACHE: std::sync::OnceLock<std::sync::Mutex<Option<(u64, Vec<Value>)>>> =
+    std::sync::OnceLock::new();
 use crate::engine::Engine;
 use crate::engine_batched::{BatchConfig, BatchedEngine};
 use crate::vram_plan;
@@ -82,6 +88,10 @@ fn scan_profiles(dir: &Path, depth: usize, out: &mut Vec<Value>) {
 }
 
 pub fn scan_gguf(dir: &Path, depth: usize, out: &mut Vec<Value>) {
+    scan_gguf_cached(dir, depth, out, false)
+}
+
+pub fn scan_gguf_cached(dir: &Path, depth: usize, out: &mut Vec<Value>, use_cache: bool) {
     if depth > 3 {
         return;
     }
@@ -91,7 +101,7 @@ pub fn scan_gguf(dir: &Path, depth: usize, out: &mut Vec<Value>) {
     for e in rd.flatten() {
         let p = e.path();
         if p.is_dir() {
-            scan_gguf(&p, depth + 1, out);
+            scan_gguf_cached(&p, depth + 1, out, use_cache);
         } else if p.extension().and_then(|s| s.to_str()) == Some("gguf") {
             let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("?");
             // Пропускаем незагружаемые: split-части (-00001-of-00002) и mmproj.
@@ -187,8 +197,30 @@ pub async fn ctx_matrix(
 
 pub async fn available_models(State(state): State<AppState>) -> Json<Value> {
     let mut out = Vec::new();
-    scan_gguf(&state.models_dir, 0, &mut out);
-    out.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    let marker = state
+        .models_dir
+        .metadata()
+        .and_then(|m| m.modified())
+        .map(|t| t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0))
+        .unwrap_or(0);
+    let cached = SCAN_CACHE
+        .get()
+        .and_then(|c| c.lock().ok())
+        .and_then(|guard| {
+            guard.as_ref().and_then(|(m, models)| if *m == marker { Some(models.clone()) } else { None })
+        });
+    let mut out = match cached {
+        Some(models) => models,
+        None => {
+            scan_gguf(&state.models_dir, 0, &mut out);
+            out.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+            let _ = SCAN_CACHE
+                .get_or_init(|| std::sync::Mutex::new(None))
+                .lock()
+                .map(|mut guard| *guard = Some((marker, out.clone())));
+            out
+        }
+    };
     let mut profiles = Vec::new();
     scan_profiles(&state.models_dir, 0, &mut profiles);
     profiles.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
@@ -436,7 +468,7 @@ pub async fn switch_model(
     } else {
         // поиск по имени в models_dir
         let mut found = Vec::new();
-        scan_gguf(&state.models_dir, 0, &mut found);
+        scan_gguf_cached(&state.models_dir, 0, &mut found, true);
         found
             .iter()
             .find(|m| m["name"].as_str() == Some(req.path.as_str()))

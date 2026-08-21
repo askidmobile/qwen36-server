@@ -153,15 +153,16 @@ pub fn default_presets_for_model(model_name: &str) -> SamplingPresets {
             },
         );
     } else if lower.contains("gemma-4") || lower.contains("gemma_4") || lower.contains("gemma4") {
-        // Gemma 4 E4B — reasoning model. temp=1.0 ломает transition
-        // thought→final (модель —забывает” закрыть <|channel>thought и
-        // пишет ответ внутри reasoning без <|channel>final). temp=0.7 stable.
+        // Gemma 4 E4B — official generation_config: temp=1.0, top_k=64, top_p=0.95.
+        // temp=1.0 ломает transition thought→final: модель пишет ответ внутри
+        // reasoning без <|channel>final, клиент видит только «рассуждения» без ответа.
+        // temp=0.6 стабилизирует переход.
         m.insert(
             "thinking".into(),
             SamplingPresetValues {
-                temperature: 0.7,
+                temperature: 0.6,
                 top_p: 0.95,
-                top_k: 20,
+                top_k: 64,
                 min_p: 0.0,
                 presence_penalty: 0.0,
                 repetition_penalty: 1.0,
@@ -172,7 +173,7 @@ pub fn default_presets_for_model(model_name: &str) -> SamplingPresets {
             SamplingPresetValues {
                 temperature: 0.6,
                 top_p: 0.95,
-                top_k: 20,
+                top_k: 64,
                 min_p: 0.0,
                 presence_penalty: 0.0,
                 repetition_penalty: 1.0,
@@ -181,9 +182,9 @@ pub fn default_presets_for_model(model_name: &str) -> SamplingPresets {
         m.insert(
             "instruct".into(),
             SamplingPresetValues {
-                temperature: 0.7,
+                temperature: 0.6,
                 top_p: 0.80,
-                top_k: 20,
+                top_k: 64,
                 min_p: 0.0,
                 presence_penalty: 1.5,
                 repetition_penalty: 1.0,

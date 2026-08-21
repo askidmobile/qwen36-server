@@ -250,7 +250,7 @@ pub async fn chat_completions(
     if !requested.is_empty() && requested != current_id.to_lowercase() {
         // Ищем matching GGUF в models_dir.
         let mut found: Vec<Value> = Vec::new();
-        crate::api::admin::scan_gguf(&state.models_dir, 0, &mut found);
+        crate::api::admin::scan_gguf_cached(&state.models_dir, 0, &mut found, true);
         let match_path = found.iter().find_map(|m| {
             let path = m["path"].as_str()?;
             // Сравниваем по model_id_from_filename (нормализованное имя).
