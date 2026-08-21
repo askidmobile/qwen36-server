@@ -238,7 +238,7 @@ pub async fn available_models(State(state): State<AppState>) -> Json<Value> {
                 }
             })
         });
-    let mut out = match cached {
+    let out = match cached {
         Some(models) => models,
         None => {
             scan_gguf(&state.models_dir, 0, &mut out);
