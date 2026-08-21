@@ -509,10 +509,123 @@ async fn stream_chat(
     let mut think_acc = String::new();
     let mut reasoning_done = !thinking;
     const THINK_CLOSE: &str = "</think>";
+    // Gemma streaming splitter: теги <|channel>thought ... <channel|> ... <|channel>final ...
+    // Эмитим reasoning_content инкрементально, content — после <|channel>final.
+    const GEMMA_THOUGHT_OPEN: &str = "<|channel>thought";
+    const GEMMA_CLOSE: &str = "<channel|>";
+    const GEMMA_FINAL_OPEN: &str = "<|channel>final";
+    let mut gemma_buf = String::new();
+    // 0=ищем thought-open, 1=в thought (до close), 2=ищем final-open, 3=в final
+    let mut gemma_phase: u8 = 0;
     sse_response(rx, cancel, move |ev, out| match ev {
         StreamEvent::Delta(d) => {
             if gemma_channel {
+                if first {
+                    first = false;
+                    out.push(Event::default().data(chunk(
+                        &id,
+                        &model,
+                        json!({"role": "assistant"}),
+                        None,
+                    )));
+                }
                 acc.push_str(&d);
+                gemma_buf.push_str(&d);
+                loop {
+                    match gemma_phase {
+                        0 => {
+                            // Ищем <|channel>thought. Если нет — возможно prefix мусор;
+                            // держим хвост под частичный тег.
+                            if let Some(p) = gemma_buf.find(GEMMA_THOUGHT_OPEN) {
+                                gemma_buf.drain(..p + GEMMA_THOUGHT_OPEN.len());
+                                gemma_phase = 1;
+                            } else {
+                                let safe = gemma_buf.len().saturating_sub(GEMMA_THOUGHT_OPEN.len());
+                                let boundary = gemma_buf.floor_char_boundary(safe);
+                                // prefix без thought-open: эмитим как content
+                                if boundary > 0 {
+                                    let pre = gemma_buf[..boundary].to_string();
+                                    gemma_buf.drain(..boundary);
+                                    if !pre.trim().is_empty() {
+                                        out.push(Event::default().data(chunk(
+                                            &id,
+                                            &model,
+                                            json!({"content": pre}),
+                                            None,
+                                        )));
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                        1 => {
+                            // В thought: ищем <channel|>. Эмитим reasoning_content,
+                            // держим хвост под частичный тег.
+                            if let Some(p) = gemma_buf.find(GEMMA_CLOSE) {
+                                let reasoning = gemma_buf[..p].to_string();
+                                gemma_buf.drain(..p + GEMMA_CLOSE.len());
+                                if !reasoning.trim().is_empty() {
+                                    out.push(Event::default().data(chunk(
+                                        &id,
+                                        &model,
+                                        json!({"reasoning_content": reasoning}),
+                                        None,
+                                    )));
+                                }
+                                gemma_phase = 2;
+                            } else {
+                                let safe = gemma_buf.len().saturating_sub(GEMMA_CLOSE.len());
+                                let boundary = gemma_buf.floor_char_boundary(safe);
+                                if boundary > 0 {
+                                    let reasoning = gemma_buf[..boundary].to_string();
+                                    gemma_buf.drain(..boundary);
+                                    if !reasoning.is_empty() {
+                                        out.push(Event::default().data(chunk(
+                                            &id,
+                                            &model,
+                                            json!({"reasoning_content": reasoning}),
+                                            None,
+                                        )));
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                        2 => {
+                            // Ищем <|channel>final. Пропускаем whitespace между.
+                            if let Some(p) = gemma_buf.find(GEMMA_FINAL_OPEN) {
+                                gemma_buf.drain(..p + GEMMA_FINAL_OPEN.len());
+                                // Съедаем leading newlines
+                                while let Some(c) = gemma_buf.chars().next() {
+                                    if c == '\n' || c == '\r' || c == ' ' { gemma_buf.drain(..c.len_utf8()); } else { break; }
+                                }
+                                gemma_phase = 3;
+                            } else {
+                                let safe = gemma_buf.len().saturating_sub(GEMMA_FINAL_OPEN.len());
+                                let boundary = gemma_buf.floor_char_boundary(safe);
+                                gemma_buf.drain(..boundary);
+                                // если буфер мал и нет final-open, ждём больше
+                                break;
+                            }
+                        }
+                        3 => {
+                            // В final: эмитим всё как content.
+                            if !gemma_buf.is_empty() {
+                                let c = std::mem::take(&mut gemma_buf);
+                                if !c.is_empty() {
+                                    out.push(Event::default().data(chunk(
+                                        &id,
+                                        &model,
+                                        json!({"content": c}),
+                                        None,
+                                    )));
+                                }
+                            }
+                            break;
+                        }
+                        _ => break,
+                    }
+                }
                 return true;
             }
             if first {
@@ -588,42 +701,68 @@ async fn stream_chat(
                     None,
                 )));
             }
-            let (reasoning, text_body) = if gemma_channel {
-                split_reasoning(&acc)
-            } else {
-                (None, acc.clone())
-            };
-            if let Some(reasoning) = reasoning {
-                out.push(Event::default().data(chunk(
-                    &id,
-                    &model,
-                    json!({"reasoning_content": reasoning}),
-                    None,
-                )));
-            }
-            let (text, calls) = parse_tool_calls(&text_body);
-            // tools в запросе: текст буферизован — эмитим его (без tool_call
-            // разметки) одной дельтой до tool_calls-чанков.
-            if (has_tools || gemma_channel) && !text.is_empty() {
-                out.push(Event::default().data(chunk(&id, &model, json!({"content": text}), None)));
-            }
-            for (i, (name, args)) in calls.iter().enumerate() {
-                out.push(Event::default().data(chunk(
-                    &id,
-                    &model,
-                    json!({"tool_calls": [{
-                        "index": i,
-                        "id": format!("call_{}", uuid::Uuid::new_v4().simple()),
-                        "type": "function",
-                        "function": {"name": name, "arguments": args},
-                    }]}),
-                    None,
-                )));
-            }
-            let finish = if calls.is_empty() {
+            let finish = if gemma_channel {
+                // Добиваем хвост gemma_buf по текущей фазе.
+                match gemma_phase {
+                    1 => {
+                        let r = gemma_buf.trim().to_string();
+                        if !r.is_empty() {
+                            out.push(Event::default().data(chunk(
+                                &id,
+                                &model,
+                                json!({"reasoning_content": r}),
+                                None,
+                            )));
+                        }
+                    }
+                    3 => {
+                        let c = gemma_buf.trim().to_string();
+                        if !c.is_empty() {
+                            out.push(Event::default().data(chunk(
+                                &id,
+                                &model,
+                                json!({"content": c}),
+                                None,
+                            )));
+                        }
+                    }
+                    _ => {}
+                }
                 finish_reason.as_str()
             } else {
-                "tool_calls"
+                let (reasoning, text_body) = split_reasoning(&acc);
+                if let Some(reasoning) = reasoning {
+                    out.push(Event::default().data(chunk(
+                        &id,
+                        &model,
+                        json!({"reasoning_content": reasoning}),
+                        None,
+                    )));
+                }
+                let (text, calls) = parse_tool_calls(&text_body);
+                // tools в запросе: текст буферизован — эмитим его (без tool_call
+                // разметки) одной дельтой до tool_calls-чанков.
+                if (has_tools || gemma_channel) && !text.is_empty() {
+                    out.push(Event::default().data(chunk(&id, &model, json!({"content": text}), None)));
+                }
+                for (i, (name, args)) in calls.iter().enumerate() {
+                    out.push(Event::default().data(chunk(
+                        &id,
+                        &model,
+                        json!({"tool_calls": [{
+                            "index": i,
+                            "id": format!("call_{}", uuid::Uuid::new_v4().simple()),
+                            "type": "function",
+                            "function": {"name": name, "arguments": args},
+                        }]}),
+                        None,
+                    )));
+                }
+                if calls.is_empty() {
+                    finish_reason.as_str()
+                } else {
+                    "tool_calls"
+                }
             };
             out.push(Event::default().data(chunk(&id, &model, json!({}), Some(finish))));
             if include_usage {
