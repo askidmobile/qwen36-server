@@ -687,6 +687,17 @@ fn run_generation(
     if let Err(e) = result {
         let _ = tx.blocking_send(StreamEvent::Error(format!("{e:#}")));
     }
+    if let Ok(mut st) = state.lock() {
+        // PREFIX_CACHE_MIB=0: завершённый KV больше не нужен. Освобождаем до
+        // trim, иначе long prefill оставляет карту заполненной до следующего запроса.
+        st.model.clear_state();
+        #[cfg(feature = "cuda")]
+        if let Ok(cuda) = st.device.as_cuda_device() {
+            use candle_core::backend::BackendDevice;
+            let _ = cuda.synchronize();
+            let _ = candle_core::cuda_backend::mem_pool::trim_default_mempool(cuda);
+        }
+    }
 }
 
 /// Логиты последнего токена: forward возвращает [1, vocab] (seq=1) либо [1, seq, vocab].
