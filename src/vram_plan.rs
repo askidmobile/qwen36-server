@@ -116,19 +116,24 @@ pub fn footprint_from_gguf(path: &Path) -> Result<ModelFootprint> {
 
 /// Total VRAM (MiB) через nvidia-smi (Windows/Linux). None если недоступно
 /// (macOS/CPU — планер не применяется, unified memory).
+/// Кэш total VRAM: nvidia-smi subprocess на Windows стоит 2-3s на вызов.
+static TOTAL_VRAM_CACHE: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+
 pub fn total_vram_mib() -> Option<usize> {
-    let out = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&out.stdout)
-        .split_whitespace()
-        .next()?
-        .parse()
-        .ok()
+    *TOTAL_VRAM_CACHE.get_or_init(|| {
+        let out = std::process::Command::new("nvidia-smi")
+            .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .next()?
+            .parse()
+            .ok()
+    })
 }
 
 /// Свободная VRAM (MiB) через nvidia-smi. Для ожидания освобождения при switch.
