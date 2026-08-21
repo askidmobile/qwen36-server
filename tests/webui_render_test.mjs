@@ -17,4 +17,7 @@ assert.deepEqual(parseThinking("<think>план</think>ответ"), [
   { kind: "text", text: "ответ" },
 ]);
 
+assert.match(html, /attachbtn"\)\.disabled = !enabled/);
+assert.match(html, /Gemma 4 GGUF сейчас загружена без vision mmproj runtime/);
+
 console.log("webui render regression: ok");

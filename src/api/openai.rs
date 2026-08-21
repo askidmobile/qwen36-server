@@ -917,7 +917,7 @@ pub async fn list_models(State(state): State<AppState>) -> Response {
     .unwrap_or((0, 0));
     let d = state.sampling.read().expect("sampling lock").clone();
     let profile = state.profile.as_ref();
-    let capabilities = profile.map(|profile| profile.capabilities()).unwrap_or(
+    let mut capabilities = profile.map(|profile| profile.capabilities()).unwrap_or(
         crate::profile::EffectiveCapabilities {
             text: true,
             vision: false,
@@ -926,6 +926,8 @@ pub async fn list_models(State(state): State<AppState>) -> Response {
             native_context: native_ctx,
         },
     );
+    capabilities.vision &= state.engine.supports_vision();
+    capabilities.video &= state.engine.supports_video();
     Json(json!({
         "object": "list",
         "data": [{

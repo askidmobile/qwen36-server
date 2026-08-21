@@ -8,6 +8,13 @@ use serde_json::json;
 use super::{media_error, ApiKeyIdentity, AppState};
 
 pub async fn upload(State(state): State<AppState>, request: Request<Body>) -> Response {
+    if !state.engine.supports_vision() && !state.engine.supports_video() {
+        return crate::api::api_error(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "component_unavailable",
+            "Active runtime has no vision component. Gemma 4 GGUF is loaded text-only; mmproj runtime is not implemented.",
+        );
+    }
     let owner = match request.extensions().get::<ApiKeyIdentity>() {
         Some(owner) => owner.clone(),
         None => return crate::api::internal_error("API key identity missing"),

@@ -475,6 +475,8 @@ impl Engine for BatchedEngine {
         Ok(out_rx)
     }
 
+    fn supports_vision(&self) -> bool { self.vision_path.is_some() }
+    fn supports_video(&self) -> bool { self.vision_path.is_some() }
     fn model_info(&self) -> ModelInfo {
         self.info.clone()
     }

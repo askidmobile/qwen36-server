@@ -76,6 +76,12 @@ impl Engine for SwappableEngine {
         }
     }
 
+    fn supports_vision(&self) -> bool {
+        self.inner.read().expect("engine lock").as_ref().map(|e| e.supports_vision()).unwrap_or(false)
+    }
+    fn supports_video(&self) -> bool {
+        self.inner.read().expect("engine lock").as_ref().map(|e| e.supports_video()).unwrap_or(false)
+    }
     fn model_info(&self) -> ModelInfo {
         let (path, ctx, slots) = self.current.read().expect("current lock").clone();
         let engine = { self.inner.read().expect("engine lock").clone() };

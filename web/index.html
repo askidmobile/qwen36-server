@@ -401,6 +401,13 @@ function renderTray() {
 }
 
 function addFiles(files) {
+  const caps = (lastModelInfo && lastModelInfo.capabilities) || {};
+  const unsupported = files.find(f => f.type.startsWith("video/") ? !caps.video : !caps.vision);
+  if (unsupported) {
+    const kind = unsupported.type.startsWith("video/") ? "Видео" : "Изображения";
+    toast(kind + " не поддерживаются активным runtime. Gemma 4 GGUF сейчас загружена без vision mmproj runtime.", true);
+    return;
+  }
   for (const f of files) {
     const isVid = f.type.startsWith("video/");
     const kind = isVid ? "video" : "image";
@@ -455,6 +462,7 @@ async function loadModels() {
       hideKeyForm();
       lastModelInfo = m;
       renderCurInfo();
+      updateMediaControls();
       // Дефолты сэмплинга с сервера (.env) — заполняем поля, если пользователь
       // не менял режим вручную в этой сессии.
       if (m.sampling_defaults && !sessionStorage.getItem("q36_params_dirty")) {
@@ -1087,6 +1095,16 @@ document.addEventListener("keydown", e => {
 }, true);
 
 /* current model card */
+function updateMediaControls() {
+  const caps = (lastModelInfo && lastModelInfo.capabilities) || {};
+  const enabled = !!(caps.vision || caps.video);
+  $("attachbtn").disabled = !enabled;
+  $("fileinput").disabled = !enabled;
+  $("attachbtn").title = enabled
+    ? "Прикрепить изображение или видео"
+    : "Активный runtime не поддерживает изображения/видео";
+}
+
 function renderCurInfo() {
   const el = $("curinfo");
   const m = lastModelInfo;
@@ -1097,7 +1115,10 @@ function renderCurInfo() {
   t.style.fontWeight = "600";
   const q = document.createElement("div");
   q.className = "q";
-  q.textContent = [m.quant, "ctx " + (m.context_length || "?"), "slots " + (m.slots ?? "?")].filter(Boolean).join(" · ");
+  const media = m.capabilities && (m.capabilities.vision || m.capabilities.video)
+    ? "vision"
+    : "text-only";
+  q.textContent = [m.quant, "ctx " + (m.context_length || "?"), "slots " + (m.slots ?? "?"), media].filter(Boolean).join(" · ");
   el.append(t, q);
 }
 let lastModelInfo = null;
