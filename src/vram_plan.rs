@@ -287,8 +287,9 @@ mod tests {
 
     fn fp_35b() -> ModelFootprint {
         // Qwen3.6-35B-A3B: 40 блоков, interval 4 → 10 attn / 30 delta.
+        // weights ≈ реальный UD-IQ2_XXS (9745 MiB по GGUF metadata).
         ModelFootprint {
-            weights_mib: 10500,
+            weights_mib: 9745,
             attn_blocks: 10,
             delta_blocks: 30,
             kv_heads: 2,
