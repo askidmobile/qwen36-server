@@ -6,7 +6,7 @@
 
 ## 1. Суть проекта
 
-Rust-сервер инференса **Qwen3.6-27B** (GGUF, 2-bit) на **собственном candle-форке** (candle-fork-qwen35-batch), с тремя API-интерфейсами и веб-чатом. Целевая площадка — Windows-машина yttri-win (RTX 3060 12 GB). Модель обслуживает **4 одновременных клиента** через готовый batch-планировщик из qwen35-batch.
+Rust-сервер инференса **Qwen3.6-27B** (GGUF, 2-bit) на **собственном candle-форке** (candle-fork), с тремя API-интерфейсами и веб-чатом. Целевая площадка — Windows-машина yttri-win (RTX 3060 12 GB). Модель обслуживает **4 одновременных клиента** через готовый batch-планировщик из qwen35-batch.
 
 llama.cpp осознанно НЕ используется как компонент — только как эталон для parity/бенчей (BD-001).
 
@@ -29,7 +29,7 @@ flowchart LR
   Clients["Клиенты: браузерный чат, Codex/OpenCode, curl"] -->|"HTTP, API key"| Server["qwen36-server (Rust)"]
   Server --> Engines["Chat Completions / Responses / Messages"]
   Server --> Sched["BatchScheduler 4 слота"]
-  Sched --> Candle["candle-fork-qwen35-batch: Qwen3.5/3.6 GGUF, DeltaNet, batched decode"]
+  Sched --> Candle["candle-fork: Qwen3.5/3.6 GGUF, DeltaNet, batched decode"]
   Candle --> GPU["CUDA RTX 3060 (yttri-win) / Metal (macOS) / CPU fallback"]
 ```
 
@@ -78,7 +78,7 @@ flowchart LR
 ## 9. Интеграции и окружение
 
 - HF: скачивание GGUF (unsloth/Qwen3.6-27B-GGUF).
-- candle-fork-qwen35-batch как path-зависимость (BD-010).
+- candle-fork как path-зависимость (BD-010).
 - yttri-win (192.168.2.89): Windows, RTX 3060 12 GB, диск D:.
 - Клиенты: OpenAI SDK, Anthropic SDK, браузер.
 

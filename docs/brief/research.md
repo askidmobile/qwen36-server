@@ -28,7 +28,7 @@
 
 ## Состояние candle-форков
 
-### candle-fork-qwen35-batch (ветка feat/qwen35-batching)
+### candle-fork (ветка feat/qwen35-batching)
 - `qwen35-batch/` крейт: BatchScheduler (4 слота), real-model path (`src/real/`), time-multiplexing + настоящий batched DeltaNet decode (Metal + CUDA).
 - Коммиты: Phase 1-6 batched decode, CPU fallback для forward_decode_batch, CUDA валидация на RTX 3060 (parity + quality + throughput, ×1.44 aggregate на Metal).
 - `REAL_MODEL.md`: настоящий batched decode на текущем Candle невозможен без переписки Metal-ядер; реализован обход (общие веса + per-slot state snapshot ~114 MB).

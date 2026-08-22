@@ -158,10 +158,11 @@ const WORKSPACE_MIB: usize = 384;
 pub const VISION_COMPONENT_ESTIMATE_MIB: usize = 650;
 pub const MTP_COMPONENT_ESTIMATE_MIB: usize = 160;
 /// Доля карты, выше которой начинается paging/риск OOM.
-/// 93%: на 12 GB карте это ~500 MiB запаса — ниже начинается WDDM paging
-/// (измерено: 98% → коллапс скорости). 90% было бы безопаснее, но тогда
-/// 35B-A3B IQ2_XXS не влезает даже минимально — а работает (впритык).
-const BUDGET_FRAC: f64 = 0.93;
+/// 0.89: оставляем постоянные ~1.35 GB dedicated-запаса на 12 GB карте под
+/// страницы CUDA-пула и транзиенты декода. При 0.93 карта уходила в 97-98%
+/// занятости → транзиентные буферы decode селились в WDDM shared memory →
+/// коллапс 2.4 tok/s при ctx 24K (измерено 2026-08-22, см. BD-лог и урок).
+const BUDGET_FRAC: f64 = 0.89;
 
 fn kv_mib_per_slot(fp: &ModelFootprint, ctx: usize) -> f64 {
     // 2 = K+V; 2B = F16.

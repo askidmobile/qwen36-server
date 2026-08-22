@@ -71,9 +71,14 @@ function Measure-Decode {
             if ($json -eq '[DONE]') { continue }
             try {
                 $obj = $json | ConvertFrom-Json
-                if ($obj.choices -and $obj.choices[0].delta -and $obj.choices[0].delta.content) {
-                    if (-not $ttft) { $ttft = $sw.Elapsed.TotalSeconds }
-                    $tokCount++
+                # Считаем и content, и reasoning_content: thinking-модели
+                # отдают первые токены в reasoning — это тот же decode.
+                if ($obj.choices -and $obj.choices[0].delta) {
+                    $d = $obj.choices[0].delta
+                    if ($d.content -or $d.reasoning_content) {
+                        if (-not $ttft) { $ttft = $sw.Elapsed.TotalSeconds }
+                        $tokCount++
+                    }
                 }
             } catch {}
         }

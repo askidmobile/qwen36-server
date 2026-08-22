@@ -64,8 +64,8 @@ SHA-256: 25082A7DD3776CC3C741C6347D3BD04523F05796607B3FBC32FA3A25DFA1418C
 - `src/api/admin.rs` — сканирует text GGUF и исключает `mmproj`.
 - `src/vram_plan.rs` — планирует text weights, KV и recurrent state, но не component/media budgets.
 - `web/index.html` — text-only WebUI.
-- `candle-fork-qwen35-batch/qwen35-batch/src/real/model_weights.rs` — правильный hybrid layout, partial RoPE и text decode.
-- `candle-fork-qwen35-batch/qwen35-batch/src/real/tokenizer.rs` — text chat template/tokenizer path.
+- `candle-fork/qwen35-batch/src/real/model_weights.rs` — правильный hybrid layout, partial RoPE и text decode.
+- `candle-fork/qwen35-batch/src/real/tokenizer.rs` — text chat template/tokenizer path.
 
 Рабочая Windows-среда проекта:
 

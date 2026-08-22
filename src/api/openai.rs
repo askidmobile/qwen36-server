@@ -528,8 +528,11 @@ mod reasoning_tests {
             (Some("work".into()), "answer".into())
         );
         assert_eq!(
+            // Незавершённый thought без final-канала: fallback-extractor
+            // (09d0ad0) не может уверенно отделить ответ — текст идёт в
+            // content целиком, reasoning-канал не открывается.
             split_reasoning("<|channel>thought\nunfinished"),
-            (Some("unfinished".into()), String::new())
+            (None, "unfinished".to_string())
         );
     }
 }

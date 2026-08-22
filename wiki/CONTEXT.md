@@ -33,5 +33,5 @@ Compiled: 2026-08-08 | Topics: 5 | Sources: 25 | Auto-updates on session start
 
 ## Concepts
 
-- **candle-fork-coupling** — path-зависимость на candle-fork-qwen35-batch, TODO-F1..F6
+- **candle-fork-coupling** — path-зависимость на candle-fork, TODO-F1..F6
 - **not-send-serialization** — модель не Send → один поток + channels

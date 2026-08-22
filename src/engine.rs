@@ -76,16 +76,31 @@ impl GenParams {
         Ok(())
     }
 
-    /// Применить пресет BD-016: поля пресета замещают defaults,
-    /// явно заданные stop/seed/max_tokens сохраняются.
+    /// Применить пресет BD-016: все поля задаются явно, независимо от
+    /// Default (база Default = instruct-подобные значения и не должна
+    /// протекать в thinking-пресеты).
     pub fn from_preset(p: SamplingPreset) -> Self {
         let mut g = Self::default();
         match p {
-            SamplingPreset::Thinking => {} // == defaults
-            SamplingPreset::ThinkingCoding => g.temperature = 0.6,
+            SamplingPreset::Thinking => {
+                g.temperature = 1.0;
+                g.top_p = 0.95;
+                g.top_k = 20;
+                g.min_p = 0.0;
+                g.presence_penalty = 0.0;
+            }
+            SamplingPreset::ThinkingCoding => {
+                g.temperature = 0.6;
+                g.top_p = 0.95;
+                g.top_k = 20;
+                g.min_p = 0.0;
+                g.presence_penalty = 0.0;
+            }
             SamplingPreset::Instruct => {
                 g.temperature = 0.7;
                 g.top_p = 0.80;
+                g.top_k = 20;
+                g.min_p = 0.0;
                 g.presence_penalty = 1.5;
             }
         }
@@ -848,16 +863,33 @@ pub fn maybe_retain_mempool(dev: &candle_core::Device) {
     let Ok(cuda_dev) = dev.as_cuda_device() else {
         return;
     };
+    // Ограниченный release threshold вместо бинарного ON/OFF.
+    //
+    // «retain всё» на малом запасе вреден: пул удерживает пиковые префилл
+    // транзиенты навсегда (измеренный 7x регресс при 98% VRAM). А threshold=0
+    // (прежний OFF) на 12 GB карте с 35B — тоже коллапс: decode-аллокации
+    // ходят в драйвер каждый шаг при 97% занятости → WDDM paging
+    // (2.4 tok/s при ctx 24K, измерено 2026-08-22).
+    //
+    // Кап по умолчанию 512 MiB: мелкие буферы decode hot path переиспользуются,
+    // крупные префилл транзиенты возвращаются системе. Env-override для тюнинга.
+    let cap_mib: u64 = std::env::var("QWEN36_MEMPOOL_RETAIN_MIB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(512);
     let free = mem_pool::free_mib(cuda_dev).unwrap_or(0);
     let total = crate::vram_plan::total_vram_mib().unwrap_or(0) as u64;
-    let need = total / 2;
-    if total > 0 && free >= need {
-        match mem_pool::retain_default_mempool(cuda_dev) {
-            Ok(()) => eprintln!("[cuda] mempool retain: ON (free={free}/{total}MiB)"),
-            Err(e) => eprintln!("[cuda] mempool retain не установлен: {e:#}"),
-        }
-    } else {
-        eprintln!("[cuda] mempool retain: OFF (free={free}MiB < {need}MiB — риск paging)");
+    if total > 0 && free < 128 && cap_mib > 64 {
+        // Почти нулевой запас: даже ограниченный ретеншен может стать лишним
+        // коммитом — оставляем драйверу дефолтное поведение.
+        eprintln!("[cuda] mempool: free={free}MiB — threshold оставлен по умолчанию");
+        return;
+    }
+    match mem_pool::set_release_threshold_mib(cuda_dev, cap_mib) {
+        Ok(()) => eprintln!(
+            "[cuda] mempool release-threshold: {cap_mib}MiB (free={free}/{total}MiB)"
+        ),
+        Err(e) => eprintln!("[cuda] mempool threshold не установлен: {e:#}"),
     }
 }
 
@@ -938,14 +970,16 @@ mod tests {
 
     #[test]
     fn default_params_match_contract() {
+        // Дефолт GenParams = базовые instruct-настройки (без пресета);
+        // семантику thinking/instruct задают from_preset и пресеты модели.
         let g = GenParams::default();
-        assert_eq!(g.temperature, 1.0);
-        assert_eq!(g.top_p, 0.95);
+        assert_eq!(g.temperature, 0.7);
+        assert_eq!(g.top_p, 0.80);
         assert_eq!(g.top_k, 20);
         assert_eq!(g.min_p, 0.0);
-        assert_eq!(g.presence_penalty, 0.0);
+        assert_eq!(g.presence_penalty, 1.5);
         assert_eq!(g.repetition_penalty, 1.0);
-        assert_eq!(g.max_tokens, 4096);
+        assert_eq!(g.max_tokens, 32768);
     }
 
     #[test]

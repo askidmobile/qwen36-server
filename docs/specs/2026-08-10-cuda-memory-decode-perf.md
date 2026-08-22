@@ -23,9 +23,9 @@ Decode не упирается в аллокации и paging: убрать cud
 
 Затронутый код (оба репозитория — siblings, сервер path-зависит от форка):
 
-- `candle-fork-qwen35-batch/candle-core/src/cuda_backend/mod.rs` — прямые `dev.alloc`/`cudaMalloc` без пула; `gemm_reduced_precision_f16=false` (F32 аккумулятор, HGEMM уже используется в decode attention после фикса 2026-08-10).
-- `candle-fork-qwen35-batch/qwen35-batch/src/real/model_weights.rs` — KV cache batched (`kv_cache_batched`, cap 512, рост с копированием), GQA `broadcast_as().contiguous()` копии per slot per step, DeltaNet `forward_prefill` token-by-token (4096 syncs/чанк), embedding lookup на CPU + H2D каждый шаг.
-- `candle-fork-qwen35-batch/qwen35-batch/src/scheduler.rs` — `PREFILL_CHUNK=512` (env `QWEN36_PREFILL_CHUNK`).
+- `candle-fork/candle-core/src/cuda_backend/mod.rs` — прямые `dev.alloc`/`cudaMalloc` без пула; `gemm_reduced_precision_f16=false` (F32 аккумулятор, HGEMM уже используется в decode attention после фикса 2026-08-10).
+- `candle-fork/qwen35-batch/src/real/model_weights.rs` — KV cache batched (`kv_cache_batched`, cap 512, рост с копированием), GQA `broadcast_as().contiguous()` копии per slot per step, DeltaNet `forward_prefill` token-by-token (4096 syncs/чанк), embedding lookup на CPU + H2D каждый шаг.
+- `candle-fork/qwen35-batch/src/scheduler.rs` — `PREFILL_CHUNK=512` (env `QWEN36_PREFILL_CHUNK`).
 - `Qwen3.6 27B/src/sampler.rs` — полный `sort_unstable` 248K логитов.
 - `Qwen3.6 27B/src/config.rs`, `engine_batched.rs` — конфиг `QWEN36_CTX`/`QWEN36_SLOTS` без привязки к VRAM.
 - Metal scratch-арена (T-269, `model_weights.rs` `scratch_arena`) — эталонный паттерн для CUDA пула.

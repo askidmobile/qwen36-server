@@ -2,7 +2,7 @@
 name = "qwen36-server"
 version = "0.1.0"
 edition = "2021"
-description = "Qwen3.6-27B GGUF inference server на candle-fork-qwen35-batch (BD-002)"
+description = "Qwen3.6-27B GGUF inference server на candle-fork (BD-002)"
 
 [dependencies]
 # Форк лежит соседней директорией (macOS/Windows/Linux одинаково):

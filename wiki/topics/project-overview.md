@@ -10,7 +10,7 @@ status: active
 
 ## Purpose [coverage: high — 9 sources]
 
-`qwen36-server` — Rust-сервер инференса **Qwen3.6-27B** (GGUF, 2-bit) на собственном candle-форке [candle-fork-qwen35-batch](../candle-fork-qwen35-batch). Три API (OpenAI Chat Completions, OpenAI Responses, Anthropic Messages) + веб-чат. 4 одновременных клиента через batch-планировщик. Целевая площадка: Windows + CUDA (yttri-win, RTX 3060 12 GB).
+`qwen36-server` — Rust-сервер инференса **Qwen3.6-27B** (GGUF, 2-bit) на собственном candle-форке [candle-fork](../candle-fork). Три API (OpenAI Chat Completions, OpenAI Responses, Anthropic Messages) + веб-чат. 4 одновременных клиента через batch-планировщик. Целевая площадка: Windows + CUDA (yttri-win, RTX 3060 12 GB).
 
 Ключевые параметры:
 - Модель: unsloth/Qwen3.6-27B-GGUF → старт UD-Q2_K_XL (11.8 GB); фаза 2 — IQ2 (BD-003)
@@ -22,7 +22,7 @@ status: active
 
 ## Architecture [coverage: high — 9 sources]
 
-Single Rust-крейт, path-зависимость на `candle-fork-qwen35-batch`. Структура:
+Single Rust-крейт, path-зависимость на `candle-fork`. Структура:
 
 ```
 src/
@@ -56,7 +56,7 @@ Engine выбирается по `QWEN36_SLOTS`: slots > 1 → BatchedEngine; sl
 
 ## Talks To [coverage: high — 9 sources]
 
-- **candle-fork-qwen35-batch** (path-dep) — `qwen35-batch` крейт: `ModelWeights`, `Qwen35BatchAdapter`, `BatchScheduler`, `tokenizer` (build_chatml_text, encode_no_think, decode_text, strip_thinking). `candle-core` — Device/Tokenizer типы.
+- **candle-fork** (path-dep) — `qwen35-batch` крейт: `ModelWeights`, `Qwen35BatchAdapter`, `BatchScheduler`, `tokenizer` (build_chatml_text, encode_no_think, decode_text, strip_thinking). `candle-core` — Device/Tokenizer типы.
 - **axum 0.8** — HTTP-сервер, SSE, Router, middleware
 - **tokio** — async runtime, mpsc channels, spawn_blocking
 - **tokenizers 0.22** — BPE-токенизатор (загружается из GGUF metadata)

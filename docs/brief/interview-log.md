@@ -5,7 +5,7 @@
 ### Исходный бриф (brain dump, дословно по сути)
 
 > Нужно собрать и сделать инференс модели Qwen3.6 27b на 2bit (https://huggingface.co/unsloth/Qwen3.6-27B-GGUF) со всеми нашими разработками в части candle:
-> `/Volumes/Askid Dev/Projects/candle-fork`, `/Volumes/Askid Dev/Projects/candle-fork-qwen35-batch`, `/Volumes/Askid Dev/Projects/Qwen3.5 4b`.
+> `/Volumes/Askid Dev/Projects/candle-fork`, `/Volumes/Askid Dev/Projects/candle-fork`, `/Volumes/Askid Dev/Projects/Qwen3.5 4b`.
 > Создать полноценный интерфейс для работы с моделью через Chat Completion API (OpenAI Comp), Response API (OpenAI), Message API (Anthropic). Доступ по API KEY.
 > Стек — RUST. Запуск — Windows в первую очередь. Тестовая машина: yttri-win (192.168.2.89), работать на диске D: (на C: нет места), RTX 3060 12 GB.
 > Веб-чат в браузере: указывать API KEY, чат с моделью, показ скорости генерации в токенах, наполнение контекстного окна и т.п.
@@ -60,7 +60,7 @@
 ### C10 — Расположение кода
 
 **Q: Где живёт код сервера?**
-→ **В папке «Qwen3.6 27B»** — standalone крейт с path-зависимостью на форк (candle-fork-qwen35-batch).
+→ **В папке «Qwen3.6 27B»** — standalone крейт с path-зависимостью на форк (candle-fork).
 
 ### C10 — Платформы
 

@@ -7,7 +7,7 @@ HTTP-слой не должен знать, какой engine под ним.
 
 ## 1. Что уже есть в форке (переиспользуем, не дублируем)
 
-Источник: `/Volumes/Askid Dev/Projects/candle-fork-qwen35-batch/qwen35-batch/`.
+Источник: `/Volumes/Askid Dev/Projects/candle-fork/qwen35-batch/`.
 
 | Компонент | Файл | Что даёт |
 |---|---|---|

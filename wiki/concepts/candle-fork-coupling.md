@@ -9,7 +9,7 @@ status: active
 
 ## Pattern
 
-`qwen36-server` — не standalone-крейт в смысле зависимостей: он path-dependent на локальный candle-fork-qwen35-batch (`/Volumes/Askid Dev/Projects/candle-fork-qwen35-batch`). Это проявляется в:
+`qwen36-server` — не standalone-крейт в смысле зависимостей: он path-dependent на локальный candle-fork (`/Volumes/Askid Dev/Projects/candle-fork`). Это проявляется в:
 - `Cargo.toml` path-deps на `qwen35-batch` и `candle-core` из форка
 - Переиспользование `ModelWeights`, `BatchScheduler`, `Qwen35BatchAdapter`, `tokenizer` напрямую из форка
 - Протокол интеграции (docs/batch-integration.md) описывает TODO-F1..F6 — точки расширения, требующие мини-патчи в форке

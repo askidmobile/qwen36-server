@@ -15,6 +15,9 @@ struct MockEngine {
 
 #[async_trait::async_trait]
 impl Engine for MockEngine {
+    fn supports_vision(&self) -> bool { true }
+    fn supports_video(&self) -> bool { true }
+
     async fn generate(
         &self,
         _request: InferenceRequest,
@@ -86,7 +89,15 @@ fn app(deltas: Vec<&str>) -> axum::Router {
         .into(),
         models_dir: std::path::PathBuf::from("."),
         profile: None,
-        cuda_device: None,
+        cuda_device: Arc::new(std::sync::RwLock::new(None)),
+        hf_downloads: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        sampling: Arc::new(std::sync::RwLock::new(
+            qwen36_server::config::SamplingDefaults::default(),
+        )),
+        presets: Arc::new(std::sync::RwLock::new(
+            qwen36_server::config::SamplingPresets::new(),
+        )),
+        env_file: std::path::PathBuf::from(".env"),
     })
 }
 
@@ -287,6 +298,7 @@ async fn chat_completions_stream_has_done() {
             "/v1/chat/completions",
             serde_json::json!({
                 "messages": [{"role": "user", "content": "hi"}],
+                "thinking": false,
                 "stream": true,
                 "stream_options": {"include_usage": true},
             }),

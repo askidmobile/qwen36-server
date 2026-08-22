@@ -75,7 +75,15 @@ fn app(engine: Arc<CaptureEngine>) -> axum::Router {
         .into(),
         models_dir: ".".into(),
         profile: None,
-        cuda_device: None,
+        cuda_device: Arc::new(std::sync::RwLock::new(None)),
+        hf_downloads: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        sampling: Arc::new(std::sync::RwLock::new(
+            qwen36_server::config::SamplingDefaults::default(),
+        )),
+        presets: Arc::new(std::sync::RwLock::new(
+            qwen36_server::config::SamplingPresets::new(),
+        )),
+        env_file: std::path::PathBuf::from(".env"),
     })
 }
 
@@ -196,6 +204,8 @@ async fn decoded_image_preparation_reports_usage_and_cleans_claim() {
     std::env::set_var("QWEN36_MEDIA_HELPER", helper);
     let messages = vec![qwen36_server::engine_types::ChatMessage {
         role: "user".into(),
+        tool_calls: Vec::new(),
+        reasoning_content: None,
         content: vec![
             ContentBlock::Text {
                 text: "до".into()
@@ -250,6 +260,8 @@ async fn upload_claim_is_deleted_when_preparation_is_cancelled() {
     cancel.cancel();
     let messages = vec![qwen36_server::engine_types::ChatMessage {
         role: "user".into(),
+        tool_calls: Vec::new(),
+        reasoning_content: None,
         content: vec![ContentBlock::Media {
             kind: qwen36_server::media::MediaKind::Image,
             source: MediaSource::UploadId {

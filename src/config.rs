@@ -606,8 +606,8 @@ mod tests {
         assert_eq!(c.api_keys[0].name, "primary");
         assert_eq!(c.model, PathBuf::from("models/qwen36-27b-q2_k_xl.gguf"));
         assert_eq!(c.host, "0.0.0.0");
-        assert_eq!(c.port, 8080);
-        assert_eq!(c.ctx, 81920);
+        assert_eq!(c.port, 18099);
+        assert_eq!(c.ctx, 131072);
         assert_eq!(c.slots, 4);
 
         env::set_var("QWEN36_PORT", "9000");
