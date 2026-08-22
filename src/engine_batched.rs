@@ -173,6 +173,18 @@ impl BatchedEngine {
             anyhow::bail!("prefix cache temporarily disabled (QWEN36_PREFIX_CACHE_MIB>0)");
         }
         let cfg = Arc::new(cfg);
+        // Опциональные упреждающие f16-зеркала KV (P1): выгодны на картах с
+        // большим запасом VRAM или при одном активном длинном запросе.
+        // По умолчанию ВЫКЛЮЧЕНЫ: на 12 GB полное покрытие 24K x 2 слота
+        // (~960 MiB) оставляет <100 MiB на транзиенты префилла → регрессия
+        // (урок 2026-08-23). Включать явно через QWEN36_KV_MIRROR_TOKENS.
+        #[cfg(feature = "cuda")]
+        if let Some(mirror_tokens) = std::env::var("QWEN36_KV_MIRROR_TOKENS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+        {
+            std::env::set_var("QWEN36_KV_MIRROR_PREPARE", mirror_tokens.to_string());
+        }
         let (tx_ingest, rx_ingest) = mpsc::channel(cfg.max_queue);
 
         // TODO-F1: загрузка адаптера (блокирующе) + токенизатора.
