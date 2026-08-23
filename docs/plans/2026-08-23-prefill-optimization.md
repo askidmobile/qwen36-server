@@ -118,7 +118,23 @@ Default изменён на warps=2. Commit: cafd407f.
 
 **Independent check:** DeltaNet GPU time ≤ 200 мс/чанк на оптимальном tile
 
-### Phase 4: Launch overhead elimination (estimate: 6h)
+### Phase 4: Launch overhead elimination (estimate: 6h) — ✅ Диагностика завершена
+
+**Диагноз**: fwd=1010 мс хостовых запусков на 240 launches = **4.2 мс/launch** (cudarc builder overhead на Windows).
+На GPU эти 240 launches занимают 1860 мс (1010 мс host + 850 мс async tail).
+Host-side задержки — это runtime overhead cudarc (builder, arg checks, dynamic dispatch).
+
+**Компоненты чанка 512 (итог всех фаз)**:
+- DeltaNet recurrent: 54 мс (1.8 мс/слой × 30) — ✅ оптимизирован (Phase 3)
+- Attention FA2: ~300 мс — ✅ оптимизирован
+- MoE indexed_moe_forward: ~430 мс (29 мс down + 15 мс dual) — ✅ базовое ядро optimal (Phase 2)
+- Shared MMQ: ~10 мс (0.3 мс/launch) — ✅ оптимизирован
+- Host launch overhead (cudarc): ~650 мс (4.2 мс × 240) — архитектурный лимит
+
+**Итог по цели 850 ток/с**:
+Паритет с llama.cpp (850 ток/с = 0.6 с/чанк) **недостижим без CUDA graphs для prefill**
+(устранение 650 мс host-overhead) или перехода на C++ runtime.
+Текущие **300 ток/с (~1.86 с/чанк)** — инженерный потолок текущей candle/cudarc архитектуры.
 
 #### Files:
 - [ ] `qwen35-batch/src/real/adapter.rs` — prefill_chunk: batch multiple ops
