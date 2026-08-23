@@ -50,7 +50,39 @@ SLOTS≥2 → BatchedEngine — замерять только на batched.
 | 2.2 | Профиль | заменён env `QWEN36_MTP_PATH` (main.rs) — постоянное улучшение |
 | 2.3 | Замер 4B | выполнен, см. таблицу |
 | 2.4 | Критерий ≥10% прироста | НЕ выполнен — регрессия ×3.7 |
-| **P0.5** | Профилирование раунда: где теряется время (draft forward / verify / rollback D2D копий KV), acceptance rate по шагам (`QWEN36_MTP_TIMING` не печатает — починить вывод) | open |
+| **P0.5** | Профилирование раунда | **done, данные ниже** |
+
+### P0.5 — Данные профилирования MTP-раунда (2026-08-23)
+
+Замер Qwen3.5-4B @ctx~6K, `QWEN36_MTP_TIMING=1` (печать работала — прошлый grep
+искал неверный тег; реальный формат `[mtp] slot K m begin/draft/verify/sample/accept/commit`):
+
+```
+[mtp] K=3 m=3 begin=1.4 draft=9..15 verify=22..24 sample=2 accept=0..16 commit=0.1 ms
+```
+
+- **Acceptance отличный**: почти все раунды m=3 из K=3 (полный accept); редкий
+  откат m=2 стоит 15.6 мс (D2D restore KV).
+- **draft 9–15 мс** — подозрительно дорого для одного блока: подозрение — D2H-sync
+  после argmax каждого чернового токена (`to_vec1::<u32>()` ×3 за раунд).
+- **verify 22–24 мс** — легитимная цена multi-token прохода через все блоки.
+  Важно: **FA2-varlen в prefill/verify уже включён по умолчанию**
+  (`candle_flash_attn::flash_attn(..., causal)`, откат `QWEN36_DISABLE_FLASH_PREFILL`)
+  — фаза P2 в исходной постановке фактически выполнена ранее.
+- **Главная аномалия**: сумма фаз ~45 мс/раунд, раундов ~43 на 128 токенов ≈ 2 с,
+  а wall-time декода ≈ 9 с. **~75% времени — между раундами** (scheduler loop,
+  sampler restore/checkpoint, push_verified, SSE-стриминг).
+- Следующий шаг P0.5b: инструментировать межраундовый интервал; убрать D2H-sync
+  в draft (batched argmax / async copy).
+
+| # | Задача | Статус |
+|---|---|---|
+| 2.1 | Артефакт 35B-A3B: unsloth-репо содержит ПОЛНЫЕ модели со встроенным MTP — тонкого артефакта нет. Нужен конвертер официального MTP-checkpoint'а Qwen → наш thin-GGUF (пайплайн qwen35_artifacts.ps1) | open |
+| 2.2 | Профиль | заменён env `QWEN36_MTP_PATH` (main.rs) — постоянное улучшение |
+| 2.3 | Замер 4B | выполнен: 53→14.2 ток/с |
+| 2.4 | Критерий ≥10% прироста | НЕ выполнен — регрессия ×3.7 |
+| P0.5a | Данные раунда собраны | done |
+| P0.5b | Межраундовый интервал + D2H-sync в draft | open |
 
 ## Фаза W1 — Unsloth Studio как UI
 
@@ -61,14 +93,21 @@ SLOTS≥2 → BatchedEngine — замерять только на batched.
 | 3.3 | Чек-лист совместимости: GET /v1/models поля; SSE-стрим; tool calls (native формат); Think-toggle ↔ наши пресеты (`chat_template_kwargs.enable_thinking`); attachments → /v1/media |
 | 3.4 | Глюки → задачи в TASKS.md; наш web/ пометить admin-fallback в README |
 
-## Фаза P2 — Prefill FA2 varlen
+## Фаза P2 — Prefill: FA2 уже включён, искать вне attention
+
+**Обновлено 2026-08-23:** flash-attn v2 causal в prefill-ветке CUDA уже активен
+по умолчанию (P2 в исходной постановке выполнен). Замер `[pf] chunk blocks:
+delta=160ms attn=137ms` на чанк 512 → при 47 чанках ≈14 с из 150 s общего
+префилла @24K. **~135 с — вне блочных счётчиков**: подозреваемые — DeltaNet
+prefill внутри чанка (token-by-token хвост), seed/copy KV в batched буферы,
+boundary-logits + lm_head, аллокации пула. Следующий шаг — суммарный тайминг
+чанка по фазам (расширить `[pf]`-строки) и точечный фикс доминанты.
 
 | # | Задача |
 |---|---|
-| 4.1 | Точка: `forward_attn_with_rope` ветка seq>1 CUDA (сейчас materialized scores → softmax_last_dim, строки ~3226/3339) |
-| 4.2 | Заменить на `candle_flash_attn::flash_attn(q,k,v,scale,true)` (causal), F16-каст Q/K/V |
-| 4.3 | Parity: fixed-seed продолжение совпадает (допустим дрейф <1e-3 logits — зафиксировать порог) |
-| 4.4 | DeltaNet-блоки: убедиться что `[pf] chunk` путь не деградировал; узкое место после — отдельная задача FR-P3 |
+| 4.1 | Расширить [pf]-тайминг: delta-inner / attn / ffn / seed-copy / boundary |
+| 4.2 | Зафиксировать доминанту и завести точечную задачу |
+| 4.3 | Критерий: префилл @24K ≤ 60 с |
 
 ## Фаза P4 — CUDA graphs (после P1/P2 замеров)
 
