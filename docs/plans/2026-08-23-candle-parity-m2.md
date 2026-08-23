@@ -82,7 +82,8 @@ SLOTS≥2 → BatchedEngine — замерять только на batched.
 | 2.3 | Замер 4B | выполнен: 53→14.2 ток/с |
 | 2.4 | Критерий ≥10% прироста | НЕ выполнен — регрессия ×3.7 |
 | P0.5a | Данные раунда собраны | done |
-| P0.5b | Межраундовый интервал + D2H-sync в draft | open |
+| P0.5b | Инструментация dispatch-лупа ([mtp-agg]) + GPU-resident draft (один H2D/D2H на раунд): 38→44.4 ток/с (+17%). Остаток: verify 21.5мс, rollback 13.5мс при m<K, draft 8.8мс (=vocab-head) | done, follow-up open |
+| P0.5c | Идеи след.: адаптивный width после частичного accept; кэш embedding последнего драфт-токена; батчинг verify двух слотов | open |
 
 ## Фаза W1 — Unsloth Studio как UI
 

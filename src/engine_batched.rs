@@ -521,6 +521,15 @@ fn dispatch_loop(
     // Диагностика: heartbeat раз в 5s пока есть активные слоты.
     let mut last_hb = Instant::now();
 
+    // P0.5b: куда уходит wall-time шага (decode-фазы внутри шедулера уже
+    // считаются в stats.decode_ns/prefill_ns). gap = step_wall - decode - prefill.
+    let mut agg = (0u64, 0u64, 0u64, 0u64, 0u64); // steps, decode, prefill, gap, tokens_delta
+    let mut agg_last_tokens = 0u64;
+    let timing_on = std::env::var("QWEN36_MTP_TIMING")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let mut since_print = 0u64;
+
     'outer: loop {
         if shutdown.load(Ordering::Relaxed) {
             eprintln!("[dispatch] shutdown flag seen, exiting");
@@ -583,6 +592,8 @@ fn dispatch_loop(
         // GPU-шаг БЕЗ мьютекса токенизатора (аудит 2026-08-10): иначе входящие
         // HTTP-запросы блокируются на lock() в generate() на весь шаг.
         // Токенизатор нужен только drain'у после шага.
+        let st_before = sched.stats_snapshot();
+        let t_step = std::time::Instant::now();
         let outcome = sched.step_with(&mut |sidx, _generated| {
             bindings
                 .get(sidx)
@@ -590,6 +601,32 @@ fn dispatch_loop(
                 .map(|b| b.cancelled)
                 .unwrap_or(false)
         });
+        let step_ns = t_step.elapsed().as_nanos() as u64;
+        if timing_on {
+            let st_after = sched.stats_snapshot();
+            let dec = st_after.decode_ns.saturating_sub(st_before.decode_ns) as u64;
+            let pre = st_after.prefill_ns.saturating_sub(st_before.prefill_ns) as u64;
+            let toks = st_after.total_decode_tokens as u64;
+            agg.0 += 1;
+            agg.1 += dec;
+            agg.2 += pre;
+            agg.4 += toks.saturating_sub(agg_last_tokens);
+            agg_last_tokens = toks;
+            agg.3 += step_ns.saturating_sub(dec + pre);
+            since_print += 1;
+            if since_print >= 48 {
+                let (st, dec, pre, gap, tk) = agg;
+                eprintln!(
+                    "[mtp-agg] steps={st} decode={dec_ms:.0}ms prefill={pre_ms:.0}ms gap={gap_ms:.0}ms tokens={tk}",
+                    st = st,
+                    dec_ms = dec as f64 / 1e6,
+                    pre_ms = pre as f64 / 1e6,
+                    gap_ms = gap as f64 / 1e6,
+                    tk = tk,
+                );
+                since_print = 0;
+            }
+        }
         let did_work = match outcome {
             Ok(StepOutcome::DidPrefill {
                 first_token_emitted,
