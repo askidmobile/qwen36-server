@@ -108,7 +108,7 @@ boundary-logits + lm_head, аллокации пула. Следующий ша�
 |---|---|
 | 4.1 | ✅ [pfa]-тайминг добавлен в adapter::prefill_chunk (restore/fwd/logits_d2h/snap+seed) |
 | 4.2 | ✅ **Доминанта подтверждена**: fwd=1010 мс — хостовые запуски (DeltaNet token-by-token цикл), «logits_d2h»=850 мс — хвост async-выполнения GPU перед синхронизацией to_vec1. Логиты узкие [1,vocab] |
-| 4.3 | ✅ **Опровержение гипотезы**: fused DeltaNet prefill уже активен (`dispatch_delta_rule_prefill`, ~15–22 мс/чанк 512, `[pfstep]`). `delta_rule.cu`+bindings+`delta_rule_batched.cu` интегрированы (f6cac6b1+), не токен-by-токен. Тогда 150 с@24K — matmul-проекции весов IQ2_XXS (2 чтения ~9.7 ГБ/чанк) + attn-FA2+FFN. Разрыв до llama.cpp ~2.8× упрётся в MMQ-ядра / крупные чанки. Следующий шаг: профиль QMatMul на чанке (пропускная способность IQ2 vs K_quants MMQ) |
+| 4.3 | ✅ **Опровержение гипотезы**: fused DeltaNet prefill уже активен (`dispatch_delta_rule_prefill`, ~15–22 мс/чанк 512, `[pfstep]`). `delta_rule.cu`+bindings интегрированы. **Дополнительные опровержения**: PREFILL_CHUNK 512→2048 не меняет wall (33 с @10K) — веса НЕ перечитываются на чанк; доминанта = compute IQ2-matmul (нужны MMQ-ядра). **KV-обрыв**: prefill пишет single-slot F16 KV (~480 МиБ @24K) + deep-clone снапшот — фикс `clear_single_slot_kv` после seed (7c9b0fb1, откат QWEN36_KEEP_SINGLE_KV=1); A/B: drop≥keep, но VRAM не падает — cudarc пул удерживает блоки → структурный фикс = писать префилл сразу в q8 batched. Декод @12K ~9–12 ток/с прямым замером; @24K ~1–6 ток/с (коллапс остаётся) |
 
 ## Фаза P4 — CUDA graphs (после P1/P2 замеров)
 
