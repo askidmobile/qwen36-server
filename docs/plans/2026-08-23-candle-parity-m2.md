@@ -106,9 +106,9 @@ boundary-logits + lm_head, аллокации пула. Следующий ша�
 
 | # | Задача |
 |---|---|
-| 4.1 | Расширить [pf]-тайминг: delta-inner / attn / ffn / seed-copy / boundary |
-| 4.2 | Зафиксировать доминанту и завести точечную задачу |
-| 4.3 | Критерий: префилл @24K ≤ 60 с |
+| 4.1 | ✅ [pfa]-тайминг добавлен в adapter::prefill_chunk (restore/fwd/logits_d2h/snap+seed) |
+| 4.2 | ✅ **Доминанта подтверждена**: fwd=1010 мс — хостовые запуски (DeltaNet token-by-token цикл), «logits_d2h»=850 мс — хвост async-выполнения GPU перед синхронизацией to_vec1. Логиты узкие [1,vocab] |
+| 4.3 | **Фикс = P3**: интеграция готового ядра `delta_rule.cu` (521 строка, ветка feat/cuda-gated-deltanet-kernels форка) — хост-FFI + вызов из DeltaNet prefill вместо токен-by-токен цикла. Критерий: префилл @24K ≤ 60 с, чанк 512 ≤ 400 мс |
 
 ## Фаза P4 — CUDA graphs (после P1/P2 замеров)
 
