@@ -100,7 +100,12 @@ Commit: cab3218a. FR-001 закрывается как отрицательны�
 
 **Independent check:** prefill @10K без MoE-grouped vs с ним — wall time сравнение
 
-### Phase 3: DeltaNet tile-size sweep (estimate: 4h)
+### Phase 3: DeltaNet tile-size sweep (estimate: 4h) — ✅ Завершён, малый эффект
+
+**Результат**: warps=2 оптимально (1.8 мс vs 2.8 мс для warps=1). Но P3 recurrent = всего 54 мс/чанк.
+**Ключевое открытие**: 466 мс "delta" из [pf] — это QMatMul проекции (IQ2 matmuls), НЕ recurrent kernel.
+DeltaNet recurrent уже быстр. Tile-sweep даёт <1% wall-time — не значимый рычаг.
+Default изменён на warps=2. Commit: cafd407f.
 
 #### Files:
 - [ ] `qwen35-batch/src/real/delta_rule_cuda.rs` — конфигурация tile-size через env
