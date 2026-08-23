@@ -79,7 +79,15 @@ async fn main() -> Result<()> {
                     _ => None,
                 })
             })
-            .flatten();
+            .flatten()
+            // Env-фолбэк: тонкий MTP-артефакт без полного профиля
+            // (эксперименты и модели, для которых манифест ещё не собран).
+            .or_else(|| {
+                std::env::var("QWEN36_MTP_PATH")
+                    .ok()
+                    .filter(|p| !p.is_empty())
+                    .map(std::path::PathBuf::from)
+            });
         BatchedEngine::load(bcfg, media.clone(), vision_path, mtp_path).await?
     } else {
         Arc::new(CandleEngine::load(&cfg)?)
