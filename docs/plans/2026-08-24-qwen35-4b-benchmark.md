@@ -120,3 +120,29 @@ vs llama.cpp pure: ~88 / ? / 81.9
 - bandwidth x2.6 сокращает GPU-часть; graphed path убирает host overhead ->
   есть шанс реального паритета/преимущества (наш fused DeltaNet + батчевый
   MTP verify архитектурно сильнее их последовательного MTP).
+
+
+## Финал дня (2026-08-24, вечер): graphs отладлены, разрыв сжат
+
+Расследование [graphs]-trace нашло 2 бага (форк d614d47d):
+1. Освобождение q8 batched после миграции убивало любой eager-fallback
+   ("cache length 0") — откат.
+2. GPROF double-prime рассинхронизировал device KV vs scheduler позиции —
+   компенсирован host mirror.
+
+Финальные числа Qwen3.5-4B Q4_K_M, SLOTS=2 + QWEN36_CUDA_GRAPHS=1:
+  ~0ctx: 80.4 | 2K: 72.2 | 8K: 63.1 ток/с
+llama.cpp: ~88.5 / ? / 81.9
+
+Остаточный разрыв: x1.10 short, x1.30 long. Распределён по ядрам
+(наш paged-FA2 + quant matmul медленнее их FA2/MMQ на ~25%), НЕ host overhead
+(graphs его сняли). Дальнейшее = переписывание конкретных kernel — отдельная
+большая работа, не quick win.
+
+Прод-конфиг финально:
+  SLOTS=2 QWEN36_CUDA_GRAPHS=1 (модели <=10GB весов)
+  SLOTS=2 без graphs (27B IQ2 @12GB)
+
+Для RTX 6000 Ada 48GB: тот же конфиг что 12GB-модели; bandwidth x2.6
+ускоряет GPU-часть, graphs уже сняли host часть -> ожидание паритета
+с llama.cpp и преимущества по MTP/батчингу.
