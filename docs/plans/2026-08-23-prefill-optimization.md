@@ -213,3 +213,35 @@ Host-side задержки — это runtime overhead cudarc (builder, arg chec
 | PD-001 | MoE strategy: grouped vs new batched-tile? | Подключить существующее `_grouped` + q8_1 вариант. Быстрый старт, fallback на batched-tile | 2026-08-23 |
 | PD-002 | DeltaNet: tile sweep vs new kernel? | Tile-size sweep + nsys. DeltaNet уже fused, рефакторинг premature | 2026-08-23 |
 | PD-003 | Launch overhead: nsys-driven vs CUDA graphs? | nsys-driven. CUDA graphs для prefill — overkill, сначала понять gaps | 2026-08-23 |
+
+
+## Финальные результаты (2026-08-24, после VRAM-фиксов)
+
+Важный урок методологии: ранние замеры «коллапса» снимались в холодном состоянии WDDM
+и с багованными промптами (PowerShell `"word "*N` молча обрезался лимитом оператора —
+промпт 19 токенов вместо 22K). Честная кривая (SLOTS=2, q8 KV, mempool threshold
+256 MiB, trim после prefill):
+
+| Контекст | Prefill | Decode | VRAM |
+|---|---|---|---|
+| 12K | 22 с | 28.7 ток/с | 11562 |
+| 16K | 30 с | 25.4 ток/с | 11690 |
+| 24K тёплый | **44.5 с** | **19.8–20.7 ток/с** | 11928 |
+| 24K холодный старт | ~95–100 с | 1–8 ток/с (WDDM residency) | 11928 |
+
+**Тёплый decode @24K ≈ llama.cpp (~20 ток/с) — паритет по декоду на всей кривой.**
+Prefill остаётся ×2 медленнее llama.cpp (host launch overhead cudarc ~4 мс/launch, см. Phase 4).
+
+Ключевые фиксы, давшие результат:
+1. `snapshot_kv` Arc вместо deep-clone; `restore_kv` narrow+contiguous (bf921365)
+2. `kv_mirror_budget=0`, `kv_scratch_tokens=0` — бесполезные буферы сняты (bf921365)
+3. mempool release threshold 256 MiB + `trim_default_mempool` после prefill (5d655501)
+4. `q8_dequantize_rows` F16-арифметика без F32-интермедиатов (5d655501)
+5. Revert pre-alloc full window: q8 @40960×2 слота = 8.4 ГБ — OOM (f2e39316)
+
+Отклонённые гипотезы (все с замерами):
+- Grouped MoE kernel: 43–47 мс vs 29–34 мс basic (atomicAdd overhead)
+- DeltaNet tile sweep: <1% wall-time (recurrent kernel всего 54 мс/чанк)
+- Shared f16-scratch: 0.5–0.9 vs 2.1 ток/с базового пути
+- Pre-alloc KV full window: 8.4 ГБ → prefill 860 с (page thrashing)
+- CUDA graphs @24K: paged F16 pool 5 ГБ не влезает в 2 ГБ свободных
