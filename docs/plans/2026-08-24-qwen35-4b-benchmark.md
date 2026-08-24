@@ -45,3 +45,24 @@ llama.cpp:
 D:\Models\unsloth\Qwen3.5-4B-MTP-GGUF\UD-Q4_K_XL (содержит nextn blk.24).
 
 Скрипты: D:\Projects\yttri-inference\scripts\bench_4b.ps1 <ours|llamacpp> <model> [mtp]
+
+
+## Дополнение 2026-08-24: MTP deep-dive (фазовые тайминги + adaptive width)
+
+Фазовый разбор MTP-раунда (QWEN36_MTP_TIMING=1, UD-Q4 @8K):
+  begin ~1ms | draft 22ms (3 последовательных MTP-forward по ~7.3ms) |
+  verify 29ms (батчевый target-forward K=4 — эффективен) |
+  accept 0–13ms (restore DeltaNet-checkpoint + re-run при m<K)
+
+Неудачный раунд (m=1) стоит ~65мс за 1 токен против 19.6мс baseline.
+
+Реализован P0.5c adaptive width (форк 3bf49d56, откат QWEN36_MTP_ADAPTIVE=0):
+K следует за принимаемостью — m>=K наращивает, m<=1 срезает и пропускает раунд
+(probe каждый 4-й шаг). Результат: MTP больше не деградирует относительно
+baseline (фикс K=8 давал 17.8 ток/с vs 44.9 baseline; adaptive не ниже baseline).
+
+Итоговая матрица ours @8K (SLOTS=2): без MTP 44.9–56.4, +MTP adaptive 43.6–47.3.
+MTP на 4B в текущей реализации нейтрален: draft-цикл host-bound (cudarc
+launch overhead ~7мс/forward). Путь к llama.cpp-уровню (125 ток/с): CUDA-graphed
+draft path. На больших моделях (27B/35B) draft дороже относительно verify —
+адaptive там даёт больший выигрыш.
