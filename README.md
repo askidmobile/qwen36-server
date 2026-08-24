@@ -111,6 +111,34 @@ cargo build --release --features metal
 
 ---
 
+## Unsloth Studio (WebUI)
+
+Сервер отдаёт Unsloth Studio как основной UI на том же порту `:18099`.
+Все запросы кроме `/v1/*` проксируются на Python-бэкенд Studio.
+
+### Запуск
+
+1. **Установить Unsloth Studio** на машине с сервером (yttri-win):
+   ```powershell
+   irm https://unsloth.ai/install.ps1 | iex
+   ```
+
+2. **Запустить Studio backend**:
+   ```powershell
+   unsloth studio -H 127.0.0.1 -p 8888
+   ```
+
+3. **Rust-сервер** (`:18099`) — проксирует `/*` на `STUDIO_URL` (по умолчанию `http://127.0.0.1:8888`).
+   При недоступности Studio — fallback на встроенный `web/index.html` (admin-чат).
+
+4. **В Studio UI**: Connections → Add Provider → Base URL `http://127.0.0.1:18099/v1`, ключ `smoke-key`.
+
+```env
+STUDIO_URL=http://127.0.0.1:8888
+```
+
+---
+
 ## 🇬🇧 English Configuration (.env)
 
 ```env

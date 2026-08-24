@@ -5,7 +5,7 @@
 //! - slots == 1 → CandleEngine (single-slot, Mutex — для smoke-тестов/дебага).
 
 use anyhow::Result;
-use axum::{response::Html, routing::get, Router};
+use axum::Router;
 use qwen36_server::{
     api::{build_router, AppState},
     config::Config,
@@ -14,8 +14,6 @@ use qwen36_server::{
     engine_swap::SwappableEngine,
 };
 use std::sync::Arc;
-
-const CHAT_HTML: &str = include_str!("../web/index.html");
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -136,8 +134,9 @@ async fn main() -> Result<()> {
         presets: std::sync::Arc::new(std::sync::RwLock::new(cfg.presets.clone())),
         env_file: cfg.env_file.clone(),
     };
-    let app =
-        build_router(state).merge(Router::new().route("/", get(|| async { Html(CHAT_HTML) })));
+    let app = build_router(state)
+        .merge(qwen36_server::api::proxy::proxy_router(cfg.studio_url.clone()));
+    eprintln!("[qwen36] studio proxy → {}", cfg.studio_url);
     let listener = tokio::net::TcpListener::bind(format!("{}:{}", cfg.host, cfg.port)).await?;
     axum::serve(listener, app).await?;
     Ok(())

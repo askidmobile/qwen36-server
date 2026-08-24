@@ -304,6 +304,8 @@ pub struct Config {
     pub req_timeout: u64,
     /// Flash Attention (`FLASH_ATTN`, default 1 = включен).
     pub flash_attn: bool,
+    /// Unsloth Studio backend URL (`STUDIO_URL`, default `http://127.0.0.1:8888`).
+    pub studio_url: String,
 }
 
 impl Config {
@@ -379,6 +381,8 @@ impl Config {
             max_queue: parse_env("MAX_QUEUE", 64usize)?,
             req_timeout: parse_env("REQ_TIMEOUT", 600u64)?,
             flash_attn: parse_env("FLASH_ATTN", 1u8)? != 0,
+            studio_url: get_env_var("STUDIO_URL")
+                .unwrap_or_else(|| "http://127.0.0.1:8888".into()),
         };
         cfg.apply_vram_plan()?;
         Ok(cfg)

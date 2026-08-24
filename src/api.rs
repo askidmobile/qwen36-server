@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod anthropic;
 pub mod hf;
+pub mod proxy;
 pub mod tools;
 pub(crate) mod content;
 pub mod media;
