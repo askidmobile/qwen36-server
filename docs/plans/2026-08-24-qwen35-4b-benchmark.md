@@ -94,3 +94,29 @@ RTX 3060, SLOTS=2:
 выше -> ожидаемый декод ~40-45 tok/s у нас. Наш сервер готов к архитектуре.
 MTP-артефакт qwen3.8: unsloth/Qwen3.8-27B-GGUF/MTP/mtp-Qwen3.8-27B-Q4_0.gguf
 (1.37 GB), включение: MTP=1 QWEN36_MTP_PATH=<mtp.gguf>.
+
+
+## Дополнение: CUDA Graphs включаются только на BatchedEngine (2026-08-24)
+
+Ключевая находка дня: QWEN36_CUDA_GRAPHS=1 работает ТОЛЬКО при SLOTS>=2
+(BatchedEngine). Ранние тесты graphs на SLOTS=1 были невалидны.
+
+Qwen3.5-4B Q4_K_M @RTX3060, SLOTS=2 + QWEN36_CUDA_GRAPHS=1:
+  ~0ctx: 70.2 | 2K: 70.8 | 8K: 60.6 ток/с
+vs без graphs: 62.6 / 59.3 / 56.4 (+13% и плоская кривая)
+vs llama.cpp pure: ~88 / ? / 81.9
+
+Итог по декоду: отставание x1.2-1.35 на длинном контексте сохраняется.
+Паритета нет; причина системная — cudarc launch overhead вне графированного
+участка (prefill, MTP draft) + paged-FA2 медленнее их FA2.
+
+РЕКОМЕНДАЦИИ ПРОДАКШЕНА (12GB):
+- Модели <=10GB весов: SLOTS=2 + QWEN36_CUDA_GRAPHS=1 (обязательно)
+- 27B IQ2_XXS: SLOTS=2 БЕЗ graphs (paged F16 pool + q8 KV = VRAM double-dip,
+  @8K коллапс 16.7 -> 2.3 ток/с)
+
+ДЛЯ RTX 6000 ADA 48GB:
+- graphs ON для всех квантов (Q4_K_M 16.8GB + pool влезает свободно)
+- bandwidth x2.6 сокращает GPU-часть; graphed path убирает host overhead ->
+  есть шанс реального паритета/преимущества (наш fused DeltaNet + батчевый
+  MTP verify архитектурно сильнее их последовательного MTP).
