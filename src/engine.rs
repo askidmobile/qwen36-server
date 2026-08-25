@@ -743,8 +743,8 @@ pub fn gguf_architecture(path: &Path) -> Result<String> {
     use anyhow::anyhow;
     use candle_core::quantized::gguf_file::{Content, Value};
 
-    let mut file = std::fs::File::open(path).map_err(|e| anyhow!("open GGUF {path:?}: {e}"))?;
-    let content = Content::read(&mut file).map_err(|e| anyhow!("read GGUF: {e}"))?;
+    let (content, _mmap) = qwen35_batch::real::ytf16::content_any_path(path)
+        .map_err(|e| anyhow!("read model {path:?}: {e}"))?;
     match content.metadata.get("general.architecture") {
         Some(Value::String(architecture)) => Ok(architecture.clone()),
         value => Err(anyhow!("invalid general.architecture metadata: {value:?}")),
@@ -776,8 +776,11 @@ fn load_model(path: &Path, device: &candle_core::Device) -> Result<(RuntimeModel
     let mmap =
         unsafe { memmap2::MmapOptions::new().map(&file) }.map_err(|e| anyhow!("mmap GGUF: {e}"))?;
     let mmap = Arc::new(mmap);
+    let ct = qwen35_batch::real::ytf16::content_any(mmap.as_ref())
+        .map_err(|e| anyhow!("read model: {e}"))?;
+    // Gemma/Llama грузятся апстримными загрузчиками candle, а те читают
+    // тензоры через Read+Seek. Эти архитектуры бывают только в GGUF.
     let mut c = std::io::Cursor::new(mmap.as_ref());
-    let ct = gguf_file::Content::read(&mut c).map_err(|e| anyhow!("read GGUF: {e}"))?;
     let eos = ct
         .metadata
         .get("tokenizer.ggml.eos_token_id")

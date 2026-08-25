@@ -63,10 +63,8 @@ pub fn footprint_from_gguf_cached(path: &Path) -> Result<ModelFootprint> {
 
 /// Чтение footprint из GGUF (только metadata + tensor_infos, без данных).
 pub fn footprint_from_gguf(path: &Path) -> Result<ModelFootprint> {
-    use candle_core::quantized::gguf_file::Content;
     let file_size = std::fs::metadata(path)?.len();
-    let mut file = std::fs::File::open(path)?;
-    let ct = Content::read(&mut file)?;
+    let (ct, _mmap) = qwen35_batch::real::ytf16::content_any_path(path)?;
     let md = &ct.metadata;
 
     let arch = match md.get("general.architecture") {

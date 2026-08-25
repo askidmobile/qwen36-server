@@ -125,7 +125,10 @@ pub fn scan_gguf_cached(dir: &Path, depth: usize, out: &mut Vec<Value>, use_cach
         let p = e.path();
         if p.is_dir() {
             scan_gguf_cached(&p, depth + 1, out, use_cache);
-        } else if p.extension().and_then(|s| s.to_str()) == Some("gguf") {
+        } else if matches!(
+            p.extension().and_then(|s| s.to_str()),
+            Some("gguf") | Some("ytf")
+        ) {
             let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("?");
             // Пропускаем незагружаемые: split-части (-00001-of-00002) и mmproj.
             if is_split_part(name) || name.starts_with("mmproj") {

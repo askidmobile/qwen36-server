@@ -100,8 +100,7 @@ impl ChatTemplate {
     /// Прочитать `tokenizer.chat_template` из GGUF-метаданных. None — модель
     /// без шаблона (тогда fallback на встроенный ChatML-билдер).
     pub fn from_gguf(path: &Path) -> Option<Self> {
-        let mut f = std::fs::File::open(path).ok()?;
-        let content = candle_core::quantized::gguf_file::Content::read(&mut f).ok()?;
+        let (content, _mmap) = qwen35_batch::real::ytf16::content_any_path(path).ok()?;
         let tpl = match content.metadata.get("tokenizer.chat_template") {
             Some(candle_core::quantized::gguf_file::Value::String(s)) => s.clone(),
             _ => return None,
