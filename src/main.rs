@@ -1,8 +1,11 @@
 //! Бинарь qwen36-server: env QWEN36_* → engine → HTTP (три API + веб-чат).
 //!
 //! Engine выбирается по QWEN36_SLOTS:
-//! - slots > 1 → BatchedEngine (BD-007, 4 конкурентных слота через BatchScheduler).
-//! - slots == 1 → CandleEngine (single-slot, Mutex — для smoke-тестов/дебага).
+//! - qwen35/qwen35moe → BatchedEngine при любом числе слотов (BD-007).
+//!   Одиночный слот тоже идёт сюда: paged-пул пропорционален числу слотов,
+//!   поэтому SLOTS=1 вдвое дешевле по VRAM, а CandleEngine отдавал бы CUDA-графы
+//!   вместе со скоростью декода. Откат — QWEN36_FORCE_CANDLE_ENGINE=1.
+//! - остальные архитектуры → CandleEngine (single-slot, Mutex).
 
 use anyhow::Result;
 use axum::Router;
@@ -45,7 +48,13 @@ async fn main() -> Result<()> {
 
     let architecture = qwen36_server::engine::gguf_architecture(&cfg.model)?;
     let qwen35 = matches!(architecture.as_str(), "qwen35" | "qwen35moe");
-    let engine: Arc<dyn Engine> = if qwen35 && cfg.slots > 1 {
+    // BatchedEngine и на одном слоте: paged-пул пропорционален числу слотов
+    // (capacity_b x max_blocks), поэтому SLOTS=1 вдвое дешевле по VRAM и на
+    // 12 ГБ это прямо удваивает достижимый контекст. Раньше одиночный слот
+    // уходил на CandleEngine и терял CUDA-графы вместе со скоростью декода.
+    // QWEN36_FORCE_CANDLE_ENGINE=1 возвращает прежний путь для отладки.
+    let force_candle = std::env::var("QWEN36_FORCE_CANDLE_ENGINE").as_deref() == Ok("1");
+    let engine: Arc<dyn Engine> = if qwen35 && !force_candle {
         let bcfg = BatchConfig {
             model_path: cfg.model.to_string_lossy().into_owned(),
             slots: cfg.slots,
