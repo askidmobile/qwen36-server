@@ -207,8 +207,11 @@ fn build_messages(req: &ChatCompletionRequest) -> Result<Vec<ChatMessage>, Respo
             let content = parse_content(m)?;
             // tool_calls из истории — структурно; chat template сам рендерит
             // их в формате модели (Hermes для Qwen3.8, JSON для 3.5/3.6).
+            // Аргументы приводим к объекту: по контракту OpenAI клиент шлёт
+            // function.arguments СТРОКОЙ JSON, а шаблон Qwen3.8 ждёт объект и
+            // иначе падает с «arguments were passed as a JSON string».
             let tool_calls = match &m.tool_calls {
-                Some(Value::Array(calls)) => calls.clone(),
+                Some(Value::Array(calls)) => calls.iter().map(normalize_tool_call).collect(),
                 _ => Vec::new(),
             };
             Ok(ChatMessage {
@@ -219,6 +222,35 @@ fn build_messages(req: &ChatCompletionRequest) -> Result<Vec<ChatMessage>, Respo
             })
         })
         .collect()
+}
+
+/// Привести один tool_call к виду, который понимает chat template.
+///
+/// По контракту OpenAI `function.arguments` — это СТРОКА с JSON, и все клиенты
+/// шлют именно так. Шаблон Qwen3.8 (Hermes) обращается к аргументам как к
+/// объекту и на строке падает: «Tool call arguments for function ... were
+/// passed as a JSON string». Разбираем строку в объект; если разобрать нельзя
+/// (клиент прислал мусор), оставляем как есть — пусть шаблон решает сам,
+/// молча терять данные хуже.
+fn normalize_tool_call(call: &Value) -> Value {
+    let mut call = call.clone();
+    let Some(args) = call.pointer("/function/arguments") else {
+        return call;
+    };
+    let Some(text) = args.as_str() else {
+        return call; // уже объект — ничего не делаем
+    };
+    let parsed = if text.trim().is_empty() {
+        Some(Value::Object(serde_json::Map::new()))
+    } else {
+        serde_json::from_str::<Value>(text).ok()
+    };
+    if let Some(v) = parsed {
+        if let Some(slot) = call.pointer_mut("/function/arguments") {
+            *slot = v;
+        }
+    }
+    call
 }
 
 fn oai_tool_calls(calls: &[(String, String)]) -> Value {

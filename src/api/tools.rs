@@ -10,8 +10,19 @@
 
 use serde_json::Value;
 
+/// Печать сырого текста модели перед разбором (QWEN36_TOOLS_DEBUG=1).
+/// Нужна, чтобы отличить обрезание в генерации от обрезания в разборе: без неё
+/// оба выглядят одинаково — короткое значение в готовом вызове.
+fn tools_debug() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("QWEN36_TOOLS_DEBUG").is_ok_and(|v| v != "0"))
+}
+
 /// (остальной текст, [(name, arguments_json_string)])
 pub fn parse_tool_calls(text: &str) -> (String, Vec<(String, String)>) {
+    if tools_debug() {
+        eprintln!("[tools] сырой текст модели ({} байт): {text:?}", text.len());
+    }
     let mut calls = Vec::new();
     let mut rest = String::new();
     let mut s = text;
