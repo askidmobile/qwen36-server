@@ -228,6 +228,62 @@ pub async fn prepare_inference_request(
     Ok(inference_request(messages, params, owner, tools, reasoning_effort))
 }
 
+/// Запись запроса целиком (QWEN36_REQ_DEBUG=путь к файлу).
+///
+/// Нужна, когда дефект воспроизводится только в живой сессии агента и не
+/// воспроизводится синтетическим запросом. Без самого запроса — истории,
+/// параметров сэмплирования, набора инструментов — сбой остаётся
+/// неповторимым, и любая версия причины непроверяема.
+fn dump_request(
+    messages: &[crate::engine_types::ChatMessage],
+    params: &crate::engine_types::GenParams,
+    tools: &Option<serde_json::Value>,
+) {
+    static PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let Some(path) = PATH.get_or_init(|| std::env::var("QWEN36_REQ_DEBUG").ok()) else {
+        return;
+    };
+    let msgs: Vec<serde_json::Value> = messages
+        .iter()
+        .map(|m| {
+            let text: String = m
+                .content
+                .iter()
+                .filter_map(|b| match b {
+                    crate::engine_types::ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            // Хвост сообщения: по нему видно, чем закончился прошлый ответ
+            // модели — именно там проявляется обрезание.
+            let n = text.chars().count();
+            let tail: String = text.chars().skip(n.saturating_sub(200)).collect();
+            serde_json::json!({
+                "role": m.role,
+                "chars": n,
+                "tool_calls": m.tool_calls.len(),
+                "tail": tail,
+            })
+        })
+        .collect();
+    let dump = serde_json::json!({
+        "temperature": params.temperature,
+        "top_p": params.top_p,
+        "top_k": params.top_k,
+        "presence_penalty": params.presence_penalty,
+        "repetition_penalty": params.repetition_penalty,
+        "max_tokens": params.max_tokens,
+        "thinking": params.thinking,
+        "tools_count": tools.as_ref().and_then(|t| t.as_array()).map(|a| a.len()),
+        "messages": msgs,
+    });
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        use std::io::Write;
+        let _ = writeln!(f, "{dump}");
+    }
+}
+
 pub fn inference_request(
     messages: Vec<crate::engine_types::ChatMessage>,
     params: crate::engine_types::GenParams,
@@ -235,6 +291,7 @@ pub fn inference_request(
     tools: Option<serde_json::Value>,
     reasoning_effort: Option<String>,
 ) -> crate::engine_types::InferenceRequest {
+    dump_request(&messages, &params, &tools);
     crate::engine_types::InferenceRequest {
         messages,
         params,
