@@ -781,6 +781,7 @@ pub async fn do_switch(
             model: path.clone(),
             host: String::new(),
             port: 0,
+            studio_url: String::new(),
             api_keys: Vec::new(),
             ctx,
             slots,

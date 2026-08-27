@@ -31,7 +31,10 @@ pub async fn proxy_handler(
     State(state): State<Arc<ProxyState>>,
     req: Request,
 ) -> Response {
-    let (parts, body_bytes) = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
+    // to_bytes отдаёт только тело, поэтому запрос сначала разбирается на
+    // части: из них берутся путь, строка запроса и метод.
+    let (parts, body) = req.into_parts();
+    let body_bytes = match axum::body::to_bytes(body, usize::MAX).await {
         Ok(b) => b,
         Err(_) => return (StatusCode::BAD_REQUEST, "body read error").into_response(),
     };
