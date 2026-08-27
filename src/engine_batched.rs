@@ -9,7 +9,7 @@
 //! - TODO-F5 (форк): `Sampler::sample_indexed(slot, generated, logits)` — per-request params.
 //! - TODO-F6 (форк): `BatchScheduler::slots_mut()` — сбор Finished.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -102,7 +102,25 @@ enum IngestMsg {
     Admit(AdmitReq),
 }
 
-type SlotSamplers = Arc<Mutex<HashMap<usize, (GenParams, Rng)>>>;
+/// Хостовые фазы шага (QWEN36_HOST_TIMING=1): сэмплер и drain отдельно от
+/// ожидания GPU. CPU-время процесса здесь бесполезно — при spin-wait драйвера
+/// оно тождественно времени на стене.
+static HOST_SAMPLE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static HOST_SAMPLE_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static HOST_DRAIN_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Состояние сэмплера слота: параметры, RNG и инкрементальное множество
+/// встречавшихся токенов для penalties. Раньше множество собиралось заново из
+/// всей generated на каждом токене — O(n) на токен, O(n²) на запрос.
+#[derive(Clone)]
+struct SlotSampler {
+    params: GenParams,
+    rng: Rng,
+    seen: HashSet<u32>,
+    /// Сколько первых токенов generated уже учтено в `seen`.
+    seen_len: usize,
+}
+type SlotSamplers = Arc<Mutex<HashMap<usize, SlotSampler>>>;
 
 struct SlotBinding {
     out: mpsc::Sender<StreamEvent>,
@@ -112,6 +130,10 @@ struct SlotBinding {
     /// ретроактивно менять ранние байты (многотокенные UTF-8), поэтому
     /// индекс небезопасен — сравниваем префиксы.
     emitted_text: String,
+    /// Инкрементальный декод: токены [..stable_toks] декодированы окончательно
+    /// (без U+FFFD на конце) и целиком лежат в emitted_text[..stable_len].
+    stable_toks: usize,
+    stable_len: usize,
     stop_hit: bool,
     cancelled: bool,
     last_progress: Instant,
@@ -525,6 +547,10 @@ fn dispatch_loop(
     // считаются в stats.decode_ns/prefill_ns). gap = step_wall - decode - prefill.
     let mut agg = (0u64, 0u64, 0u64, 0u64, 0u64); // steps, decode, prefill, gap, tokens_delta
     let mut agg_last_tokens = 0u64;
+    let host_timing_on = std::env::var("QWEN36_HOST_TIMING")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    let (mut host_steps, mut host_step_ns) = (0u64, 0u64);
     let timing_on = std::env::var("QWEN36_MTP_TIMING")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
@@ -625,6 +651,23 @@ fn dispatch_loop(
                     tk = tk,
                 );
                 since_print = 0;
+            }
+        }
+        if host_timing_on {
+            host_steps += 1;
+            host_step_ns += step_ns;
+            if host_steps % 48 == 0 {
+                let s_ns = HOST_SAMPLE_NS.swap(0, Ordering::Relaxed);
+                let s_n = HOST_SAMPLE_CALLS.swap(0, Ordering::Relaxed);
+                let d_ns = HOST_DRAIN_NS.swap(0, Ordering::Relaxed);
+                eprintln!(
+                    "[host] steps=48 step={:.2}ms sample={:.3}ms/call x{} drain={:.3}ms/step",
+                    host_step_ns as f64 / 48e6,
+                    if s_n > 0 { s_ns as f64 / s_n as f64 / 1e6 } else { 0.0 },
+                    s_n,
+                    d_ns as f64 / 48e6,
+                );
+                host_step_ns = 0;
             }
         }
         let did_work = match outcome {
@@ -755,6 +798,7 @@ fn drain_after_step(
     slot_emitted_toks: &mut HashMap<usize, usize>,
     tokenizer: &tokenizers::Tokenizer,
 ) {
+    let t_drain = Instant::now();
     let slots = sched.slots_mut();
     for idx in 0..slots.len() {
         let generated = slots[idx].generated_tokens();
@@ -768,52 +812,72 @@ fn drain_after_step(
         b.completion_tokens = generated.len();
         b.last_progress = Instant::now();
 
-        // Реальный decode: decode_text по всей generated (корректно на UTF-8
-        // границах; ponytail: инкрементальный буфер хвоста — если профиль покажет).
-        let new_text = tokenizer::decode_text(tokenizer, generated).unwrap_or_default();
+        // Инкрементальный декод: токены [..stable_toks] декодированы
+        // окончательно и целиком лежат в emitted_text[..stable_len]; декодируем
+        // только хвост. decode_text собирает байты всех токенов и делает один
+        // from_utf8_lossy, поэтому decode(prefix) + decode(tail) == decode(all),
+        // пока граница не режет многобайтовый символ — на такой границе
+        // (U+FFFD на конце) мы не останавливаемся. Раньше decode шёл по всей
+        // generated на каждом шаге и emitted_text копировался целиком:
+        // O(n) на токен, O(n²) на запрос.
+        let tail_text = tokenizer::decode_text(tokenizer, &generated[b.stable_toks..])
+            .unwrap_or_default();
+        let emitted_tail_len = b.emitted_text.len() - b.stable_len;
 
         // Stop-строки: ищем в хвосте длиной max_stop_len + последний кусок.
         let max_stop_len = b.params.stop.iter().map(|s| s.len()).max().unwrap_or(0);
         let mut cut_at: Option<usize> = None;
         if !b.params.stop.is_empty() {
-            let scan_from = new_text.len().saturating_sub(max_stop_len + 64);
-            let scan_from = floor_char_boundary(&new_text, scan_from)
-                .max(b.emitted_text.len().min(new_text.len()));
-            if let Some(rel) = new_text[scan_from..].find_any(&b.params.stop) {
+            let scan_from = tail_text.len().saturating_sub(max_stop_len + 64);
+            let scan_from = floor_char_boundary(&tail_text, scan_from)
+                .max(emitted_tail_len.min(tail_text.len()));
+            if let Some(rel) = tail_text[scan_from..].find_any(&b.params.stop) {
                 cut_at = Some(scan_from + rel);
             }
         }
 
-        let mut end = cut_at.unwrap_or(new_text.len());
+        let mut end = cut_at.unwrap_or(tail_text.len());
         // Holdback: не эмитим хвост, заканчивающийся на U+FFFD — это может быть
         // недо-собранная UTF-8 последовательность (emoji/CJK разрезаны на
         // несколько токенов); следующий токен достроит. Иначе устаревший '�'
         // уходит клиенту и префикс расходится навсегда. Флаш — в finish_slot.
-        while end > b.emitted_text.len() && new_text[..end].ends_with('\u{FFFD}') {
+        while end > emitted_tail_len && tail_text[..end].ends_with('\u{FFFD}') {
             end -= '\u{FFFD}'.len_utf8();
         }
-        // Префиксное сравнение: если decode ретроактивно изменил ранние байты —
+        // Префиксное сравнение хвоста: если decode ретроактивно изменил байты —
         // ресинхронизируемся (не эмитим на этом шаге), индексной арифметики нет.
-        if new_text.starts_with(&b.emitted_text) && end >= b.emitted_text.len() {
-            let delta = &new_text[b.emitted_text.len()..end];
+        let prefix_ok = tail_text.starts_with(&b.emitted_text[b.stable_len..]);
+        if prefix_ok && end >= emitted_tail_len {
+            let delta = tail_text[emitted_tail_len..end].to_string();
             if !delta.is_empty() {
-                match b.out.try_send(StreamEvent::Delta(delta.to_string())) {
+                match b.out.try_send(StreamEvent::Delta(delta.clone())) {
                     Ok(()) => {}
                     Err(mpsc::error::TrySendError::Full(_))
                     | Err(mpsc::error::TrySendError::Closed(_)) => {
                         b.cancelled = true;
                     }
                 }
+                b.emitted_text.push_str(&delta);
             }
-            b.emitted_text = new_text[..end].to_string();
-        } else if !new_text.starts_with(&b.emitted_text) {
-            b.emitted_text = new_text[..end].to_string();
+        } else if !prefix_ok {
+            b.emitted_text.truncate(b.stable_len);
+            b.emitted_text.push_str(&tail_text[..end]);
+        }
+        // Стабильная граница: хвост эмитирован целиком и не обрывает символ.
+        if cut_at.is_none()
+            && end == tail_text.len()
+            && !tail_text.ends_with('\u{FFFD}')
+            && b.emitted_text.len() == b.stable_len + tail_text.len()
+        {
+            b.stable_toks = generated.len();
+            b.stable_len = b.emitted_text.len();
         }
         if cut_at.is_some() {
             b.stop_hit = true;
         }
         slot_emitted_toks.insert(idx, generated.len());
     }
+    HOST_DRAIN_NS.fetch_add(t_drain.elapsed().as_nanos() as u64, Ordering::Relaxed);
 }
 
 /// Текущее использование KV (MiB) всеми привязанными слотами.
@@ -924,7 +988,15 @@ fn seed_slot(
     slot_samplers
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(idx, (params.clone(), Rng::new(seed)));
+        .insert(
+            idx,
+            SlotSampler {
+                params: params.clone(),
+                rng: Rng::new(seed),
+                seen: HashSet::new(),
+                seen_len: 0,
+            },
+        );
     slot_truncated.insert(idx, req.truncated);
     bindings[idx] = Some(SlotBinding {
         out: req.out,
@@ -932,6 +1004,8 @@ fn seed_slot(
         prompt_tokens,
         completion_tokens: 0,
         emitted_text: String::new(),
+        stable_toks: 0,
+        stable_len: 0,
         stop_hit: false,
         cancelled: false,
         last_progress: Instant::now(),
@@ -1060,7 +1134,7 @@ impl ForkSampler for IndexedSampler {
 
     fn restore(&mut self, slot_idx: usize, checkpoint: SamplerCheckpoint) -> anyhow::Result<()> {
         let checkpoint = checkpoint
-            .downcast::<Option<(GenParams, Rng)>>()
+            .downcast::<Option<SlotSampler>>()
             .map_err(|_| anyhow!("sampler checkpoint type mismatch"))?;
         let mut params = self
             .params
@@ -1080,17 +1154,32 @@ impl ForkSampler for IndexedSampler {
     fn sample_indexed(&mut self, slot_idx: usize, generated: &[u32], logits: &[f32]) -> u32 {
         let mut params = self.params.lock().unwrap_or_else(|e| e.into_inner());
         match params.get_mut(&slot_idx) {
-            Some((p, rng)) => sampler::sample(
-                logits,
-                p.temperature,
-                p.top_k,
-                p.top_p,
-                p.min_p,
-                p.presence_penalty,
-                p.repetition_penalty,
-                generated,
-                rng,
-            ),
+            Some(st) => {
+                // Множество для penalties — инкрементально: generated только
+                // растёт (после отката спекуляции состояние восстанавливается
+                // из checkpoint вместе с seen); укорочение — пересборка.
+                if generated.len() < st.seen_len {
+                    st.seen.clear();
+                    st.seen_len = 0;
+                }
+                st.seen.extend(generated[st.seen_len..].iter().copied());
+                st.seen_len = generated.len();
+                let t0 = Instant::now();
+                let tok = sampler::sample_with_seen(
+                    logits,
+                    st.params.temperature,
+                    st.params.top_k,
+                    st.params.top_p,
+                    st.params.min_p,
+                    st.params.presence_penalty,
+                    st.params.repetition_penalty,
+                    &st.seen,
+                    &mut st.rng,
+                );
+                HOST_SAMPLE_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                HOST_SAMPLE_CALLS.fetch_add(1, Ordering::Relaxed);
+                tok
+            }
             None => {
                 let mut best = 0u32;
                 let mut best_v = f32::NEG_INFINITY;
@@ -1161,7 +1250,12 @@ mod tests {
         };
         let shared = Arc::new(Mutex::new(HashMap::from([(
             0,
-            (params.clone(), Rng::new(123)),
+            SlotSampler {
+                params: params.clone(),
+                rng: Rng::new(123),
+                seen: HashSet::new(),
+                seen_len: 0,
+            },
         )])));
         let mut indexed = IndexedSampler { params: shared };
         let logits = vec![0.0; 4];
