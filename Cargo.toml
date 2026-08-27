@@ -2,13 +2,16 @@
 name = "qwen36-server"
 version = "0.1.0"
 edition = "2021"
-description = "Qwen3.6-27B GGUF inference server на candle-fork (BD-002)"
+description = "Qwen3.6-27B GGUF inference server на yttri-forge (BD-002)"
 
 [dependencies]
 # Форк лежит соседней директорией (macOS/Windows/Linux одинаково):
-# <parent>/Qwen3.6 27B + <parent>/candle-fork
-qwen35-batch = { path = "../candle-fork/qwen35-batch", features = ["real-model"] }
-candle-transformers = { path = "../candle-fork/candle-transformers" }
+# <parent>/Qwen3.6 27B + <parent>/yttri-forge
+# Движок берём ТОЛЬКО из yttri-forge: candle-fork — устаревшая копия,
+# её HEAD (05aa926a) лежит в истории yttri-forge, уникального в ней нет.
+# Сборка против candle-fork давала продакшену код без сегодняшних правок MTP.
+qwen35-batch = { path = "../yttri-forge/engine/qwen35-batch", features = ["real-model"] }
+candle-transformers = { path = "../yttri-forge/engine/candle-transformers" }
 anyhow = "1"
 axum = { version = "0.8", features = ["multipart"] }
 tokio = { version = "1", features = ["full"] }
@@ -21,7 +24,7 @@ clap = { version = "4", features = ["derive"] }
 uuid = { version = "1", features = ["v4"] }
 
 # Прямые зависимости от candle-форка: для типов Device/Tokenizer в engine.
-candle-core = { path = "../candle-fork/candle-core" }
+candle-core = { path = "../yttri-forge/engine/candle-core" }
 tokenizers = { version = "0.22.0", default-features = false, features = ["onig"] }
 memmap2 = "0.9.3"
 sha2 = "0.10"
