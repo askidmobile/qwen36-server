@@ -20,6 +20,8 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    #[cfg(feature = "cuda")]
+    qwen36_server::engine::cuda_prefer_blocking_sync();
     let cfg = Config::load()?;
     let profile = cfg.resolved_profile.clone();
     let media = Arc::new(qwen36_server::media::MediaService::new(

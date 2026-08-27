@@ -823,10 +823,41 @@ fn load_model(path: &Path, device: &candle_core::Device) -> Result<(RuntimeModel
     Ok((model, eos))
 }
 
+/// Ожидание GPU без холостого вращения ядра CPU. По умолчанию драйвер ждёт
+/// результата spin-циклом: одно ядро на 100% всё время декода, хотя хостовые
+/// фазы шага занимают ~1.5% (замер 2026-08-27, QWEN36_HOST_TIMING). Флаг
+/// CU_CTX_SCHED_BLOCKING_SYNC переводит ожидание в сон; цена — десятки мкс
+/// на пробуждение при шаге в 33 мс. На yttri-win то же ядро обслуживает HTTP.
+/// Откат: QWEN36_CUDA_SPIN=1. Ставится до создания первого контекста;
+/// повторные вызовы безвредны.
+#[cfg(feature = "cuda")]
+pub fn cuda_prefer_blocking_sync() {
+    use candle_core::cuda_backend::cudarc::driver::{result, sys};
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if std::env::var("QWEN36_CUDA_SPIN").as_deref() == Ok("1") {
+            return;
+        }
+        if result::init().is_err() {
+            return;
+        }
+        let res = unsafe {
+            sys::cuDevicePrimaryCtxSetFlags_v2(
+                0,
+                sys::CUctx_flags_enum::CU_CTX_SCHED_BLOCKING_SYNC as u32,
+            )
+        };
+        if res != sys::CUresult::CUDA_SUCCESS {
+            eprintln!("[cuda] blocking sync не установлен: {res:?} (ожидание останется spin)");
+        }
+    });
+}
+
 /// Выбор устройства: cuda (Windows) > metal (macOS) > CPU (BD-011).
 pub fn select_device() -> Result<candle_core::Device> {
     #[cfg(feature = "cuda")]
     {
+        cuda_prefer_blocking_sync();
         return Ok(candle_core::Device::new_cuda(0)?);
     }
     #[cfg(all(feature = "metal", target_os = "macos"))]

@@ -580,6 +580,15 @@ async fn stream_chat(
     // после него всё идёт в content. Хвост в 8 байт держим под частичный тег.
     let mut think_acc = String::new();
     let mut reasoning_done = !thinking;
+    // Что-то из размышления уже ушло клиенту: тогда начало последнего куска
+    // обрезать нельзя — оно продолжает уже отправленный текст. Раньше .trim()
+    // на последнем куске срезал ведущий пробел удержанного хвоста (≤8 байт под
+    // частичный тег): «Let's» + « craft.» уходило как «Let'scraft.».
+    let mut reasoning_emitted = false;
+    // Контент после </think>: ведущие пробелы/переводы строки режем до первого
+    // непустого куска — как split_reasoning в non-stream (trim_start), иначе
+    // поток отдаёт лишний «\n\n» на стыке.
+    let mut content_started = !thinking;
     const THINK_CLOSE: &str = "</think>";
     // Gemma streaming splitter: теги <|channel>thought ... <channel|> ... <|channel>final ...
     // Эмитим reasoning_content инкрементально, content — после <|channel>final.
@@ -718,10 +727,13 @@ async fn stream_chat(
             if !reasoning_done {
                 think_acc.push_str(&d);
                 if let Some(pos) = think_acc.find(THINK_CLOSE) {
-                    let reasoning = think_acc[..pos].trim().to_string();
-                    content_owned = think_acc[pos + THINK_CLOSE.len()..]
-                        .trim_start()
-                        .to_string();
+                    let last = &think_acc[..pos];
+                    let reasoning = if reasoning_emitted {
+                        last.trim_end().to_string()
+                    } else {
+                        last.trim().to_string()
+                    };
+                    content_owned = think_acc[pos + THINK_CLOSE.len()..].to_string();
                     think_acc.clear();
                     if !reasoning.is_empty() {
                         out.push(Event::default().data(chunk(
@@ -737,18 +749,34 @@ async fn stream_chat(
                     let safe = think_acc.len().saturating_sub(THINK_CLOSE.len());
                     let boundary = think_acc.floor_char_boundary(safe);
                     if boundary > 0 {
-                        let reasoning = think_acc[..boundary].to_string();
+                        let reasoning = if reasoning_emitted {
+                            think_acc[..boundary].to_string()
+                        } else {
+                            think_acc[..boundary].trim_start().to_string()
+                        };
                         think_acc.drain(..boundary);
-                        out.push(Event::default().data(chunk(
-                            &id,
-                            &model,
-                            json!({"reasoning_content": reasoning}),
-                            None,
-                        )));
+                        if !reasoning.is_empty() {
+                            reasoning_emitted = true;
+                            out.push(Event::default().data(chunk(
+                                &id,
+                                &model,
+                                json!({"reasoning_content": reasoning}),
+                                None,
+                            )));
+                        }
                     }
                 }
             } else {
                 content_owned = d;
+            }
+            if !content_started {
+                let trimmed = content_owned.trim_start();
+                if trimmed.is_empty() {
+                    content_owned.clear();
+                } else {
+                    content_owned = trimmed.to_string();
+                    content_started = true;
+                }
             }
             let content_part = content_owned.as_str();
             if !content_part.is_empty() {
