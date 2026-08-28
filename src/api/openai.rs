@@ -477,6 +477,12 @@ pub async fn chat_completions(
             "index": 0,
             "message": message,
             "finish_reason": finish,
+            // По контракту поле присутствует всегда: null, если не просили.
+            // refusal внутри — тоже часть формата, у нас отказов нет.
+            "logprobs": out.logprobs.as_ref().map(|entries| json!({
+                "content": entries.iter().map(logprob_json).collect::<Vec<_>>(),
+                "refusal": Value::Null,
+            })),
         }],
         "usage": {
             "prompt_tokens": out.usage.prompt_tokens,
@@ -488,6 +494,24 @@ pub async fn chat_completions(
         },
     }))
     .into_response()
+}
+
+/// Одна запись logprobs в вид OpenAI.
+///
+/// `bytes` отдаём массивом чисел, как в контракте: для байтовых и неполных
+/// UTF-8 токенов строка содержит U+FFFD, а байты остаются настоящими, и
+/// клиент по ним восстановит границы.
+fn logprob_json(entry: &crate::engine_types::TokenLogprob) -> Value {
+    json!({
+        "token": entry.token,
+        "logprob": entry.logprob,
+        "bytes": entry.bytes,
+        "top_logprobs": entry.top.iter().map(|t| json!({
+            "token": t.token,
+            "logprob": t.logprob,
+            "bytes": t.bytes,
+        })).collect::<Vec<_>>(),
+    })
 }
 
 pub fn extract_gemma_fallback_content(reasoning: &str) -> Option<String> {

@@ -237,6 +237,9 @@ pub struct GenOutcome {
     pub text: String,
     pub finish_reason: String,
     pub usage: crate::engine_types::GenerationUsage,
+    /// Записи по сгенерированным токенам, если клиент их просил. `None` —
+    /// не просил; пустой вектор — просил, но токенов не было.
+    pub logprobs: Option<Vec<crate::engine_types::TokenLogprob>>,
 }
 
 pub async fn prepare_inference_request(
@@ -353,9 +356,15 @@ pub async fn generate_collect(
     let guard = request.cancel.guard();
     let mut rx = engine.generate(request).await.map_err(engine_error)?;
     let mut text = String::new();
+    let mut logprobs: Option<Vec<crate::engine_types::TokenLogprob>> = None;
     while let Some(ev) = rx.recv().await {
         match ev {
-            crate::engine_types::StreamEvent::Delta { text: d, .. } => text.push_str(&d),
+            crate::engine_types::StreamEvent::Delta { text: d, logprobs: lp } => {
+                text.push_str(&d);
+                if let Some(lp) = lp {
+                    logprobs.get_or_insert_with(Vec::new).extend(lp);
+                }
+            }
             crate::engine_types::StreamEvent::Done {
                 finish_reason,
                 usage,
@@ -365,6 +374,7 @@ pub async fn generate_collect(
                     text,
                     finish_reason,
                     usage,
+                    logprobs,
                 });
             }
             crate::engine_types::StreamEvent::Error(e) => {
