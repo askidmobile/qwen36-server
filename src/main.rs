@@ -79,24 +79,31 @@ async fn main() -> Result<()> {
             Ok("0") | Err(_) => false,
             Ok(value) => anyhow::bail!("MTP must be 0 or 1, got {value:?}"),
         };
-        let mtp_path = mtp_enabled
-            .then(|| {
-                profile.as_ref().and_then(|profile| match &profile.mtp {
+        // Env-фолбэк должен быть ВНУТРИ проверки mtp_enabled, а не после неё.
+        // Раньше он висел на .or_else(), который срабатывает ровно тогда, когда
+        // предыдущее звено дало None — то есть при MTP=0. Выключатель включал:
+        // при заданном QWEN36_MTP_PATH спекуляция работала и с MTP=0
+        // (замер: drafted=316, accepted=130 при MTP=0).
+        let mtp_path = if mtp_enabled {
+            profile
+                .as_ref()
+                .and_then(|profile| match &profile.mtp {
                     qwen36_server::profile::ComponentArtifact::Available { path } => {
                         Some(path.clone())
                     }
                     _ => None,
                 })
-            })
-            .flatten()
-            // Env-фолбэк: тонкий MTP-артефакт без полного профиля
-            // (эксперименты и модели, для которых манифест ещё не собран).
-            .or_else(|| {
-                std::env::var("QWEN36_MTP_PATH")
-                    .ok()
-                    .filter(|p| !p.is_empty())
-                    .map(std::path::PathBuf::from)
-            });
+                // Тонкий MTP-артефакт без полного профиля: эксперименты и
+                // модели, для которых манифест ещё не собран.
+                .or_else(|| {
+                    std::env::var("QWEN36_MTP_PATH")
+                        .ok()
+                        .filter(|p| !p.is_empty())
+                        .map(std::path::PathBuf::from)
+                })
+        } else {
+            None
+        };
         BatchedEngine::load(bcfg, media.clone(), vision_path, mtp_path).await?
     } else {
         Arc::new(CandleEngine::load(&cfg)?)
