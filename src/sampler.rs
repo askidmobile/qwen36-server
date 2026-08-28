@@ -348,11 +348,29 @@ impl RawLogprobs {
 /// по контракту, и подавляющее большинство логитов отсеивается первым же
 /// сравнением, так что это дешевле кучи и не требует копии словаря.
 pub fn raw_logprobs(logits: &[f32], k: usize) -> RawLogprobs {
+    // Один проход вместо двух: максимум, топ-K и сумма считаются вместе.
+    // Сумма нормирована на текущий максимум; когда встречается больший,
+    // накопленное перемасштабируется одним умножением. Таких событий порядка
+    // ln(n) — десяток на словарь.
+    //
+    // Слагаемые ниже max−30 не берём: exp(−30) ≈ 9e-14, ниже точности f32.
+    //
+    // Сумма копится в f64: слагаемых около 151 тысячи, и в f32 накопленная
+    // ошибка выходит порядка sqrt(n)*eps ≈ 5e-5, что видно в logprob (замер
+    // дал 7.6e-5 расхождения с лобовым log_softmax). В f64 она исчезает,
+    // а стоит это столько же.
     let mut max = f32::NEG_INFINITY;
+    let mut sum = 0f64;
     let mut top: Vec<(u32, f32)> = Vec::with_capacity(k.min(logits.len()));
     for (i, &l) in logits.iter().enumerate() {
         if l > max {
+            if max > f32::NEG_INFINITY {
+                sum *= ((max - l) as f64).exp();
+            }
             max = l;
+            sum += 1.0;
+        } else if l > max - 30.0 {
+            sum += ((l - max) as f64).exp();
         }
         if k == 0 {
             continue;
@@ -366,18 +384,6 @@ pub fn raw_logprobs(logits: &[f32], k: usize) -> RawLogprobs {
             top.truncate(k);
         }
     }
-    // Логиты ниже max − 30 не влияют на сумму: exp(−30) ≈ 9e-14, а f32 держит
-    // около семи значащих цифр. Порог сделан с запасом против 1e-9.
-    // Сумма копится в f64: слагаемых около 151 тысячи, и в f32 накопленная
-    // ошибка выходит порядка sqrt(n)*eps ≈ 5e-5, что видно в logprob (замер
-    // дал 7.6e-5 расхождения с лобовым log_softmax). В f64 она исчезает,
-    // а стоит это столько же.
-    let cutoff = max - 30.0;
-    let sum: f64 = logits
-        .iter()
-        .filter(|&&l| l > cutoff)
-        .map(|&l| ((l - max) as f64).exp())
-        .sum();
     let ln_sum = sum.ln() as f32;
     for entry in top.iter_mut() {
         entry.1 = entry.1 - max - ln_sum;
