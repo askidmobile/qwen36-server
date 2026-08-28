@@ -634,12 +634,30 @@ pub(crate) fn now_unix() -> u64 {
 }
 
 fn chunk(id: &str, model: &str, delta: Value, finish: Option<&str>) -> String {
+    chunk_with(id, model, delta, finish, None)
+}
+
+/// Чанк с необязательным полем logprobs.
+///
+/// Отдельной функцией, а не пятым параметром `chunk`: вызовов у неё
+/// восемнадцать, и добавлять всем `None` ради одного места — шум в диффе.
+fn chunk_with(
+    id: &str,
+    model: &str,
+    delta: Value,
+    finish: Option<&str>,
+    logprobs: Option<Value>,
+) -> String {
+    let mut choice = json!({"index": 0, "delta": delta, "finish_reason": finish});
+    if let Some(lp) = logprobs {
+        choice["logprobs"] = lp;
+    }
     json!({
         "id": id,
         "object": "chat.completion.chunk",
         "created": now_unix(),
         "model": model,
-        "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+        "choices": [choice],
     })
     .to_string()
 }
@@ -688,7 +706,7 @@ async fn stream_chat(
     // 0=ищем thought-open, 1=в thought (до close), 2=ищем final-open, 3=в final
     let mut gemma_phase: u8 = 0;
     sse_response(rx, cancel, move |ev, out| match ev {
-        StreamEvent::Delta { text: d, .. } => {
+        StreamEvent::Delta { text: d, logprobs: lp } => {
             if gemma_channel {
                 if first {
                     first = false;
@@ -876,6 +894,30 @@ async fn stream_chat(
                         &model,
                         json!({"content": content_part}),
                         None,
+                    )));
+                }
+            }
+            // Записи по токенам этого шага — отдельным чанком с пустым
+            // содержимым. Пустая строка, а не null: некоторые клиенты падают
+            // на null там, где ждут строку.
+            //
+            // Отдельный чанк, а не поле у текстового: наш сплиттер режет поток
+            // на размышление и ответ ПО ТЕКСТУ и придерживает недособранные
+            // UTF-8 хвосты, поэтому у одной дельты бывает и ноль текстовых
+            // чанков, и несколько. Привязать записи к одному из них без
+            // натяжки нельзя, а фаза при этом уже определена точно — по
+            // идентификатору токена </think> в движке.
+            if let Some(entries) = lp {
+                if !entries.is_empty() {
+                    out.push(Event::default().data(chunk_with(
+                        &id,
+                        &model,
+                        json!({"content": ""}),
+                        None,
+                        Some(json!({
+                            "content": entries.iter().map(logprob_json).collect::<Vec<_>>(),
+                            "refusal": Value::Null,
+                        })),
                     )));
                 }
             }

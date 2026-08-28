@@ -145,6 +145,13 @@ struct SlotBinding {
     usage: MediaUsage,
     _media_lease: Option<PreparedLease>,
     cancel: crate::engine_types::CancelFlag,
+    /// Идут ли сейчас токены размышления. По контракту OpenAI в logprobs
+    /// попадают только токены ответа. Фаза определяется ИДЕНТИФИКАТОРОМ
+    /// токена `</think>`, а не текстом: сплиттер режет текст и придерживает
+    /// хвосты, а граница размышления — конкретный токен, и совпадать они не
+    /// обязаны. Если размышление выключено или модель его не открыла — всё
+    /// считается ответом.
+    in_reasoning: bool,
 }
 
 pub struct BatchedEngine {
@@ -860,11 +867,39 @@ fn drain_after_step(
             .get_mut(&idx)
             .map(|st| std::mem::take(&mut st.pending_logprobs))
             .unwrap_or_default();
+        // Фаза по идентификатору токена: в logprobs по контракту идут только
+        // токены ответа. Сами `<think>` и `</think>` не попадают ни туда, ни
+        // сюда. Записи выравниваем по хвосту generated и сверяем
+        // идентификаторы: если очередь разошлась с историей (откат
+        // спекуляции), считаем всё ответом, чем врать о фазе.
         let chunk_logprobs: Option<Vec<TokenLogprob>> = b.params.logprobs.map(|_| {
-            pending
+            let think_open = tokenizer.token_to_id("<think>");
+            let think_close = tokenizer.token_to_id("</think>");
+            let tail_start = generated.len().saturating_sub(pending.len());
+            let aligned = pending
                 .iter()
-                .map(|lp| to_api_logprob(tokenizer, lp.token, lp.logprob, &lp.top))
-                .collect()
+                .enumerate()
+                .all(|(i, lp)| generated.get(tail_start + i) == Some(&lp.token));
+            let mut out = Vec::with_capacity(pending.len());
+            for lp in pending.iter() {
+                if !aligned {
+                    out.push(to_api_logprob(tokenizer, lp.token, lp.logprob, &lp.top));
+                    continue;
+                }
+                if Some(lp.token) == think_close {
+                    b.in_reasoning = false;
+                    continue;
+                }
+                if Some(lp.token) == think_open {
+                    b.in_reasoning = true;
+                    continue;
+                }
+                if b.in_reasoning {
+                    continue;
+                }
+                out.push(to_api_logprob(tokenizer, lp.token, lp.logprob, &lp.top));
+            }
+            out
         });
         b.completion_tokens = generated.len();
         b.last_progress = Instant::now();
@@ -1060,6 +1095,7 @@ fn seed_slot(
             },
         );
     slot_truncated.insert(idx, req.truncated);
+    let params_thinking = params.thinking;
     bindings[idx] = Some(SlotBinding {
         out: req.out,
         params,
@@ -1073,6 +1109,7 @@ fn seed_slot(
         last_progress: Instant::now(),
         usage,
         _media_lease: media_lease,
+        in_reasoning: params_thinking,
         cancel: req.cancel,
     });
 }
