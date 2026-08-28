@@ -897,7 +897,16 @@ fn drain_after_step(
                 if b.in_reasoning {
                     continue;
                 }
-                out.push(to_api_logprob(tokenizer, lp.token, lp.logprob, &lp.top));
+                let entry = to_api_logprob(tokenizer, lp.token, lp.logprob, &lp.top);
+                // Служебные токены записей не получают вовсе: у OpenAI
+                // стоп-токен не входит ни в content, ни в logprobs, а у нас он
+                // декодируется в пустую строку — для клиента это мусор с
+                // непустым числом. Признак служебности — пустые байты:
+                // decode_bytes отбрасывает токены вида <|...|>.
+                if entry.bytes.is_empty() {
+                    continue;
+                }
+                out.push(entry);
             }
             out
         });
