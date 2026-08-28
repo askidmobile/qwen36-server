@@ -631,7 +631,7 @@ async fn stream_chat(
     // 0=ищем thought-open, 1=в thought (до close), 2=ищем final-open, 3=в final
     let mut gemma_phase: u8 = 0;
     sse_response(rx, cancel, move |ev, out| match ev {
-        StreamEvent::Delta(d) => {
+        StreamEvent::Delta { text: d, .. } => {
             if gemma_channel {
                 if first {
                     first = false;

@@ -247,7 +247,7 @@ pub async fn messages(
     .to_string();
 
     sse_response(rx, cancel, move |ev, out| match ev {
-        StreamEvent::Delta(d) => {
+        StreamEvent::Delta { text: d, .. } => {
             if !started {
                 started = true;
                 out.push(

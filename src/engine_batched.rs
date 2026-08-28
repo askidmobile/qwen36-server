@@ -858,7 +858,7 @@ fn drain_after_step(
         if prefix_ok && end >= emitted_tail_len {
             let delta = tail_text[emitted_tail_len..end].to_string();
             if !delta.is_empty() {
-                match b.out.try_send(StreamEvent::Delta(delta.clone())) {
+                match b.out.try_send(StreamEvent::Delta { text: delta.clone(), logprobs: None }) {
                     Ok(()) => {}
                     Err(mpsc::error::TrySendError::Full(_))
                     | Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -1047,7 +1047,7 @@ fn finish_slot(
         };
         if text.starts_with(&b.emitted_text) && text.len() > b.emitted_text.len() {
             let tail = text[b.emitted_text.len()..].to_string();
-            let _ = b.out.try_send(StreamEvent::Delta(tail));
+            let _ = b.out.try_send(StreamEvent::Delta { text: tail, logprobs: None });
         }
     }
     if !b.cancelled {

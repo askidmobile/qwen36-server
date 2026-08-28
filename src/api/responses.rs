@@ -165,7 +165,7 @@ pub async fn responses(
     .to_string();
 
     sse_response(rx, cancel, move |ev, out| match ev {
-        StreamEvent::Delta(d) => {
+        StreamEvent::Delta { text: d, .. } => {
             if !created_sent {
                 created_sent = true;
                 out.push(

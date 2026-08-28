@@ -263,10 +263,32 @@ pub struct InferenceRequest {
     pub reasoning_effort: Option<String>,
 }
 
-#[derive(Debug)]
+/// Logprobs одного токена для поля `logprobs` в Chat Completions.
+///
+/// Строка `token` — текст ОДНОГО токена, `bytes` — его сырые байты. Для
+/// байтовых и неполных UTF-8 токенов строка содержит U+FFFD, а байты остаются
+/// честными. Числа — сырые вероятности модели, до штрафов и температуры;
+/// подробности в docs/plans/logprobs.md.
+#[derive(Debug, Clone)]
+pub struct TokenLogprob {
+    pub token: String,
+    pub bytes: Vec<u8>,
+    pub logprob: f32,
+    /// Кандидаты модели, по убыванию.
+    pub top: Vec<TokenLogprob>,
+}
+
+#[derive(Debug, Clone)]
 pub enum StreamEvent {
     /// Текстовый кусок (thinking включён в поток, парсит HTTP-слой).
-    Delta(String),
+    ///
+    /// `logprobs` — записи по токенам, появившимся на этом шаге, если клиент
+    /// их запросил. Пустой вектор и `None` различаются: `None` значит «не
+    /// просили», пустой — «просили, но токенов в этом куске нет».
+    Delta {
+        text: String,
+        logprobs: Option<Vec<TokenLogprob>>,
+    },
     Done {
         finish_reason: String, // "stop" | "length"
         usage: GenerationUsage,
@@ -624,7 +646,7 @@ fn run_generation(
             () => {
                 if full_text.starts_with(&emitted_text) && full_text.len() > emitted_text.len() {
                     let tail = full_text[emitted_text.len()..].to_string();
-                    let _ = tx.blocking_send(StreamEvent::Delta(tail));
+                    let _ = tx.blocking_send(StreamEvent::Delta { text: tail, logprobs: None });
                 }
             };
         }
@@ -688,7 +710,7 @@ fn run_generation(
                 let chunk = &full_text[emitted_text.len()..end];
                 if !chunk.is_empty()
                     && tx
-                        .blocking_send(StreamEvent::Delta(chunk.to_string()))
+                        .blocking_send(StreamEvent::Delta { text: chunk.to_string(), logprobs: None })
                         .is_err()
                 {
                     return Ok(()); // клиент отключился

@@ -355,7 +355,7 @@ pub async fn generate_collect(
     let mut text = String::new();
     while let Some(ev) = rx.recv().await {
         match ev {
-            crate::engine_types::StreamEvent::Delta(d) => text.push_str(&d),
+            crate::engine_types::StreamEvent::Delta { text: d, .. } => text.push_str(&d),
             crate::engine_types::StreamEvent::Done {
                 finish_reason,
                 usage,

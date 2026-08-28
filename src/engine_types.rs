@@ -3,5 +3,5 @@
 
 pub use crate::engine::{
     CancelFlag, ChatMessage, ContentBlock, Engine, GenParams, GenerationUsage, InferenceRequest,
-    MediaSource, MediaUsage, ModelInfo, MtpUsage, StreamEvent,
+    MediaSource, MediaUsage, ModelInfo, MtpUsage, StreamEvent, TokenLogprob,
 };
