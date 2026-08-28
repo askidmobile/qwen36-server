@@ -282,8 +282,15 @@ impl BatchedEngine {
                 }
             }
             if let Some(path) = mtp_path2 {
+                // MTP запрошен явно, значит его провал — ошибка запуска, а не
+                // повод молча работать без спекуляции: сервер в таком виде
+                // отвечает и выглядит исправным, а конфигурация не та, что
+                // просили. На этом сгорел целый контрольный замер.
                 if let Err(e) = adapter.load_mtp(&path) {
                     eprintln!("[dispatch] mtp load failed: {e:#}");
+                    *load_error.write().expect("load_error lock") =
+                        format!("MTP запрошен, но не загрузился: {e:#}");
+                    return;
                 }
             }
             #[cfg(feature = "cuda")]
