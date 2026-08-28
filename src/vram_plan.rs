@@ -209,9 +209,15 @@ pub fn compute_dynamic(
     });
     // Сколько слотов могут быть одновременно заполнены ctx полностью.
     let full_concurrent = (kv_budget / (kv_per_tok * ctx as f64)).floor() as usize;
+    // Оценка справочная, и это важно проговорить: движок считает окно пула
+    // заново, от фактически свободной VRAM в момент создания, и бюджет отсюда
+    // не смотрит. Числа расходятся — на 3060 планировщик дал «~0 слотов
+    // полного ctx» при 131072, а движок выделил окно 129728 и всё работало.
+    // Без этой оговорки строка читается как «не влезет», хотя это не так.
     let report = format!(
         "[vram] total={total_mib}MiB weights={}MiB kv_budget={kv_budget:.0}MiB state={state:.0}MiB/slot\n\
-         [vram] plan(dynamic): ctx={ctx} slots={req_slots} — ~{full_concurrent} слот(а) полного ctx одновременно, очередь FIFO",
+         [vram] plan(dynamic): ctx={ctx} slots={req_slots} — ~{full_concurrent} слот(а) полного ctx одновременно, очередь FIFO\n\
+         [vram] оценка справочная: окно пула движок считает сам от свободной VRAM — фактическое смотри в строке [kv] paged pool",
         fp.weights_mib,
     );
     Ok(DynPlan {
