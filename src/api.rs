@@ -184,9 +184,22 @@ where
         let mut rx = rx;
         let mut buf: Vec<Event> = Vec::new();
         loop {
-            let ev = match rx.recv().await {
-                Some(e) => e,
-                None => break,
+            // Ждём либо событие движка, либо обрыв клиента.
+            //
+            // Без второй ветки отмена не работала во время префила: задача
+            // висела на recv(), событий в префиле нет, tx.send не вызывался —
+            // и обрыв обнаруживался только когда пойдёт первый токен. На 18K
+            // промпта это 14 секунд неостановимой работы видеокарты после
+            // нажатия «стоп», на 128K — около минуты.
+            //
+            // Возврат без disarm роняет CancelOnDrop, тот взводит флаг,
+            // и планировщик бросает префил на границе ближайшего чанка.
+            let ev = tokio::select! {
+                e = rx.recv() => match e {
+                    Some(e) => e,
+                    None => break,
+                },
+                _ = tx.closed() => return,
             };
             let cont = map(ev, &mut buf);
             for e in buf.drain(..) {
@@ -201,7 +214,11 @@ where
         guard.disarm();
     });
     let mut resp = Sse::new(tokio_stream::wrappers::ReceiverStream::new(out_rx))
-        .keep_alive(KeepAlive::default())
+        // Секунда вместо стандартных пятнадцати: keep-alive — единственная
+        // запись в сокет, пока идёт префил, и только по её провалу hyper
+        // узнаёт, что клиент отвалился. При 15 с обрыв во время префила
+        // короче четверти минуты оставался незамеченным.
+        .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(1)))
         .into_response();
     resp.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
