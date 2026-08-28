@@ -767,6 +767,16 @@ eager), 8/8 ответов 200; контроль без переменной —
 версий — Yttri, `docs/specs/ai/2026-08-28-deltanet-prefill-kernel-metal.md`
 §4д; их профиль — `YTTRI_GDN_PROFILE=1`.
 
+**Счёт диспатчей на шаг декода (yttri-66, Metal, тот же 4B): 675** (у нас на
+CUDA 707 по nsys) — DeltaNet 17 на блок, attention 33 на блок; наши
+per-kernel числа дают ту же асимметрию: copy2d 49 = 8×6+1 и ucopy 32 = 8×4 —
+копии кратны числу attention-блоков, ни одной на DeltaNet (to_dtype,
+contiguous, slice_set K/V, RoPE через промежуточные, гейт). На CUDA с графами
+это ~0.7 мс GPU-зазоров на шаг (3%) — не приоритет; на Metal без графов —
+самая дешёвая часть их разрыва с MLX (1.8 мс/токен ≈ 675 × 2–3 мкс). Если
+возьмёмся: RoPE q/k одним ядром на месте, запись K/V в кеш из RoPE без
+slice_set, q_norm/k_norm слить с приведением — минус 8–10 пусков на блок.
+
 По замечанию сессии yttri-66: `MetalStorage::try_clone` в форке возвращает
 `self.clone()` с тем же `start_offset`, то есть `copy()` на Metal не копирует.
 Metal-ветка последовательных строк DeltaNet (проверка MTP с k строками одного
