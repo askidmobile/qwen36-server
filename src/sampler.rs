@@ -262,6 +262,58 @@ fn argmax(logits: &[f32]) -> u32 {
     best
 }
 
+/// Logprobs одного выбранного токена вместе с топом кандидатов.
+#[derive(Debug, Clone)]
+pub struct TokenLogprobs {
+    pub token: u32,
+    /// Logprob выбранного токена по сырому распределению модели.
+    pub logprob: f32,
+    /// Топ кандидатов модели, по убыванию: (идентификатор, logprob).
+    pub top: Vec<(u32, f32)>,
+}
+
+/// То же, что `sample_with_seen`, плюс logprobs, если они запрошены.
+///
+/// `want_top` — сколько кандидатов вернуть (`Some(0)` даёт только logprob
+/// выбранного, `None` — прежний путь без единой лишней аллокации).
+///
+/// Устройство намеренно тупое: сырые вероятности считаются ДО вызова
+/// сэмплера, сам сэмплер вызывается как был. Поэтому требование «включение
+/// logprobs не меняет выбор токенов» выполняется по построению — ни лишнего
+/// обращения к генератору, ни изменения порядка операций отбора.
+#[allow(clippy::too_many_arguments)]
+pub fn sample_with_seen_logprobs(
+    logits: &[f32],
+    temperature: f32,
+    top_k: usize,
+    top_p: f32,
+    min_p: f32,
+    presence_penalty: f32,
+    repetition_penalty: f32,
+    seen: &HashSet<u32>,
+    rng: &mut Rng,
+    want_top: Option<usize>,
+) -> (u32, Option<TokenLogprobs>) {
+    let raw = want_top.map(|k| raw_logprobs(logits, k));
+    let token = sample_with_seen(
+        logits,
+        temperature,
+        top_k,
+        top_p,
+        min_p,
+        presence_penalty,
+        repetition_penalty,
+        seen,
+        rng,
+    );
+    let lp = raw.map(|r| TokenLogprobs {
+        token,
+        logprob: r.of(token, logits),
+        top: r.top,
+    });
+    (token, lp)
+}
+
 /// Сырые вероятности модели: log-softmax по всему словарю от логитов ДО
 /// штрафов, температуры и любого отбора.
 ///
@@ -400,6 +452,34 @@ mod tests {
         let a = raw_logprobs(&logits, 5);
         let b = raw_logprobs(&logits, 5);
         assert_eq!(a.top, b.top, "две подряд дают разное — есть состояние");
+    }
+
+    #[test]
+    fn logprobs_do_not_change_choice() {
+        // Главное требование контракта: включение logprobs не влияет на выбор.
+        // Проверяем на жадном режиме и на температуре 0.7 со штрафами, потому
+        // что это разные ветки сэмплера.
+        let logits = vocab_like_model();
+        let seen: HashSet<u32> = [5u32, 42, 777].into_iter().collect();
+        for &(temp, pres, rep) in &[(0.0f32, 0.0f32, 1.0f32), (0.7, 1.5, 1.1)] {
+            let mut a = Rng::new(12345);
+            let mut b = Rng::new(12345);
+            let mut plain = Vec::new();
+            let mut with = Vec::new();
+            for _ in 0..64 {
+                plain.push(sample_with_seen(
+                    &logits, temp, 20, 0.95, 0.0, pres, rep, &seen, &mut a,
+                ));
+                let (t, lp) = sample_with_seen_logprobs(
+                    &logits, temp, 20, 0.95, 0.0, pres, rep, &seen, &mut b, Some(5),
+                );
+                with.push(t);
+                let lp = lp.expect("logprobs запрошены, но не вернулись");
+                assert_eq!(lp.token, t, "logprob приписан не тому токену");
+                assert_eq!(lp.top.len(), 5);
+            }
+            assert_eq!(plain, with, "включение logprobs изменило выбор при temp={temp}");
+        }
     }
 
     #[test]
