@@ -68,9 +68,13 @@ impl GenParams {
             .checked_sub(prompt_tokens)
             .filter(|&n| n > 0)
             .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "prompt has {prompt_tokens} tokens, context length is {context_length}"
-                )
+                // Тот же типизированный отказ, что и при обрезке: клиент должен
+                // получить 400 с кодом context_length_exceeded и сжать историю,
+                // а не 500, по которому агент решит, что сломался сервер.
+                anyhow::Error::from(ContextOverflow {
+                    prompt_tokens,
+                    limit: context_length,
+                })
             })?;
         self.max_tokens = self.max_tokens.min(available);
         Ok(())
