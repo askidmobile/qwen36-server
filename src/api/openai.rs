@@ -646,6 +646,17 @@ async fn stream_chat(
     // поток отдаёт лишний «\n\n» на стыке.
     let mut content_started = !thinking;
     const THINK_CLOSE: &str = "</think>";
+    // Разметка вызова инструмента. Раньше при tools в запросе весь ответ копился
+    // до конца генерации и уходил одной дельтой: размышления текли, а ответ и
+    // вызовы приходили целиком. Это и лишняя задержка, и буфер на весь ответ.
+    // Теперь контент течёт, а придерживаются только байты, которые ещё могут
+    // оказаться началом тега, — та же техника, что и для </think>.
+    const TOOL_OPEN: &str = "<tool";
+    // Хвост, который ещё может быть началом TOOL_OPEN, — не отправлен.
+    let mut tool_pending = String::new();
+    // Всё от первого тега и до конца: разметка вызовов, разбирается в финале.
+    let mut tool_tail = String::new();
+    let mut in_tool = false;
     // Gemma streaming splitter: теги <|channel>thought ... <channel|> ... <|channel>final ...
     // Эмитим reasoning_content инкрементально, content — после <|channel>final.
     const GEMMA_THOUGHT_OPEN: &str = "<|channel>thought";
@@ -837,13 +848,37 @@ async fn stream_chat(
             let content_part = content_owned.as_str();
             if !content_part.is_empty() {
                 acc.push_str(content_part);
+                let mut emit_content = |text: String, out: &mut Vec<Event>| {
+                    if !text.is_empty() {
+                        out.push(Event::default().data(chunk(
+                            &id,
+                            &model,
+                            json!({"content": text}),
+                            None,
+                        )));
+                    }
+                };
                 if !has_tools {
-                    out.push(Event::default().data(chunk(
-                        &id,
-                        &model,
-                        json!({"content": content_part}),
-                        None,
-                    )));
+                    emit_content(content_part.to_string(), out);
+                } else if in_tool {
+                    tool_tail.push_str(content_part);
+                } else {
+                    tool_pending.push_str(content_part);
+                    if let Some(pos) = tool_pending.find(TOOL_OPEN) {
+                        let head = tool_pending[..pos].to_string();
+                        tool_tail.push_str(&tool_pending[pos..]);
+                        tool_pending.clear();
+                        in_tool = true;
+                        emit_content(head, out);
+                    } else {
+                        // Держим только то, что ещё может оказаться началом тега.
+                        let safe = tool_pending.len().saturating_sub(TOOL_OPEN.len() - 1);
+                        let boundary = tool_pending.floor_char_boundary(safe);
+                        if boundary > 0 {
+                            let head: String = tool_pending.drain(..boundary).collect();
+                            emit_content(head, out);
+                        }
+                    }
                 }
             }
             // Записи по токенам этого шага — отдельным чанком с пустым
@@ -947,9 +982,25 @@ async fn stream_chat(
                         None,
                     )));
                 }
-                let (text, calls) = parse_tool_calls(&text_body);
-                // tools в запросе: текст буферизован — эмитим его (без tool_call
-                // разметки) одной дельтой до tool_calls-чанков.
+                let (text, calls) = if has_tools && !gemma_channel {
+                    // Контент уже ушёл в поток по мере генерации, поэтому
+                    // разбираем только хвост с разметкой — иначе отправили бы
+                    // весь ответ повторно. Остаётся дослать непоместившуюся
+                    // придержку и текст, который парсер извлёк между вызовами.
+                    let mut head = std::mem::take(&mut tool_pending);
+                    let (rest, calls) = parse_tool_calls(&tool_tail);
+                    if !rest.is_empty() {
+                        if !head.is_empty() && !head.ends_with(char::is_whitespace) {
+                            head.push(' ');
+                        }
+                        head.push_str(&rest);
+                    }
+                    (head.trim().to_string(), calls)
+                } else {
+                    parse_tool_calls(&text_body)
+                };
+                // Остаток текста (придержка и то, что было между вызовами) —
+                // одной дельтой до tool_calls-чанков.
                 if (has_tools || gemma_channel) && !text.is_empty() {
                     out.push(Event::default().data(chunk(&id, &model, json!({"content": text}), None)));
                 }
