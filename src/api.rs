@@ -64,6 +64,10 @@ pub struct ErrorInner {
     #[serde(rename = "type")]
     pub kind: &'static str,
     pub message: String,
+    /// Машинный код ошибки. Агенты опознают переполнение контекста именно по
+    /// нему (`context_length_exceeded`), а не по тексту сообщения.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<&'static str>,
 }
 
 pub fn api_error(status: StatusCode, kind: &'static str, message: impl Into<String>) -> Response {
@@ -73,6 +77,7 @@ pub fn api_error(status: StatusCode, kind: &'static str, message: impl Into<Stri
             error: ErrorInner {
                 kind,
                 message: message.into(),
+                code: None,
             },
         }),
     )
@@ -320,8 +325,23 @@ pub fn inference_request(
 }
 
 pub fn engine_error(error: anyhow::Error) -> Response {
-    match error.downcast::<crate::media::MediaError>() {
-        Ok(error) => media_error(error),
+    let error = match error.downcast::<crate::media::MediaError>() {
+        Ok(error) => return media_error(error),
+        Err(error) => error,
+    };
+    // Переполнение контекста — вина запроса, а не сервера: 400, не 500.
+    match error.downcast::<crate::engine::ContextOverflow>() {
+        Ok(overflow) => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: ErrorInner {
+                    kind: "invalid_request_error",
+                    message: overflow.to_string(),
+                    code: Some("context_length_exceeded"),
+                },
+            }),
+        )
+            .into_response(),
         Err(error) => internal_error(error.to_string()),
     }
 }

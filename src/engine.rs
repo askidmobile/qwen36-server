@@ -459,6 +459,14 @@ impl Engine for CandleEngine {
                     .unwrap_or(0)
             };
             let (kept, was_trimmed) = trim_messages(&messages, budget, count);
+            if was_trimmed && ctx_overflow_is_error() {
+                let total: usize = messages.iter().map(count).sum();
+                return Err(ContextOverflow {
+                    prompt_tokens: total,
+                    limit: budget,
+                }
+                .into());
+            }
             truncated = was_trimmed;
             let msgs_text: Vec<(&str, String)> = kept
                 .iter()
@@ -941,6 +949,44 @@ pub fn quant_from_filename(path: &Path) -> String {
 /// user/assistant пары с головы, пока суммарная оценка токенов не влезет в budget.
 /// Последнее сообщение (текущий user) не удаляем никогда.
 /// Возвращает (оставшиеся сообщения, был ли trim).
+/// Промпт не влезает в контекст, а режим переполнения — «ошибка».
+///
+/// Скользящее окно молча теряет часть диалога: агент об этом не знает и
+/// продолжает слать всё тот же разросшийся контекст. Ошибка возвращает
+/// решение ему — он сожмёт историю сам и повторит запрос.
+#[derive(Debug)]
+pub struct ContextOverflow {
+    pub prompt_tokens: usize,
+    pub limit: usize,
+}
+
+impl std::fmt::Display for ContextOverflow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "промпт не помещается в контекст: {} токенов при доступных {}. \
+             Сократите историю или уменьшите max_tokens.",
+            self.prompt_tokens, self.limit
+        )
+    }
+}
+
+impl std::error::Error for ContextOverflow {}
+
+/// Режим переполнения контекста: `error` (по умолчанию) или `sliding_window`.
+///
+/// Раньше настройка CTX_OVERFLOW читалась в конфиг и нигде не использовалась —
+/// окно скользило всегда, независимо от значения.
+pub fn ctx_overflow_is_error() -> bool {
+    static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| {
+        std::env::var("CTX_OVERFLOW")
+            .or_else(|_| std::env::var("QWEN36_CTX_OVERFLOW"))
+            .map(|v| v != "sliding_window")
+            .unwrap_or(true)
+    })
+}
+
 pub fn trim_messages(
     messages: &[ChatMessage],
     budget: usize,

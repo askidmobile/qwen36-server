@@ -440,6 +440,14 @@ impl Engine for BatchedEngine {
                     .unwrap_or(0)
             };
             let (kept, was_trimmed) = trim_messages(&messages, budget, count);
+            if was_trimmed && crate::engine::ctx_overflow_is_error() {
+                let total: usize = messages.iter().map(count).sum();
+                return Err(crate::engine::ContextOverflow {
+                    prompt_tokens: total,
+                    limit: budget,
+                }
+                .into());
+            }
             let msgs_text: Vec<(&str, String)> = kept
                 .iter()
                 .map(|m| (m.role.as_str(), m.text_content_with_reasoning()))
