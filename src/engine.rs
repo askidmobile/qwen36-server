@@ -35,6 +35,11 @@ pub struct GenParams {
     /// (быстрые ответы, нет 4K-токенного мышления → pi-таймаутов).
     #[serde(default)]
     pub thinking: bool,
+    /// Сколько кандидатов вернуть в logprobs. `None` — поле не запрошено,
+    /// `Some(0)` — только logprob выбранного токена без топа. Считается по
+    /// сырым логитам модели, до штрафов и температуры: docs/plans/logprobs.md.
+    #[serde(default)]
+    pub logprobs: Option<usize>,
 }
 
 impl Default for GenParams {
@@ -50,6 +55,7 @@ impl Default for GenParams {
             stop: vec![],
             seed: None,
             thinking: false,
+            logprobs: None,
         }
     }
 }

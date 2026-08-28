@@ -43,6 +43,13 @@ pub struct ChatCompletionRequest {
     /// Уровень рассуждений: none (без), low (с рассуждениями), high (кодинг).
     /// Мапится на thinking-флаг + пресет сэмплинга + шаблонный reasoning_effort.
     reasoning_effort: Option<String>,
+    /// Вернуть logprobs выбранных токенов.
+    #[serde(default)]
+    logprobs: bool,
+    /// Сколько кандидатов вернуть, 0..20. Только вместе с logprobs: true.
+    /// Знаковый нарочно: при usize отрицательное значение отсёк бы разбор JSON
+    /// своим кодом и невнятным текстом, а по контракту нужен 400 с пояснением.
+    top_logprobs: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -197,6 +204,29 @@ fn to_gen_params(
         stop: stop_list,
         seed: req.seed,
         thinking,
+        // Проверку валидности делает validate_logprobs до вызова: сюда
+        // приходит уже согласованная пара.
+        logprobs: req
+            .logprobs
+            .then(|| req.top_logprobs.unwrap_or(0).max(0) as usize),
+    }
+}
+
+/// Проверка пары logprobs/top_logprobs по контракту OpenAI.
+///
+/// Отдельной функцией, а не внутри to_gen_params: та не умеет возвращать
+/// ошибку, а клиенту нужен 400 с внятным текстом, как при переполнении
+/// контекста, а не молчаливое игнорирование поля.
+fn validate_logprobs(req: &ChatCompletionRequest) -> Result<(), Response> {
+    match (req.logprobs, req.top_logprobs) {
+        (false, Some(n)) => Err(crate::api::bad_request(format!(
+            "top_logprobs={n} без logprobs: true — поле игнорировать нельзя, \
+             укажите logprobs: true или уберите top_logprobs"
+        ))),
+        (true, Some(n)) if !(0..=20).contains(&n) => Err(crate::api::bad_request(format!(
+            "top_logprobs={n} вне диапазона 0..20 — предел контракта OpenAI"
+        ))),
+        _ => Ok(()),
     }
 }
 
@@ -356,6 +386,9 @@ pub async fn chat_completions(
         .any(|message| message.role == "system" && message.has_media())
     {
         return bad_request("system messages cannot contain media");
+    }
+    if let Err(response) = validate_logprobs(&req) {
+        return response;
     }
     let params = to_gen_params(
         &req,
