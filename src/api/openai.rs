@@ -305,77 +305,26 @@ pub async fn chat_completions(
     Extension(owner): Extension<ApiKeyIdentity>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> Response {
-    // Авто-переключение модели: если req.model не совпадает с текущей —
-    // ищем GGUF по имени в available_models и запускаем switch_model.
+    // Имя модели в запросе НИЧЕГО не переключает. Раньше сервер по нему искал
+    // GGUF и загружал его: достаточно было обратиться к 'ornith-1.5-9b' вместо
+    // 'ornith-1.5-9b-mtp', чтобы рабочая конфигурация со спекуляцией молча
+    // сменилась на другую модель. Модель задаётся при запуске, и только там.
     let current_id = state.engine.model_info().id;
-    let requested = req.model.as_deref().unwrap_or("").trim().to_lowercase();
-    if !requested.is_empty() && requested != current_id.to_lowercase() {
-        // Ищем matching GGUF в models_dir.
-        let mut found: Vec<Value> = Vec::new();
-        crate::api::admin::scan_gguf_cached(&state.models_dir, 0, &mut found, true);
-        let match_path = found.iter().find_map(|m| {
-            let path = m["path"].as_str()?;
-            // Сравниваем по model_id_from_filename (нормализованное имя).
-            let file_id = crate::engine::model_id_from_filename(std::path::Path::new(path));
-            if file_id == requested {
-                Some(path.to_string())
-            } else {
-                None
-            }
-        });
-        if let Some(path) = match_path {
-            // Проверяем, не идёт ли уже переключение — если да, НЕ запускаем
-            // новое (предотвращает гонки: pi шлёт несколько запросов → OOM).
-            if state.switcher.loading.swap(true, Ordering::Relaxed) {
-                // Уже идёт загрузка — просто возвращаем 503.
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(json!({
-                        "error": {
-                            "type": "model_switching",
-                            "message": format!("Model switch in progress, please retry in a few seconds"),
-                        }
-                    })),
-                ).into_response();
-            }
-            // Текущие ctx/slots из state.switcher.current.
-            let (cur_ctx, cur_slots) = state
-                .switcher
-                .current
-                .read()
-                .map(|current| (current.1, current.2))
-                .unwrap_or((8192, 4));
-            eprintln!(
-                "[auto-switch] req.model='{}' current='{}' → switching to {}",
-                requested, current_id, path
-            );
-            // Запускаем switch в фоне.
-            let state2 = state.clone();
-            tokio::spawn(async move {
-                let result = crate::api::admin::do_switch(
-                    &state2,
-                    std::path::PathBuf::from(&path),
-                    cur_ctx,
-                    cur_slots,
-                )
-                .await;
-                if let Err(e) = result {
-                    eprintln!("[auto-switch] FAILED: {e:#}");
+    let requested = req.model.as_deref().unwrap_or("").trim();
+    if !requested.is_empty() && !requested.eq_ignore_ascii_case(&current_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "type": "model_not_loaded",
+                    "message": format!(
+                        "На сервере загружена модель '{current_id}', запрошена '{requested}'. \
+                         Модель выбирается при запуске сервера и по запросу не меняется."
+                    ),
                 }
-                state2.switcher.loading.store(false, Ordering::Relaxed);
-            });
-            // Возвращаем 503 с понятным сообщением — клиент повторит.
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({
-                    "error": {
-                        "type": "model_switching",
-                        "message": format!("Switching to model '{}', please retry in a few seconds", requested),
-                    }
-                })),
-            ).into_response();
-        }
-        // Не нашли matching GGUF — продолжаем на текущей модели.
+            })),
+        )
+            .into_response();
     }
     let messages = match build_messages(&req) {
         Ok(m) => m,

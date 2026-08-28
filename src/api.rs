@@ -135,6 +135,9 @@ pub fn build_router(state: AppState) -> Router {
     // One video data URL plus bounded JSON overhead. Per-media encoded limits
     // still apply during typed source preparation.
     const MAX_V1_BODY: usize = 4 * 200 * 1024 * 1024 / 3 + 1024 * 1024;
+    // Ручки, менявшие модель на живом сервере (switch_model, unload_model,
+    // hf/download), сняты намеренно: модель задаётся при запуске. Оставлены
+    // только читающие — список моделей, поиск и разведка на HuggingFace.
     let v1 = Router::new()
         .route(
             "/chat/completions",
@@ -153,8 +156,6 @@ pub fn build_router(state: AppState) -> Router {
             axum::routing::get(admin::model_native_ctx),
         )
         .route("/ctx_matrix", axum::routing::get(admin::ctx_matrix))
-        .route("/switch_model", axum::routing::post(admin::switch_model))
-        .route("/unload_model", axum::routing::post(admin::unload_model))
         .route(
             "/sampling_defaults",
             axum::routing::post(admin::sampling_defaults),
@@ -166,7 +167,6 @@ pub fn build_router(state: AppState) -> Router {
         .route("/hf/search", axum::routing::get(hf::hf_search))
         .route("/hf/files", axum::routing::get(hf::hf_files))
         .route("/hf/probe", axum::routing::get(hf::hf_probe))
-        .route("/hf/download", axum::routing::post(hf::hf_download))
         .route("/hf/downloads", axum::routing::get(hf::hf_downloads))
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth))
         .layer(DefaultBodyLimit::max(MAX_V1_BODY));
