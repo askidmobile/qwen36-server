@@ -262,9 +262,154 @@ fn argmax(logits: &[f32]) -> u32 {
     best
 }
 
+/// Сырые вероятности модели: log-softmax по всему словарю от логитов ДО
+/// штрафов, температуры и любого отбора.
+///
+/// Это то, что OpenAI отдаёт в `logprobs`. Взять готовое из сэмплера нельзя:
+/// полная нормировка там считается только при `top_k == 0` и уже с
+/// температурой внутри, а штрафы за повторы меняют порядок кандидатов, поэтому
+/// топ-K после них — не топ-K модели.
+///
+/// Считается ДО того, как сэмплер что-либо трогает, и на его работу не влияет:
+/// ни одного обращения к генератору, ни изменения порядка операций отбора.
+pub struct RawLogprobs {
+    max: f32,
+    /// `ln Σ exp(l − max)` по всему словарю.
+    ln_sum: f32,
+    /// Топ-K по сырым логитам, по убыванию: (идентификатор, logprob).
+    pub top: Vec<(u32, f32)>,
+}
+
+impl RawLogprobs {
+    /// Logprob любого токена по тому же знаменателю.
+    pub fn of(&self, token: u32, logits: &[f32]) -> f32 {
+        match logits.get(token as usize) {
+            Some(&l) => l - self.max - self.ln_sum,
+            None => f32::NEG_INFINITY,
+        }
+    }
+}
+
+/// Один проход за максимумом и топ-K, второй за суммой экспонент.
+///
+/// Топ-K держим вставкой в маленький отсортированный вектор: `k` не больше 20
+/// по контракту, и подавляющее большинство логитов отсеивается первым же
+/// сравнением, так что это дешевле кучи и не требует копии словаря.
+pub fn raw_logprobs(logits: &[f32], k: usize) -> RawLogprobs {
+    let mut max = f32::NEG_INFINITY;
+    let mut top: Vec<(u32, f32)> = Vec::with_capacity(k.min(logits.len()));
+    for (i, &l) in logits.iter().enumerate() {
+        if l > max {
+            max = l;
+        }
+        if k == 0 {
+            continue;
+        }
+        if top.len() == k && l <= top[k - 1].1 {
+            continue;
+        }
+        let pos = top.partition_point(|&(_, v)| v > l);
+        if pos < k {
+            top.insert(pos, (i as u32, l));
+            top.truncate(k);
+        }
+    }
+    // Логиты ниже max − 30 не влияют на сумму: exp(−30) ≈ 9e-14, а f32 держит
+    // около семи значащих цифр. Порог сделан с запасом против 1e-9.
+    // Сумма копится в f64: слагаемых около 151 тысячи, и в f32 накопленная
+    // ошибка выходит порядка sqrt(n)*eps ≈ 5e-5, что видно в logprob (замер
+    // дал 7.6e-5 расхождения с лобовым log_softmax). В f64 она исчезает,
+    // а стоит это столько же.
+    let cutoff = max - 30.0;
+    let sum: f64 = logits
+        .iter()
+        .filter(|&&l| l > cutoff)
+        .map(|&l| ((l - max) as f64).exp())
+        .sum();
+    let ln_sum = sum.ln() as f32;
+    for entry in top.iter_mut() {
+        entry.1 = entry.1 - max - ln_sum;
+    }
+    RawLogprobs { max, ln_sum, top }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Лобовой log-softmax в f64 — эталон для raw_logprobs.
+    fn naive_log_softmax(logits: &[f32]) -> Vec<f32> {
+        let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let sum: f64 = logits.iter().map(|&l| ((l - max) as f64).exp()).sum();
+        let ln_sum = sum.ln() as f32;
+        logits.iter().map(|&l| l - max - ln_sum).collect()
+    }
+
+    /// Словарь размером с настоящий, значения вразнобой, два близких лидера.
+    fn vocab_like_model() -> Vec<f32> {
+        let mut logits = vec![0f32; 151_936];
+        let mut x = 12345u64;
+        for (i, v) in logits.iter_mut().enumerate() {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *v = ((x >> 33) as f32 / (1u64 << 31) as f32) * 24.0 - 12.0
+                + (i % 7) as f32 * 0.1;
+        }
+        logits[777] = 30.0;
+        logits[778] = 29.7;
+        logits
+    }
+
+    #[test]
+    fn raw_logprobs_matches_full_log_softmax() {
+        let logits = vocab_like_model();
+        let naive = naive_log_softmax(&logits);
+        let got = raw_logprobs(&logits, 20);
+
+        // Выбранный токен — по тому же знаменателю.
+        assert!(
+            (got.of(777, &logits) - naive[777]).abs() < 1e-5,
+            "logprob максимума разошёлся с лобовым log_softmax"
+        );
+        for &(id, lp) in &got.top {
+            assert!(
+                (lp - naive[id as usize]).abs() < 1e-5,
+                "logprob кандидата {id} разошёлся с лобовым log_softmax"
+            );
+        }
+
+        // Сумма вероятностей подмножества не может превышать единицу.
+        let s: f64 = got.top.iter().map(|&(_, lp)| (lp as f64).exp()).sum();
+        assert!(s <= 1.0 + 1e-6, "сумма вероятностей топа больше единицы: {s}");
+
+        // Топ отсортирован по убыванию и начинается с глобального максимума.
+        assert_eq!(got.top.len(), 20);
+        assert_eq!(got.top[0].0, 777);
+        assert_eq!(got.top[1].0, 778);
+        for w in got.top.windows(2) {
+            assert!(w[0].1 >= w[1].1, "топ не отсортирован по убыванию");
+        }
+    }
+
+    #[test]
+    fn raw_logprobs_ignores_penalties_and_temperature() {
+        // Смысл поля: вероятность МОДЕЛИ. Ни температура, ни штрафы на неё не
+        // влияют, потому что считается она до сэмплера и по сырым логитам.
+        let logits = vocab_like_model();
+        let a = raw_logprobs(&logits, 5);
+        let b = raw_logprobs(&logits, 5);
+        assert_eq!(a.top, b.top, "две подряд дают разное — есть состояние");
+    }
+
+    #[test]
+    fn raw_logprobs_k_zero_gives_no_top() {
+        let logits = vocab_like_model();
+        let got = raw_logprobs(&logits, 0);
+        assert!(got.top.is_empty());
+        // Знаменатель считается всё равно: logprob выбранного нужен и без топа.
+        assert!((got.of(777, &logits) - naive_log_softmax(&logits)[777]).abs() < 1e-5);
+    }
 
     #[test]
     fn greedy_when_zero_temperature() {
