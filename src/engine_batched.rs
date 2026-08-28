@@ -29,7 +29,7 @@ use crate::engine::{
 };
 use crate::engine_types::{
     ChatMessage, Engine, GenParams, GenerationUsage, InferenceRequest, MediaUsage, ModelInfo,
-    StreamEvent,
+    StreamEvent, TokenLogprob,
 };
 use crate::media::prepare::{PreparedContentBlock, PreparedLease};
 use crate::sampler::{self, Rng};
@@ -119,6 +119,11 @@ struct SlotSampler {
     seen: HashSet<u32>,
     /// Сколько первых токенов generated уже учтено в `seen`.
     seen_len: usize,
+    /// Logprobs токенов, выданных сэмплером с прошлого дренажа, в порядке
+    /// выдачи. Дренаж забирает их и приписывает к дельте. Со спекуляцией
+    /// сэмплер вызывается построчно по логитам проверки, поэтому очередь
+    /// накапливает все принятые токены шага — один к одному.
+    pending_logprobs: Vec<sampler::TokenLogprobs>,
 }
 type SlotSamplers = Arc<Mutex<HashMap<usize, SlotSampler>>>;
 
@@ -689,6 +694,7 @@ fn dispatch_loop(
                         &mut bindings,
                         &mut slot_emitted_toks,
                         &tok_guard,
+                        &slot_samplers,
                     );
                     drop(tok_guard);
                 }
@@ -701,6 +707,7 @@ fn dispatch_loop(
                     &mut bindings,
                     &mut slot_emitted_toks,
                     &tok_guard,
+                    &slot_samplers,
                 );
                 true
             }
@@ -800,11 +807,37 @@ fn dispatch_loop(
 /// TODO-F3: новые токены слотов → decode_text → Delta (инкрементально).
 /// ponytail: полный decode всей generated последовательности (как CandleEngine);
 /// инкрементальный буфер хвоста — если профилирование покажет overhead.
+/// Один токен из сэмплера в вид, годный для API: текст, честные байты, число.
+///
+/// Байты берём из decode_bytes, а не из строки: для байтовых и неполных
+/// UTF-8 токенов строка обязана содержать U+FFFD, а байты — оставаться
+/// настоящими, иначе клиент не восстановит границы.
+fn to_api_logprob(
+    tokenizer: &tokenizers::Tokenizer,
+    id: u32,
+    logprob: f32,
+    top: &[(u32, f32)],
+) -> TokenLogprob {
+    let one = |id: u32, lp: f32| -> TokenLogprob {
+        let bytes = tokenizer::decode_bytes(tokenizer, &[id]).unwrap_or_default();
+        TokenLogprob {
+            token: String::from_utf8_lossy(&bytes).into_owned(),
+            bytes,
+            logprob: lp,
+            top: Vec::new(),
+        }
+    };
+    let mut entry = one(id, logprob);
+    entry.top = top.iter().map(|&(i, lp)| one(i, lp)).collect();
+    entry
+}
+
 fn drain_after_step(
     sched: &mut BatchScheduler<Qwen35BatchAdapter>,
     bindings: &mut [Option<SlotBinding>],
     slot_emitted_toks: &mut HashMap<usize, usize>,
     tokenizer: &tokenizers::Tokenizer,
+    slot_samplers: &SlotSamplers,
 ) {
     let t_drain = Instant::now();
     let slots = sched.slots_mut();
@@ -817,6 +850,22 @@ fn drain_after_step(
         let Some(b) = bindings[idx].as_mut() else {
             continue;
         };
+        // Забираем logprobs токенов, появившихся с прошлого дренажа. Привязка
+        // к токену, а не к тексту: дренаж придерживает хвост, заканчивающийся
+        // на U+FFFD, поэтому в таком чанке токен уже есть, а текста ещё нет.
+        // Число записей равно числу новых токенов, текст догоняет следующим.
+        let pending = slot_samplers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(&idx)
+            .map(|st| std::mem::take(&mut st.pending_logprobs))
+            .unwrap_or_default();
+        let chunk_logprobs: Option<Vec<TokenLogprob>> = b.params.logprobs.map(|_| {
+            pending
+                .iter()
+                .map(|lp| to_api_logprob(tokenizer, lp.token, lp.logprob, &lp.top))
+                .collect()
+        });
         b.completion_tokens = generated.len();
         b.last_progress = Instant::now();
 
@@ -857,8 +906,12 @@ fn drain_after_step(
         let prefix_ok = tail_text.starts_with(&b.emitted_text[b.stable_len..]);
         if prefix_ok && end >= emitted_tail_len {
             let delta = tail_text[emitted_tail_len..end].to_string();
-            if !delta.is_empty() {
-                match b.out.try_send(StreamEvent::Delta { text: delta.clone(), logprobs: None }) {
+            let has_logprobs = chunk_logprobs.as_ref().is_some_and(|v| !v.is_empty());
+            if !delta.is_empty() || has_logprobs {
+                match b.out.try_send(StreamEvent::Delta {
+                    text: delta.clone(),
+                    logprobs: chunk_logprobs,
+                }) {
                     Ok(()) => {}
                     Err(mpsc::error::TrySendError::Full(_))
                     | Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -1003,6 +1056,7 @@ fn seed_slot(
                 rng: Rng::new(seed),
                 seen: HashSet::new(),
                 seen_len: 0,
+                pending_logprobs: Vec::new(),
             },
         );
     slot_truncated.insert(idx, req.truncated);
@@ -1173,7 +1227,7 @@ impl ForkSampler for IndexedSampler {
                 st.seen.extend(generated[st.seen_len..].iter().copied());
                 st.seen_len = generated.len();
                 let t0 = Instant::now();
-                let tok = sampler::sample_with_seen(
+                let (tok, lp) = sampler::sample_with_seen_logprobs(
                     logits,
                     st.params.temperature,
                     st.params.top_k,
@@ -1183,7 +1237,11 @@ impl ForkSampler for IndexedSampler {
                     st.params.repetition_penalty,
                     &st.seen,
                     &mut st.rng,
+                    st.params.logprobs,
                 );
+                if let Some(lp) = lp {
+                    st.pending_logprobs.push(lp);
+                }
                 HOST_SAMPLE_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 HOST_SAMPLE_CALLS.fetch_add(1, Ordering::Relaxed);
                 tok
@@ -1263,6 +1321,7 @@ mod tests {
                 rng: Rng::new(123),
                 seen: HashSet::new(),
                 seen_len: 0,
+                pending_logprobs: Vec::new(),
             },
         )])));
         let mut indexed = IndexedSampler { params: shared };
