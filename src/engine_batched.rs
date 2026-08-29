@@ -574,6 +574,15 @@ fn dispatch_loop(
     // считаются в stats.decode_ns/prefill_ns). gap = step_wall - decode - prefill.
     let mut agg = (0u64, 0u64, 0u64, 0u64, 0u64); // steps, decode, prefill, gap, tokens_delta
     let mut agg_last_tokens = 0u64;
+    // Время МЕЖДУ шагами планировщика: слив выхода, токенизатор, отправка в
+    // поток. Внутренний gap агрегата давно ноль, а сквозная скорость стабильно
+    // на 10-15% ниже той, что обещает арифметика раундов, — остаток искали
+    // именно здесь.
+    let mut host_ns: u64 = 0;
+    let mut t_after_step: Option<std::time::Instant> = None;
+    // Копим промежуток ТОЛЬКО после шага, который реально работал: иначе в
+    // сумму попадает ожидание запросов, и число раздувается в разы.
+    let mut last_step_busy = false;
     let host_timing_on = std::env::var("QWEN36_HOST_TIMING")
         .map(|v| v == "1")
         .unwrap_or(false);
@@ -646,6 +655,11 @@ fn dispatch_loop(
         // HTTP-запросы блокируются на lock() в generate() на весь шаг.
         // Токенизатор нужен только drain'у после шага.
         let st_before = sched.stats_snapshot();
+        if let Some(prev) = t_after_step.take() {
+            if last_step_busy {
+                host_ns += prev.elapsed().as_nanos() as u64;
+            }
+        }
         let t_step = std::time::Instant::now();
         let outcome = sched.step_with(&mut |sidx, _generated| {
             bindings
@@ -655,6 +669,7 @@ fn dispatch_loop(
                 .unwrap_or(false)
         });
         let step_ns = t_step.elapsed().as_nanos() as u64;
+        t_after_step = Some(std::time::Instant::now());
         if timing_on {
             let st_after = sched.stats_snapshot();
             let dec = st_after.decode_ns.saturating_sub(st_before.decode_ns) as u64;
@@ -666,15 +681,17 @@ fn dispatch_loop(
             agg.4 += toks.saturating_sub(agg_last_tokens);
             agg_last_tokens = toks;
             agg.3 += step_ns.saturating_sub(dec + pre);
+            last_step_busy = dec + pre > 0;
             since_print += 1;
             if since_print >= 48 {
                 let (st, dec, pre, gap, tk) = agg;
                 eprintln!(
-                    "[mtp-agg] steps={st} decode={dec_ms:.0}ms prefill={pre_ms:.0}ms gap={gap_ms:.0}ms tokens={tk}",
+                    "[mtp-agg] steps={st} decode={dec_ms:.0}ms prefill={pre_ms:.0}ms gap={gap_ms:.0}ms между_шагами={host_ms:.0}ms tokens={tk}",
                     st = st,
                     dec_ms = dec as f64 / 1e6,
                     pre_ms = pre as f64 / 1e6,
                     gap_ms = gap as f64 / 1e6,
+                    host_ms = host_ns as f64 / 1e6,
                     tk = tk,
                 );
                 since_print = 0;
