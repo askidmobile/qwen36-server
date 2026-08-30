@@ -16,11 +16,15 @@
 //! хотя бы один токен на последний прогон через модель.
 //!
 //! LRU по суммарному размеру snapshot'ов (MiB). Эвикт: самый давно
-//! неиспользованный.
+//! неиспользованный. Снимки хранятся в СИСТЕМНОЙ памяти (host), не в VRAM:
+//! иначе кеш вытесняет KV-пул за пределы видеопамяти (WDDM 2026-08-23).
+//! `put` переносит снимок на CPU, `find` возвращает его уже на устройстве
+//! модели.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
+use candle_core::Device;
 use qwen35_batch::real::model_weights::StateSnapshot;
 
 /// Блок поиска = страница paged KV-пула (PAGE_SIZE = 64): снимок всё равно
@@ -103,6 +107,14 @@ impl PrefixCache {
         if size_bytes > self.budget_bytes {
             return false; // snapshot больше всего бюджета — не кэшируем
         }
+        // Хранение — в системной памяти: VRAM оставляем живому KV-пулу модели.
+        let snap = match snap.to_host() {
+            Ok(s) => s,
+            Err(err) => {
+                eprintln!("[pcache] put: перенос снимка в host-память не удался: {err}");
+                return false;
+            }
+        };
         let key = boundary_hashes(&tokens)[tokens.len() / BLOCK_TOKENS - 1];
         while self.total_bytes.saturating_add(size_bytes) > self.budget_bytes && !self.lru.is_empty()
         {
@@ -130,7 +142,8 @@ impl PrefixCache {
     /// блочных границ от старших к младшим, решение — сверка токенов.
     /// Полное совпадение не возвращается: на primed-пути должен остаться
     /// хотя бы один токен prefill'а.
-    pub fn find(&mut self, tokens: &[u32]) -> Option<PrefixHit> {
+    /// Снимок возвращается уже перенесённым на `device` модели.
+    pub fn find(&mut self, tokens: &[u32], device: &Device) -> Option<PrefixHit> {
         let hashes = boundary_hashes(tokens);
         for &h in hashes.iter().rev() {
             let Some(ids) = self.buckets.get(&h).map(Vec::as_slice) else {
@@ -152,8 +165,16 @@ impl PrefixCache {
             if let Some(id) = best {
                 self.touch(id);
                 let e = &self.by_id[&id];
+                // Снимок хранится в host-памяти — возвращаем на устройство.
+                let snap = match e.snap.to_device(device) {
+                    Ok(s) => s,
+                    Err(err) => {
+                        eprintln!("[pcache] find: перенос снимка на устройство не удался: {err}");
+                        return None;
+                    }
+                };
                 return Some(PrefixHit {
-                    snap: e.snap.clone(),
+                    snap,
                     prefix_len: e.tokens.len(),
                 });
             }
@@ -270,7 +291,7 @@ mod tests {
         // Ход N+1 = ход N + ответ + вопрос → префикс совпадает целиком.
         let mut next = cached.clone();
         next.extend(tokens_from(9000, 37));
-        let hit = c.find(&next).expect("hit");
+        let hit = c.find(&next, &Device::Cpu).expect("hit");
         assert_eq!(hit.prefix_len, 2 * BLOCK_TOKENS);
         assert_eq!(hit.snap.position, 2 * BLOCK_TOKENS);
     }
@@ -281,7 +302,7 @@ mod tests {
         let cached = tokens_from(1, 2 * BLOCK_TOKENS);
         c.put(cached.clone(), snap_for(&cached, 4096));
         // Совпадение до последнего токена: primed-пути нужен ≥1 токен prefill'а.
-        assert!(c.find(&cached).is_none());
+        assert!(c.find(&cached, &Device::Cpu).is_none());
     }
 
     #[test]
@@ -292,10 +313,10 @@ mod tests {
         // Общий первый блок, расхождение во втором.
         let mut other = tokens_from(1, BLOCK_TOKENS);
         other.extend(tokens_from(7777, BLOCK_TOKENS));
-        assert!(c.find(&other).is_none());
+        assert!(c.find(&other, &Device::Cpu).is_none());
         // Расхождение в первом блоке.
-        assert!(c.find(&tokens_from(500, 4 * BLOCK_TOKENS)).is_none());
-        assert!(c.find(&tokens_from(1, BLOCK_TOKENS)).is_none());
+        assert!(c.find(&tokens_from(500, 4 * BLOCK_TOKENS), &Device::Cpu).is_none());
+        assert!(c.find(&tokens_from(1, BLOCK_TOKENS), &Device::Cpu).is_none());
     }
 
     #[test]
@@ -309,11 +330,11 @@ mod tests {
         // Ход продолжается третьим блоком → попадает длинная запись.
         let mut next = long.clone();
         next.extend(tokens_from(800, BLOCK_TOKENS));
-        assert_eq!(c.find(&next).unwrap().prefix_len, 3 * BLOCK_TOKENS);
+        assert_eq!(c.find(&next, &Device::Cpu).unwrap().prefix_len, 3 * BLOCK_TOKENS);
         // Третий блок другой → отпадает длинная, остаётся короткая.
         let mut next2 = short.clone();
         next2.extend(tokens_from(999, BLOCK_TOKENS));
-        assert_eq!(c.find(&next2).unwrap().prefix_len, 2 * BLOCK_TOKENS);
+        assert_eq!(c.find(&next2, &Device::Cpu).unwrap().prefix_len, 2 * BLOCK_TOKENS);
     }
 
     #[test]
@@ -328,14 +349,14 @@ mod tests {
         c.put_forced(key, stranger.clone(), snap_for(&stranger, 4096));
         let mut next = cached.clone();
         next.extend(tokens_from(9000, 10));
-        let hit = c.find(&next).expect("настоящая запись находится");
+        let hit = c.find(&next, &Device::Cpu).expect("настоящая запись находится");
         assert_eq!(hit.snap.position, 2 * BLOCK_TOKENS);
         assert_eq!(hit.prefix_len, 2 * BLOCK_TOKENS);
         // Промпт «чужой» записи не получает её состояние (общий хеш, разное
         // содержимое) — conservative промах.
         let mut stranger_next = stranger.clone();
         stranger_next.extend(tokens_from(7000, 10));
-        assert!(c.find(&stranger_next).is_none());
+        assert!(c.find(&stranger_next, &Device::Cpu).is_none());
     }
 
     #[test]
@@ -343,7 +364,7 @@ mod tests {
         let mut c = PrefixCache::new(64);
         let small = tokens_from(1, 10);
         assert!(!c.put(small.clone(), snap_for(&small, 4096)));
-        assert!(c.find(&small).is_none());
+        assert!(c.find(&small, &Device::Cpu).is_none());
     }
 
     #[test]
@@ -364,19 +385,44 @@ mod tests {
         assert!(c.put(t4, s4));
         let mut q1 = tokens_from(1, BLOCK_TOKENS);
         q1.extend(tokens_from(9000, BLOCK_TOKENS));
-        assert!(c.find(&q1).is_none());
+        assert!(c.find(&q1, &Device::Cpu).is_none());
         let mut q2 = tokens_from(2, BLOCK_TOKENS);
         q2.extend(tokens_from(9000, BLOCK_TOKENS));
-        assert!(c.find(&q2).is_some());
+        assert!(c.find(&q2, &Device::Cpu).is_some());
         let mut q4 = tokens_from(4, BLOCK_TOKENS);
         q4.extend(tokens_from(9000, BLOCK_TOKENS));
-        assert!(c.find(&q4).is_some());
+        assert!(c.find(&q4, &Device::Cpu).is_some());
         // get(2) поднял его в LRU → следующим вытесняется start=3.
         let (t5, s5) = mk(5);
         assert!(c.put(t5, s5));
         let mut q3 = tokens_from(3, BLOCK_TOKENS);
         q3.extend(tokens_from(9000, BLOCK_TOKENS));
-        assert!(c.find(&q3).is_none());
-        assert!(c.find(&q2).is_some());
+        assert!(c.find(&q3, &Device::Cpu).is_none());
+        assert!(c.find(&q2, &Device::Cpu).is_some());
+    }
+
+    /// Снимок, положенный в кеш (put переносит в host), после find возвращается
+    /// на устройстве, запрошенном в find. Здесь CPU: тензоры внимания в тест
+    /// не положить (KvCacheSnap::from_pool pub(crate) — конструирование только
+    /// внутри крейта); перенос настоящих K/V-тензоров проверяет тест
+    /// to_host_then_to_device_roundtrip в движке (model_weights.rs).
+    #[test]
+    fn find_returns_snapshot_for_requested_device() {
+        let mut c = PrefixCache::new(64);
+        let cached = tokens_from(1, 2 * BLOCK_TOKENS);
+        assert!(c.put(cached.clone(), snap_for(&cached, 4096)));
+        let mut next = cached.clone();
+        next.extend(tokens_from(9000, 37));
+        let hit = c.find(&next, &Device::Cpu).expect("hit");
+        assert_eq!(hit.prefix_len, 2 * BLOCK_TOKENS);
+        assert_eq!(hit.snap.position, 2 * BLOCK_TOKENS);
+        for b in &hit.snap.blocks {
+            match b {
+                BlockStateSnap::DeltaNet(dn) => {
+                    assert_eq!(dn.conv_buf, vec![0.0; dn.conv_buf.len()]);
+                }
+                BlockStateSnap::Attention(kv) => assert!(kv.is_none()),
+            }
+        }
     }
 }

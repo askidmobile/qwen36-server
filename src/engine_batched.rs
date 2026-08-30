@@ -1179,7 +1179,10 @@ fn seed_slot(
     // Промпт нужен в binding только для записи в кеш после префила.
     let prompt_for_cache = if cacheable { req.prompt.clone() } else { Vec::new() };
     let hit = match cache.as_mut() {
-        Some(pc) if req.media.is_none() => pc.find(&req.prompt),
+        Some(pc) if req.media.is_none() => {
+            let device = sched.model_mut().device().clone();
+            pc.find(&req.prompt, &device)
+        }
         _ => None,
     };
     match hit {
