@@ -77,6 +77,17 @@ curl.exe -s -m 180 http://127.0.0.1:18099/v1/chat/completions `
 В ответе `usage.mtp.enabled=true` — спекуляция работает. Пейлоад `smoke.json` —
 любой валидный chat-completions JSON.
 
+### Синхронизация кода с yttri-win (аудит 2026-08-31)
+
+Проверено: продакшен-код на yttri-win соответствует репозиториям, потерь нет.
+
+- Серверная копия репо: `D:\Projects\yttri-inference\qwen36-server` — `git master` старее локального `main` на ~288 коммитов, уникальных коммитов нет; рабочие файлы = `main`.
+- Форк: `D:\Projects\yttri-forge` — история разошлась (2 коммита поверх общего базы), но содержимое деревьев совпадает с `main`; незакоммиченные правки рабочего дерева = уже закоммиченные в `main`.
+- **Path-dependency различается между копиями:** локально `Cargo.toml` → `../yttri-forge`, на серверной копии → `../../yttri-forge` (копия лежит на уровень глубже). Не «лечить» заменой — следить при переносе.
+- **git на yttri-win подменён обёрткой** (`C:\Program Files\Git\bin\git.exe`, от 20.08): `git status` выдаёт человеко-формат (`~ Modified: N files` / `clean — nothing to commit`), posh-git в ssh-профиле добавляет шум. `rev-parse`/`log`/`diff`/`bundle` работают норм. Для точного статуса: `git diff --name-only`, `git status --porcelain` не доверять.
+
+Правки в код делать в локальном репо → коммит → push → перенос на yttri-win (`git pull` там, либо scp конкретных файлов). Обратно — только через bundle/diff + сверка содержимого, как выше.
+
 ## Профильная схема (run_windows.bat)
 
 `QWEN36_CURRENT=D:\Models\yttri\qwen3.5-4b\current` — JSON-указатель на релиз
