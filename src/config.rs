@@ -325,9 +325,6 @@ impl Config {
             .ok_or_else(|| anyhow!("API_KEYS (или QWEN36_API_KEYS) обязателен: JSON-массив объектов key/name"))?;
         let api_keys = parse_api_keys(&api_keys_raw)?;
         let prefix_cache_mib = parse_env("PREFIX_CACHE_MIB", 0usize)?;
-        if prefix_cache_mib != 0 {
-            anyhow::bail!("prefix cache temporarily disabled (PREFIX_CACHE_MIB must be 0)");
-        }
         let profile = get_env_var("PROFILE").map(PathBuf::from);
         let resolved_profile = profile
             .as_deref()
@@ -622,6 +619,10 @@ mod tests {
 
         env::set_var("QWEN36_PORT", "9000");
         env::set_var("QWEN36_CTX", "4096");
+        // from_env пробрасывает значения в голые CTX/PORT (d2283f6) — без
+        // очистки голые имена перебивают QWEN36_* (get_env_var читает их первыми).
+        env::remove_var("CTX");
+        env::remove_var("PORT");
         let c = Config::from_env().unwrap();
         assert_eq!(c.port, 9000);
         assert_eq!(c.ctx, 4096);
@@ -641,8 +642,8 @@ mod tests {
         assert!(Config::from_env().is_err());
         env::set_var("QWEN36_PORT", "8080");
         env::set_var("QWEN36_PREFIX_CACHE_MIB", "1");
-        let err = Config::from_env().unwrap_err().to_string();
-        assert!(err.contains("prefix cache temporarily disabled"));
+        let c = Config::from_env().unwrap();
+        assert_eq!(c.prefix_cache_mib, 1);
         env::remove_var("QWEN36_PREFIX_CACHE_MIB");
 
         let path = std::env::temp_dir().join(format!("qwen36-env-{}.tmp", std::process::id()));

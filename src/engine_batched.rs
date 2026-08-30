@@ -31,6 +31,7 @@ use crate::engine_types::{
     ChatMessage, Engine, GenParams, GenerationUsage, InferenceRequest, MediaUsage, ModelInfo,
     StreamEvent, TokenLogprob,
 };
+use crate::prefix_cache::PrefixCache;
 use crate::media::prepare::{PreparedContentBlock, PreparedLease};
 use crate::sampler::{self, Rng};
 
@@ -152,6 +153,11 @@ struct SlotBinding {
     /// обязаны. Если размышление выключено или модель его не открыла — всё
     /// считается ответом.
     in_reasoning: bool,
+    /// Токены промпта — только для записи в prefix cache после префила
+    /// (пуст при выключенном кеше или медиа-запросе).
+    prompt: Vec<u32>,
+    /// Снимок после префила уже снят в кеш.
+    prefix_captured: bool,
 }
 
 pub struct BatchedEngine {
@@ -202,9 +208,15 @@ impl BatchedEngine {
                 MAX_SLOTS
             );
         }
-        // Prefix cache: временно отключён (submit_primed контракт не готов).
-        if cfg.prefix_cache_mib != 0 {
-            anyhow::bail!("prefix cache temporarily disabled (QWEN36_PREFIX_CACHE_MIB>0)");
+        // Prefix cache: включается по QWEN36_PREFIX_CACHE_MIB>0 (default 0 =
+        // выключен). Int8-пул KV (QWEN36_KV_POOL_Q8=1) снимками состояния не
+        // покрыт: байтовое копирование неприменимо — комбинация запрещается
+        // явно, иначе кеш молча отдавал бы мусор.
+        if cfg.prefix_cache_mib != 0 && std::env::var("QWEN36_KV_POOL_Q8").as_deref() == Ok("1") {
+            anyhow::bail!(
+                "prefix cache (QWEN36_PREFIX_CACHE_MIB>0) несовместим с QWEN36_KV_POOL_Q8=1: \
+                 int8-пул KV не покрывается снимками состояния; отключи одно из двух"
+            );
         }
         let cfg = Arc::new(cfg);
         // Опциональные упреждающие f16-зеркала KV (P1): выгодны на картах с
@@ -297,9 +309,21 @@ impl BatchedEngine {
             crate::engine::maybe_retain_mempool(&device);
             let eos = adapter.eos();
             let vocab = adapter.vocab_size();
+            // Лишний снимок на границе чанка стоит копии KV в VRAM — снимаем
+            // только когда кеш префикса действительно включён.
+            adapter.set_prefix_capture(cfg2.prefix_cache_mib > 0);
             let scheduler = BatchScheduler::new(adapter, cfg2.slots, eos, vocab);
             ready.store(true, Ordering::Relaxed);
-            dispatch_loop(scheduler, rx_ingest, cfg2, in_flight, tokenizer, shutdown2);
+            let cache = (cfg2.prefix_cache_mib > 0).then(|| PrefixCache::new(cfg2.prefix_cache_mib));
+            dispatch_loop(
+                scheduler,
+                rx_ingest,
+                cfg2,
+                in_flight,
+                tokenizer,
+                shutdown2,
+                cache,
+            );
         });
         *engine.dispatch_handle.lock().expect("dispatch lock") = Some(handle);
 
@@ -554,6 +578,7 @@ fn dispatch_loop(
     in_flight: Arc<AtomicUsize>,
     tokenizer: Arc<Mutex<tokenizers::Tokenizer>>,
     shutdown: Arc<AtomicBool>,
+    mut cache: Option<PrefixCache>,
 ) {
     let mut bindings: Vec<Option<SlotBinding>> = (0..cfg.slots).map(|_| None).collect();
     let mut pending: VecDeque<AdmitReq> = VecDeque::new();
@@ -611,6 +636,7 @@ fn dispatch_loop(
                     &slot_samplers,
                     &mut slot_truncated,
                     &cfg,
+                    &mut cache,
                 ),
             }
         }
@@ -755,6 +781,46 @@ fn dispatch_loop(
             }
         };
 
+        // Prefix cache: снять снимок после завершения префила. В этот момент
+        // adapter хранит состояние ровно на длине промпта (последний чанк
+        // prefill), декод ещё не менял slot_snaps.
+        if let Some(pc) = cache.as_mut() {
+            for (idx, b) in bindings.iter_mut().enumerate() {
+                let Some(b) = b else { continue };
+                if b.prefix_captured || b.cancelled || b._media_lease.is_some() {
+                    continue;
+                }
+                if sched.slots_mut()[idx].status != SlotStatus::Decoding {
+                    continue;
+                }
+                b.prefix_captured = true;
+                // Кешируем не конец промпта, а границу последнего чанка
+                // префила: хвост промпта (суффикс генерации) на следующем
+                // ходу заменяется ответом ассистента, и запись во всю длину
+                // перестаёт быть его префиксом — попадания не было бы никогда.
+                if let Some((pos, snap)) = sched.model_mut().take_prefix_snapshot(idx) {
+                    let mut prompt = std::mem::take(&mut b.prompt);
+                    prompt.truncate(pos);
+                    let prompt_len = prompt.len();
+                    let snap_mib = snap.size_bytes() / (1024 * 1024);
+                    if pc.put(prompt, snap) {
+                        eprintln!(
+                            "[pcache] snap saved: {} tok ({} MiB), entries {}",
+                            prompt_len,
+                            pc.total_bytes() / (1024 * 1024),
+                            pc.len(),
+                        );
+                    } else {
+                        eprintln!(
+                            "[pcache] put rejected: {prompt_len} tok, snap {snap_mib} MiB"
+                        );
+                    }
+                } else {
+                    eprintln!("[pcache] no boundary snapshot for slot {idx}");
+                }
+            }
+        }
+
         // 4. Сбор Finished (TODO-F6: slots_mut) → Done + admit pending.
         let finished_idxs: Vec<usize> = (0..cfg.slots)
             .filter(|&idx| {
@@ -793,6 +859,7 @@ fn dispatch_loop(
                 &mut slot_truncated,
                 &cfg,
                 &in_flight,
+                &mut cache,
             );
         }
 
@@ -804,7 +871,11 @@ fn dispatch_loop(
                     format!("{}:{:?}:gen={}", i, s.status, s.generated_tokens().len())
                 })
                 .collect();
-            eprintln!("[hb] pending={} slots={}", pending.len(), st.join(" "));
+            let pc = cache
+                .as_ref()
+                .map(|c| format!("{} ent/{}MiB", c.len(), c.total_bytes() / (1024 * 1024)))
+                .unwrap_or_else(|| "off".into());
+            eprintln!("[hb] pending={} slots={} pcache={}", pending.len(), st.join(" "), pc);
             last_hb = Instant::now();
         }
 
@@ -826,6 +897,7 @@ fn dispatch_loop(
                     &slot_samplers,
                     &mut slot_truncated,
                     &cfg,
+                    &mut cache,
                 ),
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
             }
@@ -1048,10 +1120,11 @@ fn admit(
     slot_samplers: &SlotSamplers,
     slot_truncated: &mut HashMap<usize, bool>,
     cfg: &BatchConfig,
+    cache: &mut Option<PrefixCache>,
 ) {
     match bindings.iter().position(|b| b.is_none()) {
         Some(idx) if kv_fits(sched, bindings, cfg, req.prompt_tokens) => {
-            seed_slot(idx, req, sched, bindings, slot_samplers, slot_truncated)
+            seed_slot(idx, req, sched, bindings, slot_samplers, slot_truncated, cache)
         }
         _ => pending.push_back(req),
     }
@@ -1065,6 +1138,7 @@ fn admit_from_pending(
     slot_truncated: &mut HashMap<usize, bool>,
     cfg: &BatchConfig,
     in_flight: &AtomicUsize,
+    cache: &mut Option<PrefixCache>,
 ) {
     while let Some(idx) = bindings.iter().position(|b| b.is_none()) {
         while pending.front().is_some_and(|req| req.out.is_closed()) {
@@ -1079,11 +1153,15 @@ fn admit_from_pending(
             break;
         }
         let req = pending.pop_front().unwrap();
-        seed_slot(idx, req, sched, bindings, slot_samplers, slot_truncated);
+        seed_slot(idx, req, sched, bindings, slot_samplers, slot_truncated, cache);
     }
 }
 
-/// IDLE→PREFILL: submit в scheduler (TODO-F4).
+/// IDLE→PREFILL: submit в scheduler (TODO-F4). При попадании в prefix cache —
+/// primed-admit: снимок восстанавливается в слот, prefill досчитывает только
+/// хвост промпта. None от submit_primed (нет свободного слота шедулера) —
+/// трактуется как промах, обычный submit.
+#[allow(clippy::too_many_arguments)]
 fn seed_slot(
     idx: usize,
     req: AdmitReq,
@@ -1091,6 +1169,7 @@ fn seed_slot(
     bindings: &mut [Option<SlotBinding>],
     slot_samplers: &SlotSamplers,
     slot_truncated: &mut HashMap<usize, bool>,
+    cache: &mut Option<PrefixCache>,
 ) {
     let prompt_tokens = req.prompt_tokens;
     let max_new = req.params.max_tokens;
@@ -1101,7 +1180,35 @@ fn seed_slot(
             .unwrap_or(42)
     });
     let params = req.params.clone();
-    sched.submit(req.prompt, max_new);
+
+    // Медиа-запросы мимо кеша: снимок не покрывает vision-фичи.
+    let cacheable = cache.is_some() && req.media.is_none();
+    // Промпт нужен в binding только для записи в кеш после префила.
+    let prompt_for_cache = if cacheable { req.prompt.clone() } else { Vec::new() };
+    let hit = match cache.as_mut() {
+        Some(pc) if req.media.is_none() => pc.find(&req.prompt),
+        _ => None,
+    };
+    match hit {
+        Some(hit) => match sched.submit_primed(req.prompt.clone(), max_new, hit.prefix_len) {
+            Some(sidx) => {
+                sched.model_mut().inject_slot_snapshot(sidx, hit.snap);
+                eprintln!(
+                    "[pcache] slot={sidx} primed: {} из {} токенов из снимка, досчитать {}",
+                    hit.prefix_len,
+                    req.prompt.len(),
+                    req.prompt.len() - hit.prefix_len,
+                );
+            }
+            // Нет свободного слота шедулера → промах, обычный submit.
+            None => {
+                sched.submit(req.prompt, max_new);
+            }
+        },
+        None => {
+            sched.submit(req.prompt, max_new);
+        }
+    }
     let (usage, media_lease) = match req.media {
         Some(media) => {
             use qwen35_batch::model::BatchModel;
@@ -1143,6 +1250,8 @@ fn seed_slot(
         usage,
         _media_lease: media_lease,
         in_reasoning: params_thinking,
+        prompt: prompt_for_cache,
+        prefix_captured: false,
         cancel: req.cancel,
     });
 }
@@ -1368,13 +1477,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_rejects_prefix_cache_before_model_load() {
+    async fn load_rejects_prefix_cache_with_q8_kv_pool() {
+        std::env::set_var("QWEN36_KV_POOL_Q8", "1");
         let media = Arc::new(crate::media::MediaService::new(Default::default()).unwrap());
         let err = match BatchedEngine::load(test_config(1, 1), media, None, None).await {
-            Ok(_) => panic!("prefix cache must be rejected"),
+            Ok(_) => panic!("prefix cache + int8 KV pool must be rejected"),
             Err(err) => err.to_string(),
         };
-        assert!(err.contains("prefix cache temporarily disabled"));
+        std::env::remove_var("QWEN36_KV_POOL_Q8");
+        assert!(err.contains("QWEN36_KV_POOL_Q8"));
     }
 
     #[test]
