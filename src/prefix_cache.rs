@@ -107,6 +107,22 @@ impl PrefixCache {
         if size_bytes > self.budget_bytes {
             return false; // snapshot больше всего бюджета — не кэшируем
         }
+        let key = boundary_hashes(&tokens)[tokens.len() / BLOCK_TOKENS - 1];
+        // Дедуп: запись с теми же токенами уже лежит (прирост промпта за ход
+        // меньше чанка — граница повторяется, снимки эквивалентны). Дубликат
+        // не создаём: снимок выбрасываем, позицию записи в LRU обновляем.
+        // Ключ — хеш блочной границы, равенство ключа обычно означает
+        // равенство токенов, но корректность держим на сверке токенов.
+        if let Some(id) = self.buckets.get(&key).and_then(|ids| {
+            ids.iter().copied().find(|&id| {
+                self.by_id
+                    .get(&id)
+                    .map_or(false, |e| e.tokens.as_slice() == tokens.as_slice())
+            })
+        }) {
+            self.touch(id);
+            return true;
+        }
         // Хранение — в системной памяти: VRAM оставляем живому KV-пулу модели.
         let snap = match snap.to_host() {
             Ok(s) => s,
@@ -115,7 +131,6 @@ impl PrefixCache {
                 return false;
             }
         };
-        let key = boundary_hashes(&tokens)[tokens.len() / BLOCK_TOKENS - 1];
         while self.total_bytes.saturating_add(size_bytes) > self.budget_bytes && !self.lru.is_empty()
         {
             self.evict_one();
@@ -424,5 +439,46 @@ mod tests {
                 BlockStateSnap::Attention(kv) => assert!(kv.is_none()),
             }
         }
+    }
+
+    /// Повторный put того же префикса не создаёт дубликат: len == 1,
+    /// total_bytes не вырос (снимок дубликата выбрасывается до to_host).
+    #[test]
+    fn duplicate_prefix_is_deduplicated() {
+        let mut c = PrefixCache::new(64);
+        let cached = tokens_from(1, 2 * BLOCK_TOKENS);
+        assert!(c.put(cached.clone(), snap_for(&cached, 4096)));
+        let bytes = c.total_bytes();
+        let snap = snap_for(&cached, 4096);
+        assert!(c.put(cached, snap));
+        assert_eq!(c.len(), 1);
+        assert_eq!(c.total_bytes(), bytes);
+    }
+
+    /// Дедуп-put поднимает запись в LRU: дальше вытесняется сосед, не дубль.
+    #[test]
+    fn duplicate_put_touches_lru() {
+        let entry_bytes = 1024 * 1024 - BLOCK_TOKENS * std::mem::size_of::<u32>();
+        let mut c = PrefixCache::new(3);
+        let mk = |start: u32| {
+            let t = tokens_from(start, BLOCK_TOKENS);
+            (t.clone(), snap_for(&t, entry_bytes))
+        };
+        for start in [1, 2, 3] {
+            let (t, s) = mk(start);
+            assert!(c.put(t, s));
+        }
+        let (t1, s1) = mk(1);
+        assert!(c.put(t1, s1));
+        assert_eq!(c.len(), 3);
+        // 4-я запись вытесняет самую старую — start=2, а не поднятый дубль start=1.
+        let (t4, s4) = mk(4);
+        assert!(c.put(t4, s4));
+        let mut q1 = tokens_from(1, BLOCK_TOKENS);
+        q1.extend(tokens_from(9000, BLOCK_TOKENS));
+        assert!(c.find(&q1, &Device::Cpu).is_some());
+        let mut q2 = tokens_from(2, BLOCK_TOKENS);
+        q2.extend(tokens_from(9000, BLOCK_TOKENS));
+        assert!(c.find(&q2, &Device::Cpu).is_none());
     }
 }
