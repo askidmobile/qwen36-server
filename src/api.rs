@@ -392,3 +392,52 @@ pub async fn generate_collect(
 pub fn parse_tool_calls(text: &str) -> (String, Vec<(String, String)>) {
     tools::parse_tool_calls(text)
 }
+
+/// Эффективный сэмплинг: пресет карточки модели, поверх — явные env-переменные.
+///
+/// Единая точка для всех трёх API: раньше Anthropic-путь начинал с
+/// GenParams::default() и пресет карточки не видел вовсе.
+pub fn resolve_sampling(
+    presets: &crate::config::SamplingPresets,
+    preset_name: &str,
+    defaults: &crate::config::SamplingDefaults,
+) -> crate::config::SamplingPresetValues {
+    let mut v = presets.get(preset_name).cloned().unwrap_or(
+        crate::config::SamplingPresetValues {
+            temperature: defaults.temperature,
+            top_p: defaults.top_p,
+            top_k: defaults.top_k,
+            min_p: defaults.min_p,
+            presence_penalty: defaults.presence_penalty,
+            repetition_penalty: defaults.repetition_penalty,
+        },
+    );
+    crate::config::sampling_policy().apply(&mut v);
+    v
+}
+
+/// Предупредить в лог о вызове инструмента, которого в запросе не было.
+///
+/// Клиент на такой вызов отвечает «tool not found», результат уходит обратно в
+/// контекст, и после десятка повторов модель начинает копировать выдуманное имя
+/// как few-shot-пример — цикл, неотличимый в логах от нормальной работы, потому
+/// что ошибки нет ни одной. Замер 2026-08-30: 8 испорченных ходов модель ещё
+/// переживает, с 15 залипает.
+pub fn warn_unknown_tool_calls(calls: &[(String, String)], tools: Option<&serde_json::Value>) {
+    let known: Vec<&str> = tools
+        .and_then(|t| t.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| t.get("function")?.get("name")?.as_str())
+                .collect()
+        })
+        .unwrap_or_default();
+    if known.is_empty() {
+        return;
+    }
+    for (name, _) in calls {
+        if !known.iter().any(|k| k == name) {
+            eprintln!("[tools] модель позвала инструмент вне списка запроса: {name:?}");
+        }
+    }
+}

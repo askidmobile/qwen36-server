@@ -96,6 +96,94 @@ impl Default for SamplingPresetValues {
     }
 }
 
+/// Явные env-переопределения сэмплинга поверх пресета карточки модели.
+///
+/// `None` — переменная не задана, действует пресет. Отдельный тип нужен именно
+/// ради этого различия: `SamplingDefaults` подставляет значение по умолчанию и
+/// «не задано» от «задано таким же» не отличает, поэтому его значения молча
+/// проигрывали пресету у любой модели с карточкой.
+#[derive(Debug, Clone)]
+pub struct SamplingPolicy {
+    pub temperature: Option<f32>,
+    pub top_p: Option<f32>,
+    pub top_k: Option<usize>,
+    pub min_p: Option<f32>,
+    pub presence_penalty: Option<f32>,
+    pub repetition_penalty: Option<f32>,
+    /// Игнорировать сэмплинг из запроса клиента (`SAMPLING_LOCK`, по умолчанию
+    /// включено). Клиент, приславший temperature 0, загонял модель в повтор
+    /// собственных неудачных вызовов инструментов — замер 2026-08-30.
+    pub lock: bool,
+}
+
+fn env_opt<T: std::str::FromStr>(name: &str) -> Result<Option<T>>
+where
+    T::Err: std::fmt::Display,
+{
+    match get_env_var(name).filter(|v| !v.trim().is_empty()) {
+        Some(v) => v
+            .parse()
+            .map(Some)
+            .map_err(|e: T::Err| anyhow!("{name}: некорректное значение {v:?}: {e}")),
+        None => Ok(None),
+    }
+}
+
+impl SamplingPolicy {
+    pub fn from_env() -> Result<Self> {
+        Ok(Self {
+            temperature: env_opt("TEMPERATURE")?,
+            top_p: env_opt("TOP_P")?,
+            top_k: env_opt("TOP_K")?,
+            min_p: env_opt("MIN_P")?,
+            presence_penalty: env_opt("PRESENCE_PENALTY")?,
+            repetition_penalty: env_opt("REPETITION_PENALTY")?,
+            lock: !matches!(get_env_var("SAMPLING_LOCK").as_deref(), Some("0")),
+        })
+    }
+
+    /// Наложить заданные переменные на значения пресета.
+    pub fn apply(&self, v: &mut SamplingPresetValues) {
+        if let Some(x) = self.temperature {
+            v.temperature = x;
+        }
+        if let Some(x) = self.top_p {
+            v.top_p = x;
+        }
+        if let Some(x) = self.top_k {
+            v.top_k = x;
+        }
+        if let Some(x) = self.min_p {
+            v.min_p = x;
+        }
+        if let Some(x) = self.presence_penalty {
+            v.presence_penalty = x;
+        }
+        if let Some(x) = self.repetition_penalty {
+            v.repetition_penalty = x;
+        }
+    }
+}
+
+/// Политика читается один раз: env процесса за время жизни сервера не меняется.
+pub fn sampling_policy() -> &'static SamplingPolicy {
+    static P: std::sync::OnceLock<SamplingPolicy> = std::sync::OnceLock::new();
+    P.get_or_init(|| {
+        SamplingPolicy::from_env().unwrap_or_else(|e| {
+            eprintln!("[sampling] {e}; беру пресет карточки без переопределений");
+            SamplingPolicy {
+                temperature: None,
+                top_p: None,
+                top_k: None,
+                min_p: None,
+                presence_penalty: None,
+                repetition_penalty: None,
+                lock: true,
+            }
+        })
+    })
+}
+
 pub type SamplingPresets = std::collections::HashMap<String, SamplingPresetValues>;
 pub type ModelSamplingPresets = std::collections::HashMap<String, SamplingPresets>;
 

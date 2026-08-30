@@ -180,15 +180,33 @@ pub async fn messages(
         return bad_request("system messages cannot contain media");
     }
 
+    // Сэмплинг — из пресета карточки модели и env, как в OpenAI-пути. Раньше
+    // здесь начинали с GenParams::default() и рекомендации карточки в
+    // Anthropic-API не действовали вовсе.
+    let defaults = state.sampling.read().expect("sampling lock").clone();
+    let preset_name = if defaults.thinking { "thinking" } else { "instruct" };
+    let pv = crate::api::resolve_sampling(
+        &state.presets.read().expect("presets lock"),
+        preset_name,
+        &defaults,
+    );
     let mut params = GenParams {
         max_tokens,
+        temperature: pv.temperature,
+        top_p: pv.top_p,
+        top_k: pv.top_k,
+        min_p: pv.min_p,
+        presence_penalty: pv.presence_penalty,
+        repetition_penalty: pv.repetition_penalty,
         ..Default::default()
     };
-    if let Some(t) = req.temperature {
-        params.temperature = t;
-    }
-    if let Some(t) = req.top_p {
-        params.top_p = t;
+    if !crate::config::sampling_policy().lock {
+        if let Some(t) = req.temperature {
+            params.temperature = t;
+        }
+        if let Some(t) = req.top_p {
+            params.top_p = t;
+        }
     }
     if let Some(stop) = req.stop_sequences {
         params.stop = stop;

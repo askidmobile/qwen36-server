@@ -140,46 +140,39 @@ fn to_gen_params(
         "instruct"
     };
 
-    // 3. Базовые параметры: пресет модели или дефолты из .env
-    let (mut temp, mut top_p, mut top_k, mut min_p, mut presence_p, mut rep_p) =
-        if let Some(pv) = presets.get(preset_name) {
-            (
-                pv.temperature,
-                pv.top_p,
-                pv.top_k,
-                pv.min_p,
-                pv.presence_penalty,
-                pv.repetition_penalty,
-            )
-        } else {
-            (
-                d.temperature,
-                d.top_p,
-                d.top_k,
-                d.min_p,
-                d.presence_penalty,
-                d.repetition_penalty,
-            )
-        };
+    // 3. Базовые параметры: пресет карточки модели, поверх — явные env.
+    let pv = crate::api::resolve_sampling(presets, preset_name, d);
+    let (mut temp, mut top_p, mut top_k, mut min_p, mut presence_p, mut rep_p) = (
+        pv.temperature,
+        pv.top_p,
+        pv.top_k,
+        pv.min_p,
+        pv.presence_penalty,
+        pv.repetition_penalty,
+    );
 
-    // 4. НАИВЫСШИЙ ПРИОРИТЕТ: явные параметры из запроса клиента (pi, WebUI, curl)
-    if let Some(t) = req.temperature {
-        temp = t;
-    }
-    if let Some(t) = req.top_p {
-        top_p = t;
-    }
-    if let Some(k) = req.top_k {
-        top_k = k;
-    }
-    if let Some(m) = req.min_p {
-        min_p = m;
-    }
-    if let Some(penalty) = req.presence_penalty {
-        presence_p = penalty;
-    }
-    if let Some(penalty) = req.repetition_penalty {
-        rep_p = penalty;
+    // 4. Сэмплинг из запроса клиента — только когда замок снят (SAMPLING_LOCK=0).
+    // По умолчанию источник истины один: env рядом с моделью. Иначе клиент,
+    // приславший temperature 0, отменяет рекомендации карточки молча.
+    if !crate::config::sampling_policy().lock {
+        if let Some(t) = req.temperature {
+            temp = t;
+        }
+        if let Some(t) = req.top_p {
+            top_p = t;
+        }
+        if let Some(k) = req.top_k {
+            top_k = k;
+        }
+        if let Some(m) = req.min_p {
+            min_p = m;
+        }
+        if let Some(penalty) = req.presence_penalty {
+            presence_p = penalty;
+        }
+        if let Some(penalty) = req.repetition_penalty {
+            rep_p = penalty;
+        }
     }
 
     let mut stop_list = Vec::new();
@@ -396,6 +389,7 @@ pub async fn chat_completions(
     // Отрезать Qwen </think> и Gemma 4 thought-channel из content.
     let (reasoning, text_body) = split_reasoning(&out.text);
     let (text, calls) = parse_tool_calls(&text_body);
+    crate::api::warn_unknown_tool_calls(&calls, req.tools.as_ref());
     // Gemma fallback: если content пустой, но reasoning есть —
     // переносим reasoning в content, чтобы пользователь не получил пустой ответ
     // (модель часто пишет весь ответ внутри reasoning без перехода к <|channel>final).
@@ -620,6 +614,9 @@ async fn stream_chat(
     let id = format!("chatcmpl-{}", uuid::Uuid::new_v4().simple());
     let model = state.engine.model_info().id;
     let cancel = request.cancel.clone();
+    // Список инструментов запроса нужен на разборе хвоста, а request к тому
+    // моменту уже уедет в генерацию.
+    let req_tools = request.tools.clone();
     // OpenAI-совместимый контракт мышления (vLLM/DeepSeek): thinking идёт в
     // delta.reasoning_content, ответ — в delta.content. Модель генерит
     // мышление + </think> + ответ в одном потоке — делим здесь.
@@ -999,6 +996,7 @@ async fn stream_chat(
                 } else {
                     parse_tool_calls(&text_body)
                 };
+                crate::api::warn_unknown_tool_calls(&calls, req_tools.as_ref());
                 // Остаток текста (придержка и то, что было между вызовами) —
                 // одной дельтой до tool_calls-чанков.
                 if (has_tools || gemma_channel) && !text.is_empty() {
@@ -1080,17 +1078,13 @@ pub async fn list_models(State(state): State<AppState>) -> Response {
     let d = state.sampling.read().expect("sampling lock").clone();
     let presets = state.presets.read().expect("presets lock").clone();
     let default_mode = if d.thinking { "thinking" } else { "instruct" };
-    let effective_default = presets
-        .get(default_mode)
-        .cloned()
-        .unwrap_or(crate::config::SamplingPresetValues {
-            temperature: d.temperature,
-            top_p: d.top_p,
-            top_k: d.top_k,
-            min_p: d.min_p,
-            presence_penalty: d.presence_penalty,
-            repetition_penalty: d.repetition_penalty,
-        });
+    // Показываем то, что действительно применится: пресет карточки с наложенными
+    // env. Иначе клиент видит одни числа, а генерация идёт по другим.
+    let mut presets = presets;
+    for v in presets.values_mut() {
+        crate::config::sampling_policy().apply(v);
+    }
+    let effective_default = crate::api::resolve_sampling(&presets, default_mode, &d);
     let model_name = path
         .file_name()
         .map(|name| name.to_string_lossy())
@@ -1163,6 +1157,7 @@ pub async fn list_models(State(state): State<AppState>) -> Response {
             },
             // пресеты из model card (BD-016)
             "sampling_presets": presets,
+            "sampling_locked": crate::config::sampling_policy().lock,
         }],
     }))
     .into_response()
