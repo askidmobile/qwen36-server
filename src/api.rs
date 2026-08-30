@@ -397,6 +397,16 @@ pub fn parse_tool_calls(text: &str) -> (String, Vec<(String, String)>) {
     tools::parse_tool_calls(text)
 }
 
+/// Разбор с исходной schema инструментов: строковые Hermes-параметры,
+/// похожие на JSON, должны оставаться строками (`bash.command`,
+/// `write.content`), а не превращаться сервером в object.
+pub fn parse_tool_calls_with_schema(
+    text: &str,
+    tools: Option<&serde_json::Value>,
+) -> (String, Vec<(String, String)>) {
+    tools::parse_tool_calls_with_schema(text, tools)
+}
+
 /// Эффективный сэмплинг: пресет карточки модели, поверх — явные env-переменные.
 ///
 /// Единая точка для всех трёх API: раньше Anthropic-путь начинал с

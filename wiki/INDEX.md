@@ -25,6 +25,7 @@ Total topics: 8 | Total sources: 51
 
 ## Recent Changes
 
+- 2026-08-30: Проверены Q8/F16 prefix-cache miss/hit; задокументированы schema-aware tool parsing, отсутствие MTP state в snapshot и очистка stale slot owner после отмены.
 - 2026-08-30: Уточнён sampling contract (BD-032): env-wins для agent endpoint, reasoning отделён от sampling; добавлено исследование Ollama/LM Studio/vLLM.
 - 2026-08-30: Полная перекомпиляция после перехода к `yttri-forge`, multi-model/multimodal runtime, server-owned sampling и host-backed prefix cache.
 - 2026-08-30: Добавлены темы configuration/profiles, prefix cache и multimodal/components; старые утверждения о невозможной отмене prefill и обязательном sliding window удалены.

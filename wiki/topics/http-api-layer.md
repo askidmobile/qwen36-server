@@ -18,6 +18,7 @@ Axum-слой предоставляет три inference API, metadata/admin/HF
 - `prepare_inference_request` собирает `InferenceRequest`; `generate_collect` обслуживает non-stream.
 - SSE-forwarder одновременно читает engine events и проверяет закрытие клиента; keepalive = 1 s.
 - Tool output поддерживает Qwen/Hermes/Gemma channel форматы; неизвестный вызванный инструмент логируется.
+- Tool-call parser сверяет аргументы с JSON Schema запроса: значения полей типа `string` остаются строками, даже если их текст похож на JSON. Поддерживаются OpenAI `function.parameters` и Anthropic `input_schema`.
 - При tools streaming буферизует разметку, чтобы служебные `<tool...>` не утекали как обычный текст.
 
 ## Talks To [coverage: high — 11 sources]
@@ -55,6 +56,7 @@ Axum-слой предоставляет три inference API, metadata/admin/HF
 ## Gotchas [coverage: high — 8 sources]
 
 - Законный, но повторяющийся tool call не считается unknown: server log выявляет только имя вне присланного списка, а cycle breaker остаётся обязанностью агента.
+- Нельзя определять тип Hermes-параметра только по его тексту: JSON-тело команды `bash.command` или содержимое `write.content` является строкой по schema. Эвристический JSON-разбор без schema превращал его в object и вызывал клиентское `must be string`.
 - Anthropic/OpenAI имеют разные формы thinking/tool blocks; изменения должны проверяться в обоих путях.
 - Reverse proxy не использует inference auth; `/v1/*` остаётся в основном router.
 - `reasoning_effort=high|xhigh` не должен менять temperature/penalties: это template control, не псевдоним coding preset.

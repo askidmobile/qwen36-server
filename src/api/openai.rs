@@ -9,8 +9,8 @@ use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
 
 use crate::api::{
-    bad_request, engine_error, generate_collect, parse_tool_calls, prepare_inference_request,
-    sse_response, ApiKeyIdentity, AppState,
+    bad_request, engine_error, generate_collect, parse_tool_calls_with_schema,
+    prepare_inference_request, sse_response, ApiKeyIdentity, AppState,
 };
 use crate::engine_types::{ChatMessage, ContentBlock, GenParams, StreamEvent};
 use crate::media::MediaKind;
@@ -387,7 +387,7 @@ pub async fn chat_completions(
     };
     // Отрезать Qwen </think> и Gemma 4 thought-channel из content.
     let (reasoning, text_body) = split_reasoning(&out.text);
-    let (text, calls) = parse_tool_calls(&text_body);
+    let (text, calls) = parse_tool_calls_with_schema(&text_body, req.tools.as_ref());
     crate::api::warn_unknown_tool_calls(&calls, req.tools.as_ref());
     // Gemma fallback: если content пустой, но reasoning есть —
     // переносим reasoning в content, чтобы пользователь не получил пустой ответ
@@ -984,7 +984,8 @@ async fn stream_chat(
                     // весь ответ повторно. Остаётся дослать непоместившуюся
                     // придержку и текст, который парсер извлёк между вызовами.
                     let mut head = std::mem::take(&mut tool_pending);
-                    let (rest, calls) = parse_tool_calls(&tool_tail);
+                    let (rest, calls) =
+                        parse_tool_calls_with_schema(&tool_tail, req_tools.as_ref());
                     if !rest.is_empty() {
                         if !head.is_empty() && !head.ends_with(char::is_whitespace) {
                             head.push(' ');
@@ -993,7 +994,7 @@ async fn stream_chat(
                     }
                     (head.trim().to_string(), calls)
                 } else {
-                    parse_tool_calls(&text_body)
+                    parse_tool_calls_with_schema(&text_body, req_tools.as_ref())
                 };
                 crate::api::warn_unknown_tool_calls(&calls, req_tools.as_ref());
                 // Остаток текста (придержка и то, что было между вызовами) —

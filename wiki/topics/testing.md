@@ -24,7 +24,9 @@ status: active
 
 - Prefix snapshot parity: короткий и длинный prefill, DeltaNet + все attention layers.
 - Q8 snapshots: CUDA путь с настоящим paged pool, включая quant scales.
+- Prefix-cache A/B: при `temperature=0` отдельно сравниваются cache miss/hit на Q8 и F16; первый tool call должен совпасть побайтово внутри каждого режима.
 - MTP: correctness/distribution отдельно от speed; greedy divergence диагностируется по verification logits.
+- Tool parsing: JSON-похожий `bash.command`/`write.content` проверяется по OpenAI и Anthropic schema в non-stream и stream путях.
 - Cancellation: разрыв соединения во время long prefill должен останавливать GPU примерно за keepalive/chunk latency.
 - Memory: WDDM Shared Usage, а не process PrivateMemorySize.
 
@@ -34,6 +36,7 @@ status: active
 - `cargo check` без CUDA не инстанцирует nvcc/MSVC templates.
 - Один зелёный тест без фактической ветки paged pool может быть ложным gate.
 - Ответы при temperature > 0 нельзя сравнивать посимвольно как доказательство MTP parity.
+- Q8 и F16 могут выбрать разные токены около численной ничьей; это не доказывает порчу Q8. Сравнивать нужно miss/hit внутри одного KV dtype.
 - BD-008 всё ещё не полностью автоматизирован.
 
 ## Sources

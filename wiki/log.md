@@ -1,5 +1,15 @@
 ## 2026-08-30
 
+**Topics updated:** http-api-layer, prefix-cache, engine-layer, testing
+**Sources scanned:** 51
+**Sources changed:** src/api.rs, src/api/openai.rs, src/api/anthropic.rs, src/api/tools.rs + связанный runtime contract yttri-forge
+**Mode:** codebase
+**Notes:** Schema-declared string tool arguments больше не меняют тип; CUDA A/B отделил Q8 KV от cache/MTP проблем; зафиксирован per-slot MTP alignment contract и очистка stale recurrent-state owner.
+
+---
+
+## 2026-08-30
+
 **Topics updated:** project-overview, engine-layer, http-api-layer, web-chat, testing
 **Topics created:** configuration-and-profiles, prefix-cache, multimodal-and-components
 **Concepts updated:** candle-fork-coupling, not-send-serialization

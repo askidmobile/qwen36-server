@@ -7,8 +7,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::api::{
-    bad_request, engine_error, generate_collect, parse_tool_calls, prepare_inference_request,
-    sse_response, ApiKeyIdentity, AppState,
+    bad_request, engine_error, generate_collect, parse_tool_calls_with_schema,
+    prepare_inference_request, sse_response, ApiKeyIdentity, AppState,
 };
 use crate::engine_types::{ChatMessage, ContentBlock, GenParams, StreamEvent};
 use crate::media::MediaKind;
@@ -230,7 +230,7 @@ pub async fn messages(
             Ok(o) => o,
             Err(r) => return r,
         };
-        let (text, calls) = parse_tool_calls(&out.text);
+        let (text, calls) = parse_tool_calls_with_schema(&out.text, req.tools.as_ref());
         let content = build_content_blocks(&text, &calls);
         return Json(json!({
             "id": id,
@@ -251,7 +251,8 @@ pub async fn messages(
         .into_response();
     }
 
-    let has_tools = req.tools.as_ref().map(|t| !t.is_null()).unwrap_or(false);
+    let req_tools = req.tools.clone();
+    let has_tools = req_tools.as_ref().map(|t| !t.is_null()).unwrap_or(false);
     let cancel = request.cancel.clone();
     let rx = match state.engine.generate(request).await {
         Ok(r) => r,
@@ -318,7 +319,7 @@ pub async fn messages(
                     ),
                 );
             }
-            let (text, calls) = parse_tool_calls(&acc);
+            let (text, calls) = parse_tool_calls_with_schema(&acc, req_tools.as_ref());
             // tools в запросе: текст был буферизован — эмитим без разметки.
             if has_tools && !text.is_empty() {
                 out.push(

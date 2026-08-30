@@ -40,6 +40,7 @@ Engine-слой изолирует API от конкретного runtime. `Eng
 - Per-slot prompt, decoder text state, sampler RNG, cancellation, usage and media lease.
 - Paged KV/static slot regions и DeltaNet recurrent state внутри адаптера.
 - MTP head и graph state загружаются при старте только при включённом MTP.
+- Per-slot MTP alignment отделяет target snapshot от draft state: восстановленный из prefix cache слот работает обычным target decode до reset.
 - Prefix snapshots хранятся в host memory, возвращаются на GPU только на hit.
 
 ## Key Decisions [coverage: high — 5 sources]
@@ -48,6 +49,7 @@ Engine-слой изолирует API от конкретного runtime. `Eng
 - Отмена проверяется между chunk-ами prefill и шагами decode.
 - По умолчанию переполнение не обрезает историю молча (BD-031).
 - MTP допускает численные расхождения при сохранении корректного распределения (BD-029).
+- Reset/cancel обязан сбрасывать владельца recurrent state данного слота; иначе следующий запрос может продолжить устаревшее состояние после отменённого prefill.
 
 ## Gotchas [coverage: high — 7 sources]
 
@@ -56,6 +58,7 @@ Engine-слой изолирует API от конкретного runtime. `Eng
 - VRAM planner и paged-pool allocator пока считают бюджет независимо.
 - `CTX` должен быть проброшен в окружение движка; сервер принимает и чистые, и legacy `QWEN36_*` имена.
 - MTP может быть корректным вероятностно и при этом менять конкретный greedy-токен около численной ничьей; это отдельная зона диагностики.
+- Prefix snapshot пока не включает MTP attention KV и предыдущий target hidden row. Попытка speculative decode после такого restore смешивает состояния двух позиций, поэтому защищена per-slot gate.
 
 ## Sources
 

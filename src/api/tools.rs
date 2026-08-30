@@ -20,6 +20,21 @@ fn tools_debug() -> bool {
 
 /// (остальной текст, [(name, arguments_json_string)])
 pub fn parse_tool_calls(text: &str) -> (String, Vec<(String, String)>) {
+    parse_tool_calls_with_schema(text, None)
+}
+
+/// То же, но с исходной JSON Schema инструментов.
+///
+/// Hermes передаёт каждое значение как текст между `<parameter>`-тегами.
+/// Без схемы строка, похожая на JSON (`{"query": ...}`), раньше автоматически
+/// превращалась в object. Для `bash.command` и `write.content` это меняло тип
+/// уже после генерации модели, и клиент справедливо отвечал `must be string`.
+/// Схема позволяет сохранить строковые параметры строками, не ломая числовые,
+/// boolean и object-параметры остальных инструментов.
+pub fn parse_tool_calls_with_schema(
+    text: &str,
+    tools: Option<&Value>,
+) -> (String, Vec<(String, String)>) {
     if tools_debug() {
         eprintln!("[tools] сырой текст модели ({} байт): {text:?}", text.len());
     }
@@ -38,7 +53,7 @@ pub fn parse_tool_calls(text: &str) -> (String, Vec<(String, String)>) {
         match find_tool_tag(after, "</tool") {
             Some((end, close_end)) => {
                 let body = after[..end].trim();
-                if let Some(call) = parse_block_body(body) {
+                if let Some(call) = parse_block_body(body, tools) {
                     calls.push(call);
                 } else {
                     // Нераспарсенный блок — НЕ возвращаем разметку пользователю
@@ -51,13 +66,14 @@ pub fn parse_tool_calls(text: &str) -> (String, Vec<(String, String)>) {
             }
             None => {
                 // Незакрытый тег: пробуем распарсить хвост (обрыв генерации).
-                if let Some(call) = parse_block_body(after.trim()) {
+                if let Some(call) = parse_block_body(after.trim(), tools) {
                     calls.push(call);
                 }
                 break;
             }
         }
     }
+    normalize_string_arguments(&mut calls, tools);
     (rest.trim().to_string(), calls)
 }
 
@@ -80,16 +96,16 @@ fn find_tool_tag(s: &str, prefix: &str) -> Option<(usize, usize)> {
     }
 }
 
-fn parse_block_body(body: &str) -> Option<(String, String)> {
+fn parse_block_body(body: &str, tools: Option<&Value>) -> Option<(String, String)> {
     if body.starts_with("<function=") {
-        parse_hermes(body)
+        parse_hermes(body, tools)
     } else {
         parse_json_call(body)
     }
 }
 
 /// Hermes: `<function=name>\n<parameter=k>\nvalue\n</parameter>…</function>`
-fn parse_hermes(body: &str) -> Option<(String, String)> {
+fn parse_hermes(body: &str, tools: Option<&Value>) -> Option<(String, String)> {
     let name_start = body.find("<function=")? + "<function=".len();
     let name_end = body[name_start..].find('>')? + name_start;
     let name = body[name_start..name_end].trim();
@@ -110,10 +126,16 @@ fn parse_hermes(body: &str) -> Option<(String, String)> {
             ),
             None => (after_open.trim().to_string(), ""),
         };
-        // Значение может быть JSON (число/объект/массив/bool) или строка.
-        let parsed = heal_json(&value)
-            .and_then(|h| serde_json::from_str::<Value>(&h).ok())
-            .unwrap_or(Value::String(value));
+        // В Hermes все параметры изначально текстовые. Тип восстанавливаем по
+        // schema; эвристический JSON-разбор оставляем только когда схема не
+        // требует строку (числа, bool, object и старые клиенты без tools).
+        let parsed = if property_requires_string(tools, name, &key) {
+            Value::String(value)
+        } else {
+            heal_json(&value)
+                .and_then(|h| serde_json::from_str::<Value>(&h).ok())
+                .unwrap_or(Value::String(value))
+        };
         args.insert(key, parsed);
         s = next;
         if s.is_empty() {
@@ -121,6 +143,80 @@ fn parse_hermes(body: &str) -> Option<(String, String)> {
         }
     }
     Some((name.to_string(), Value::Object(args).to_string()))
+}
+
+/// Найти JSON Schema аргументов и вернуть schema конкретного свойства.
+/// Поддерживаются оба реально принимаемых API-формата:
+/// OpenAI `function.parameters` и Anthropic `input_schema`.
+fn property_schema<'a>(tools: Option<&'a Value>, name: &str, key: &str) -> Option<&'a Value> {
+    let tools = tools?.as_array()?;
+    tools.iter().find_map(|tool| {
+        let (tool_name, schema) = if let Some(function) = tool.get("function") {
+            (
+                function.get("name")?.as_str()?,
+                function.get("parameters")?,
+            )
+        } else {
+            (
+                tool.get("name")?.as_str()?,
+                tool.get("input_schema").or_else(|| tool.get("parameters"))?,
+            )
+        };
+        (tool_name == name)
+            .then(|| schema.get("properties")?.get(key))
+            .flatten()
+    })
+}
+
+fn property_requires_string(tools: Option<&Value>, name: &str, key: &str) -> bool {
+    let Some(kind) = property_schema(tools, name, key).and_then(|schema| schema.get("type")) else {
+        return false;
+    };
+    match kind {
+        Value::String(kind) => kind == "string",
+        Value::Array(kinds) => {
+            let mut has_string = false;
+            let only_string_or_null = kinds.iter().all(|kind| match kind.as_str() {
+                Some("string") => {
+                    has_string = true;
+                    true
+                }
+                Some("null") => true,
+                _ => false,
+            });
+            has_string && only_string_or_null
+        }
+        _ => false,
+    }
+}
+
+/// JSON-формат tool call уже несёт типы явно, но маленькая модель может и там
+/// положить object в строковое поле. По контракту клиента важнее schema:
+/// сериализуем значение обратно в строку. Для Hermes это также страховка на
+/// случай альтернативной разметки, не прошедшей через `parse_hermes`.
+fn normalize_string_arguments(calls: &mut [(String, String)], tools: Option<&Value>) {
+    for (name, args) in calls {
+        let Ok(Value::Object(mut object)) = serde_json::from_str::<Value>(args) else {
+            continue;
+        };
+        let mut changed = false;
+        for (key, value) in &mut object {
+            if property_requires_string(tools, name, key) && !value.is_string() {
+                let serialized = match &*value {
+                    Value::Null => "null".to_string(),
+                    Value::Bool(value) => value.to_string(),
+                    Value::Number(value) => value.to_string(),
+                    Value::Array(_) | Value::Object(_) => value.to_string(),
+                    Value::String(value) => value.clone(),
+                };
+                *value = Value::String(serialized);
+                changed = true;
+            }
+        }
+        if changed {
+            *args = Value::Object(object).to_string();
+        }
+    }
 }
 
 /// JSON-формат с лечением (порт parse_json_response из Yttri).
@@ -439,6 +535,92 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "bash");
         assert!(calls[0].1.contains("ls -la"));
+    }
+
+    fn openai_tools_schema() -> Value {
+        serde_json::json!([
+            {
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": {"type": "string"},
+                            "timeout": {"type": "integer"}
+                        }
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "write",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "content": {"type": "string"}
+                        }
+                    }
+                }
+            }
+        ])
+    }
+
+    #[test]
+    fn hermes_json_looking_command_stays_string_by_schema() {
+        let tools = openai_tools_schema();
+        let (_, calls) = parse_tool_calls_with_schema(
+            "<tool_call>\n<function=bash>\n<parameter=command>\n{\"model\":\"brave\",\"query\":\"test\"}\n</parameter>\n<parameter=timeout>\n30\n</parameter>\n</function>\n</tool_call>",
+            Some(&tools),
+        );
+        let args: Value = serde_json::from_str(&calls[0].1).unwrap();
+        assert_eq!(
+            args["command"],
+            Value::String("{\"model\":\"brave\",\"query\":\"test\"}".into())
+        );
+        assert_eq!(args["timeout"], 30);
+    }
+
+    #[test]
+    fn hermes_json_looking_write_content_stays_string_by_schema() {
+        let tools = openai_tools_schema();
+        let (_, calls) = parse_tool_calls_with_schema(
+            "<tool_call>\n<function=write>\n<parameter=path>\n/tmp/body.json\n</parameter>\n<parameter=content>\n{\n  \"max_results\": 8\n}\n</parameter>\n</function>\n</tool_call>",
+            Some(&tools),
+        );
+        let args: Value = serde_json::from_str(&calls[0].1).unwrap();
+        assert_eq!(args["path"], "/tmp/body.json");
+        assert_eq!(args["content"], "{\n  \"max_results\": 8\n}");
+    }
+
+    #[test]
+    fn json_tool_call_object_is_coerced_to_declared_string() {
+        let tools = openai_tools_schema();
+        let (_, calls) = parse_tool_calls_with_schema(
+            "<tool_call>{\"name\":\"bash\",\"arguments\":{\"command\":{\"model\":\"brave\"}}}</tool_call>",
+            Some(&tools),
+        );
+        let args: Value = serde_json::from_str(&calls[0].1).unwrap();
+        assert_eq!(args["command"], "{\"model\":\"brave\"}");
+    }
+
+    #[test]
+    fn anthropic_input_schema_preserves_string_argument() {
+        let tools = serde_json::json!([{
+            "name": "bash",
+            "input_schema": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}}
+            }
+        }]);
+        let (_, calls) = parse_tool_calls_with_schema(
+            "<tool_call><function=bash><parameter=command>{\"query\":\"test\"}</parameter></function></tool_call>",
+            Some(&tools),
+        );
+        let args: Value = serde_json::from_str(&calls[0].1).unwrap();
+        assert_eq!(args["command"], "{\"query\":\"test\"}");
     }
 
     #[test]
