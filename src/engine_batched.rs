@@ -168,6 +168,7 @@ pub struct BatchedEngine {
     tokenizer: Arc<Mutex<tokenizers::Tokenizer>>,
     media: Arc<crate::media::MediaService>,
     vision_path: Option<std::path::PathBuf>,
+    mtp_path: Option<std::path::PathBuf>,
     /// Shutdown-флаг dispatch thread: выставляется при drop engine (unload).
     shutdown: Arc<AtomicBool>,
     /// JoinHandle dispatch thread — join в Drop гарантирует, что adapter
@@ -248,6 +249,7 @@ impl BatchedEngine {
             )?)),
             media,
             vision_path,
+            mtp_path: mtp_path.clone(),
             shutdown: Arc::new(AtomicBool::new(false)),
             dispatch_handle: Mutex::new(None),
             ready: Arc::new(AtomicBool::new(false)),
@@ -262,7 +264,7 @@ impl BatchedEngine {
         let cfg2 = Arc::clone(&cfg);
         let shutdown2 = Arc::clone(&engine.shutdown);
         let vision_path2 = engine.vision_path.clone();
-        let mtp_path2 = mtp_path.clone();
+        let mtp_path2 = engine.mtp_path.clone();
         // ponytail: Qwen35BatchAdapter владеет raw CUDA graph handles → не Send.
         // Создаём adapter+scheduler прямо в dispatch std::thread (не tokio, не
         // spawn_blocking): closure не содержит non-Send значений.
@@ -555,6 +557,9 @@ impl Engine for BatchedEngine {
 
     fn supports_vision(&self) -> bool { self.vision_path.is_some() }
     fn supports_video(&self) -> bool { self.vision_path.is_some() }
+    // Веса MTP заданы И загрузились: при провале load_error непуст и движок
+    // до готовности не доходит, поэтому одного пути достаточно.
+    fn supports_mtp(&self) -> bool { self.mtp_path.is_some() }
     fn model_info(&self) -> ModelInfo {
         self.info.clone()
     }

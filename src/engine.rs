@@ -319,6 +319,7 @@ pub trait Engine: Send + Sync {
     /// Эффективные runtime capabilities, не возможности семейства модели.
     fn supports_vision(&self) -> bool { false }
     fn supports_video(&self) -> bool { false }
+    fn supports_mtp(&self) -> bool { false }
     /// Остановить фоновые потоки движка (dispatch thread). Вызывается при unload.
     /// Default no-op — single-slot CandleEngine ничего не держит в фоне.
     fn shutdown(&self) {}

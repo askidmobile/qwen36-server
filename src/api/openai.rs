@@ -1108,6 +1108,9 @@ pub async fn list_models(State(state): State<AppState>) -> Response {
     );
     capabilities.vision &= state.engine.supports_vision();
     capabilities.video &= state.engine.supports_video();
+    // Без манифеста профиля capabilities.mtp приходит false, хотя веса MTP
+    // загружены: правим по факту, как vision и video рядом.
+    capabilities.mtp |= state.engine.supports_mtp();
     Json(json!({
         "object": "list",
         "data": [{
