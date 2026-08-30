@@ -19,7 +19,7 @@ This project has a compiled knowledge wiki. Use it for orientation, then read li
 
 ## Stats
 
-Compiled: 2026-08-30 | Topics: 8 | Sources: 51 | Auto-updates on session start
+Compiled: 2026-08-31 | Topics: 8 | Sources: 54 | Auto-updates on session start
 
 ## Topics
 

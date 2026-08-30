@@ -1,8 +1,8 @@
 ---
 topic: Engine Layer
 slug: engine-layer
-last_compiled: 2026-08-30
-sources: 8
+last_compiled: 2026-08-31
+sources: 9
 status: active
 ---
 
@@ -41,7 +41,8 @@ Engine-слой изолирует API от конкретного runtime. `Eng
 - Paged KV/static slot regions и DeltaNet recurrent state внутри адаптера.
 - MTP head и graph state загружаются при старте только при включённом MTP.
 - Per-slot MTP alignment отделяет target snapshot от draft state: восстановленный из prefix cache слот работает обычным target decode до reset.
-- Prefix snapshots хранятся в host memory, возвращаются на GPU только на hit.
+- Prefix snapshots хранятся в host memory, возвращаются на GPU только на hit; после restore attention payload удаляется, потому что KV уже записан в paged pool.
+- На paged prefill финальный `slot_snap` содержит recurrent state без второй копии K/V; KV length выставляется отдельно.
 
 ## Key Decisions [coverage: high — 5 sources]
 
@@ -59,6 +60,8 @@ Engine-слой изолирует API от конкретного runtime. `Eng
 - `CTX` должен быть проброшен в окружение движка; сервер принимает и чистые, и legacy `QWEN36_*` имена.
 - MTP может быть корректным вероятностно и при этом менять конкретный greedy-токен около численной ничьей; это отдельная зона диагностики.
 - Prefix snapshot пока не включает MTP attention KV и предыдущий target hidden row. Попытка speculative decode после такого restore смешивает состояния двух позиций, поэтому защищена per-slot gate.
+- CUDA draft graph MTP необходимо проверять отдельно от самого MTP: eager-CUDA draft остаётся спекулятивным декодированием, даже когда `QWEN36_MTP_GRAPH=0`.
+- На живом long-miss после короткого warmup draft graph дал `CUDA_ERROR_INVALID_VALUE`, тогда как eager-CUDA MTP прошёл без fallback. Наиболее вероятный lifetime-риск виден в source: `catch_up` может перевыделить K/V, пока старый `DraftGraph` всё ещё хранит запечённый адрес; stale graph удаляется только при следующем `draft_graphed`. До отдельного CUDA A/B это гипотеза, поэтому рабочая настройка отключает только graph replay.
 
 ## Sources
 
@@ -70,3 +73,4 @@ Engine-слой изолирует API от конкретного runtime. `Eng
 - [src/vram_plan.rs](../../src/vram_plan.rs)
 - [src/main.rs](../../src/main.rs)
 - [docs/engine-api.md](../../docs/engine-api.md)
+- [yttri-forge mtp.rs](../../../yttri-forge/engine/qwen35-batch/src/real/mtp.rs)

@@ -1,3 +1,14 @@
+## 2026-08-31
+
+**Topics updated:** prefix-cache, engine-layer, testing
+**New topics:** none
+**Sources scanned:** 54
+**Sources changed:** yttri-forge/engine/qwen35-batch/src/real/adapter.rs, yttri-forge/engine/qwen35-batch/src/real/model_weights.rs; MTP graph lifetime сверена с yttri-forge/engine/qwen35-batch/src/real/mtp.rs
+**Mode:** codebase, external runtime contract verification
+**Notes:** Зафиксированы recurrent-only final snapshot, немедленный host transfer границы cache, лимит 65536 токенов и живой WDDM A/B без shared spill.
+
+---
+
 ## 2026-08-30
 
 **Topics updated:** none (актуальные статьи уже содержат изменения `f1110e0`)

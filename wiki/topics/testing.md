@@ -1,8 +1,8 @@
 ---
 topic: Testing and Validation
 slug: testing
-last_compiled: 2026-08-30
-sources: 10
+last_compiled: 2026-08-31
+sources: 11
 status: active
 ---
 
@@ -29,6 +29,8 @@ status: active
 - Tool parsing: JSON-похожий `bash.command`/`write.content` проверяется по OpenAI и Anthropic schema в non-stream и stream путях.
 - Cancellation: разрыв соединения во время long prefill должен останавливать GPU примерно за keepalive/chunk latency.
 - Memory: WDDM Shared Usage, а не process PrivateMemorySize.
+- Memory A/B снимается в трёх точках: после warmup, на miss и на повторном prefix hit; для длинного запроса нужен частый sampler, чтобы не пропустить краткий shared spill.
+- MTP graph A/B обязан отдельно фиксировать `usage.mtp`, fallback category и KV growth: `MTP_GRAPH=0` не выключает MTP, а переводит draft в eager-CUDA.
 
 ## Gotchas [coverage: high — 9 sources]
 
@@ -37,6 +39,7 @@ status: active
 - Один зелёный тест без фактической ветки paged pool может быть ложным gate.
 - Ответы при temperature > 0 нельзя сравнивать посимвольно как доказательство MTP parity.
 - Q8 и F16 могут выбрать разные токены около численной ничьей; это не доказывает порчу Q8. Сравнивать нужно miss/hit внутри одного KV dtype.
+- Совпадение текстового дефекта с WDDM paging — сильная корреляция, но не доказательство битовой порчи при копировании: требуются повтор той же агентской нагрузки без shared spill и, при необходимости, layer/logit parity.
 - BD-008 всё ещё не полностью автоматизирован.
 
 ## Sources
@@ -51,3 +54,4 @@ status: active
 - [scripts/stability_smoke.sh](../../scripts/stability_smoke.sh)
 - [scripts/bench.ps1](../../scripts/bench.ps1)
 - [scripts/build_windows.bat](../../scripts/build_windows.bat)
+- [yttri-forge mtp.rs](../../../yttri-forge/engine/qwen35-batch/src/real/mtp.rs)
