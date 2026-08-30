@@ -1,5 +1,16 @@
 ## 2026-08-30
 
+**Topics updated:** none (актуальные статьи уже содержат изменения `f1110e0`)
+**New topics:** none
+**Sources scanned:** 51
+**Sources changed:** none
+**Mode:** codebase, incremental verification
+**Notes:** Повторная компиляция сверила schema-aware tool parsing с live source; drift между исходниками и wiki не найден.
+
+---
+
+## 2026-08-30
+
 **Topics updated:** http-api-layer, prefix-cache, engine-layer, testing
 **Sources scanned:** 51
 **Sources changed:** src/api.rs, src/api/openai.rs, src/api/anthropic.rs, src/api/tools.rs + связанный runtime contract yttri-forge
