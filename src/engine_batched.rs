@@ -209,15 +209,8 @@ impl BatchedEngine {
             );
         }
         // Prefix cache: включается по QWEN36_PREFIX_CACHE_MIB>0 (default 0 =
-        // выключен). Int8-пул KV (QWEN36_KV_POOL_Q8=1) снимками состояния не
-        // покрыт: байтовое копирование неприменимо — комбинация запрещается
-        // явно, иначе кеш молча отдавал бы мусор.
-        if cfg.prefix_cache_mib != 0 && std::env::var("QWEN36_KV_POOL_Q8").as_deref() == Ok("1") {
-            anyhow::bail!(
-                "prefix cache (QWEN36_PREFIX_CACHE_MIB>0) несовместим с QWEN36_KV_POOL_Q8=1: \
-                 int8-пул KV не покрывается снимками состояния; отключи одно из двух"
-            );
-        }
+        // выключен). Int8-пул KV снимками теперь покрыт: снимок переносит
+        // байты вместе с масштабами постранично, без де/реквантования.
         let cfg = Arc::new(cfg);
         // Опциональные упреждающие f16-зеркала KV (P1): выгодны на картах с
         // большим запасом VRAM или при одном активном длинном запросе.
@@ -1474,18 +1467,6 @@ mod tests {
             Err(err) => err.to_string(),
         };
         assert!(err.contains("exceeds MAX_SLOTS"));
-    }
-
-    #[tokio::test]
-    async fn load_rejects_prefix_cache_with_q8_kv_pool() {
-        std::env::set_var("QWEN36_KV_POOL_Q8", "1");
-        let media = Arc::new(crate::media::MediaService::new(Default::default()).unwrap());
-        let err = match BatchedEngine::load(test_config(1, 1), media, None, None).await {
-            Ok(_) => panic!("prefix cache + int8 KV pool must be rejected"),
-            Err(err) => err.to_string(),
-        };
-        std::env::remove_var("QWEN36_KV_POOL_Q8");
-        assert!(err.contains("QWEN36_KV_POOL_Q8"));
     }
 
     #[test]
