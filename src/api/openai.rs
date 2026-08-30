@@ -40,8 +40,9 @@ pub struct ChatCompletionRequest {
     chat_template_kwargs: Option<Value>,
     /// Прямой флаг thinking (альтернатива chat_template_kwargs).
     thinking: Option<bool>,
-    /// Уровень рассуждений: none (без), low (с рассуждениями), high (кодинг).
-    /// Мапится на thinking-флаг + пресет сэмплинга + шаблонный reasoning_effort.
+    /// Уровень рассуждений: none (без), low/medium/high/xhigh (с рассуждениями).
+    /// Управляет thinking-флагом и шаблонным reasoning_effort, но не выбирает
+    /// профиль сэмплинга: reasoning и sampling — независимые оси API.
     reasoning_effort: Option<String>,
     /// Вернуть logprobs выбранных токенов.
     #[serde(default)]
@@ -110,6 +111,7 @@ fn to_gen_params(
     req: &ChatCompletionRequest,
     d: &crate::config::SamplingDefaults,
     presets: &crate::config::SamplingPresets,
+    policy: &crate::config::SamplingPolicy,
 ) -> GenParams {
     // 1. Определяем флаг thinking и уровень рассуждений (reasoning_effort)
     let ctk = req
@@ -129,19 +131,15 @@ fn to_gen_params(
         .or(effort_thinking)
         .unwrap_or(d.thinking);
 
-    // 2. Выбираем базовый пресет сэмплинга в зависимости от режима:
-    let preset_name = if thinking {
-        if matches!(effort, "high" | "xhigh") {
-            "thinking-coding"
-        } else {
-            "thinking"
-        }
-    } else {
-        "instruct"
-    };
+    // 2. Выбираем базовый пресет только по наличию thinking. reasoning_effort
+    // задаёт глубину рассуждений в chat template, но не означает «точный код»
+    // и не должен молча менять temperature/presence_penalty. В частности,
+    // high/xhigh от агентских клиентов раньше включал Ornith-профиль 0.6/0.0
+    // и возвращал уже устранённое залипание на повторных tool calls.
+    let preset_name = if thinking { "thinking" } else { "instruct" };
 
     // 3. Базовые параметры: пресет карточки модели, поверх — явные env.
-    let pv = crate::api::resolve_sampling(presets, preset_name, d);
+    let pv = crate::api::resolve_sampling(presets, preset_name, d, policy);
     let (mut temp, mut top_p, mut top_k, mut min_p, mut presence_p, mut rep_p) = (
         pv.temperature,
         pv.top_p,
@@ -154,7 +152,7 @@ fn to_gen_params(
     // 4. Сэмплинг из запроса клиента — только когда замок снят (SAMPLING_LOCK=0).
     // По умолчанию источник истины один: env рядом с моделью. Иначе клиент,
     // приславший temperature 0, отменяет рекомендации карточки молча.
-    if !crate::config::sampling_policy().lock {
+    if !policy.lock {
         if let Some(t) = req.temperature {
             temp = t;
         }
@@ -336,6 +334,7 @@ pub async fn chat_completions(
         &req,
         &state.sampling.read().expect("sampling lock"),
         &state.presets.read().expect("presets lock"),
+        &state.sampling_policy.read().expect("sampling policy lock"),
     );
     if params.max_tokens == 0 {
         return bad_request("max_tokens must be greater than 0");
@@ -1077,14 +1076,19 @@ pub async fn list_models(State(state): State<AppState>) -> Response {
     .unwrap_or((0, 0));
     let d = state.sampling.read().expect("sampling lock").clone();
     let presets = state.presets.read().expect("presets lock").clone();
+    let policy = state
+        .sampling_policy
+        .read()
+        .expect("sampling policy lock")
+        .clone();
     let default_mode = if d.thinking { "thinking" } else { "instruct" };
     // Показываем то, что действительно применится: пресет карточки с наложенными
     // env. Иначе клиент видит одни числа, а генерация идёт по другим.
     let mut presets = presets;
     for v in presets.values_mut() {
-        crate::config::sampling_policy().apply(v);
+        policy.apply(v);
     }
-    let effective_default = crate::api::resolve_sampling(&presets, default_mode, &d);
+    let effective_default = crate::api::resolve_sampling(&presets, default_mode, &d, &policy);
     let model_name = path
         .file_name()
         .map(|name| name.to_string_lossy())
@@ -1157,7 +1161,7 @@ pub async fn list_models(State(state): State<AppState>) -> Response {
             },
             // пресеты из model card (BD-016)
             "sampling_presets": presets,
-            "sampling_locked": crate::config::sampling_policy().lock,
+            "sampling_locked": policy.lock,
         }],
     }))
     .into_response()
@@ -1168,7 +1172,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn chat_sampling_extensions_are_applied() {
+    fn locked_sampling_ignores_client_extensions() {
         let req: ChatCompletionRequest = serde_json::from_value(json!({
             "messages": [],
             "top_k": 7,
@@ -1180,16 +1184,35 @@ mod tests {
         .unwrap();
         let defaults = crate::config::SamplingDefaults::default();
         let presets = crate::config::default_presets();
-        let params = to_gen_params(
-            &req,
-            &defaults,
-            &presets,
-        );
+        let params = to_gen_params(&req, &defaults, &presets, &Default::default());
+        assert_eq!(params.top_k, 20);
+        assert_eq!(params.min_p, 0.0);
+        assert_eq!(params.presence_penalty, 0.0);
+        assert_eq!(params.repetition_penalty, 1.0);
+        assert_eq!(params.seed, Some(42));
+    }
+
+    #[test]
+    fn unlocked_sampling_applies_client_extensions() {
+        let req: ChatCompletionRequest = serde_json::from_value(json!({
+            "messages": [],
+            "top_k": 7,
+            "min_p": 0.1,
+            "presence_penalty": 1.2,
+            "repetition_penalty": 1.1
+        }))
+        .unwrap();
+        let defaults = crate::config::SamplingDefaults::default();
+        let presets = crate::config::default_presets();
+        let policy = crate::config::SamplingPolicy {
+            lock: false,
+            ..Default::default()
+        };
+        let params = to_gen_params(&req, &defaults, &presets, &policy);
         assert_eq!(params.top_k, 7);
         assert_eq!(params.min_p, 0.1);
-        assert_eq!(params.presence_penalty, 1.5);
-        assert_eq!(params.repetition_penalty, 1.2);
-        assert_eq!(params.seed, Some(42));
+        assert_eq!(params.presence_penalty, 1.2);
+        assert_eq!(params.repetition_penalty, 1.1);
     }
 
     #[test]
@@ -1201,12 +1224,32 @@ mod tests {
         .unwrap();
         let defaults = crate::config::SamplingDefaults::default();
         let presets = crate::config::default_presets_for_model("gemma-4-E4B-it-Q8_0.gguf");
-        let params = to_gen_params(&req, &defaults, &presets);
+        let params = to_gen_params(&req, &defaults, &presets, &Default::default());
 
         assert_eq!(params.temperature, 1.0);
         assert_eq!(params.top_p, 0.95);
         assert_eq!(params.top_k, 64);
         assert_eq!(params.presence_penalty, 0.0);
+        assert_eq!(params.repetition_penalty, 1.0);
+    }
+
+    #[test]
+    fn reasoning_effort_does_not_select_coding_sampling() {
+        let req: ChatCompletionRequest = serde_json::from_value(json!({
+            "messages": [],
+            "reasoning_effort": "high"
+        }))
+        .unwrap();
+        let defaults = crate::config::SamplingDefaults::default();
+        let presets =
+            crate::config::default_presets_for_model("Ornith-1.5-9B-Q6_K.gguf");
+        let params = to_gen_params(&req, &defaults, &presets, &Default::default());
+
+        assert!(params.thinking);
+        assert_eq!(params.temperature, 1.0);
+        assert_eq!(params.top_p, 0.95);
+        assert_eq!(params.top_k, 20);
+        assert_eq!(params.presence_penalty, 1.5);
         assert_eq!(params.repetition_penalty, 1.0);
     }
 }

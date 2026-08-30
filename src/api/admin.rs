@@ -323,7 +323,6 @@ pub async fn sampling_defaults(
             "invalid sampling values",
         );
     }
-    *state.sampling.write().expect("sampling lock") = req.clone();
     if let Err(e) = persist_sampling(&state.env_file, &req) {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -331,6 +330,17 @@ pub async fn sampling_defaults(
             format!(".env write failed: {e}"),
         );
     }
+    *state.sampling.write().expect("sampling lock") = req.clone();
+    let lock = state
+        .sampling_policy
+        .read()
+        .expect("sampling policy lock")
+        .lock;
+    *state
+        .sampling_policy
+        .write()
+        .expect("sampling policy lock") =
+        crate::config::SamplingPolicy::from_defaults(&req, lock);
     Json(json!({"status": "saved"})).into_response()
 }
 
@@ -790,6 +800,7 @@ pub async fn do_switch(
             prefix_cache_mib: 0,
             media_temp: std::env::temp_dir().join("yttri-media"),
             sampling: crate::config::SamplingDefaults::default(),
+            sampling_policy: crate::config::SamplingPolicy::default(),
             presets: model_presets.clone(),
             env_file: std::path::PathBuf::from(".env"),
             batch_size: 2048,
@@ -802,7 +813,7 @@ pub async fn do_switch(
             rope_scale: 1.0,
             rope_scale_type: "none".into(),
             seed: 0,
-            ctx_overflow: "sliding_window".into(),
+            ctx_overflow: "error".into(),
             frequency_penalty: 0.0,
             max_queue: 64,
             req_timeout: 600,

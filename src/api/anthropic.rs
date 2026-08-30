@@ -184,11 +184,17 @@ pub async fn messages(
     // здесь начинали с GenParams::default() и рекомендации карточки в
     // Anthropic-API не действовали вовсе.
     let defaults = state.sampling.read().expect("sampling lock").clone();
+    let policy = state
+        .sampling_policy
+        .read()
+        .expect("sampling policy lock")
+        .clone();
     let preset_name = if defaults.thinking { "thinking" } else { "instruct" };
     let pv = crate::api::resolve_sampling(
         &state.presets.read().expect("presets lock"),
         preset_name,
         &defaults,
+        &policy,
     );
     let mut params = GenParams {
         max_tokens,
@@ -200,7 +206,7 @@ pub async fn messages(
         repetition_penalty: pv.repetition_penalty,
         ..Default::default()
     };
-    if !crate::config::sampling_policy().lock {
+    if !policy.lock {
         if let Some(t) = req.temperature {
             params.temperature = t;
         }

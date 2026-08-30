@@ -57,7 +57,7 @@ impl Default for SamplingDefaults {
 impl SamplingDefaults {
     fn from_env() -> Result<Self> {
         let d = Self::default();
-        Ok(Self {
+        let values = Self {
             temperature: parse_env("TEMPERATURE", d.temperature)?,
             top_p: parse_env("TOP_P", d.top_p)?,
             top_k: parse_env("TOP_K", d.top_k)?,
@@ -67,7 +67,35 @@ impl SamplingDefaults {
             max_tokens: parse_env("MAX_TOKENS", d.max_tokens)?,
             thinking: parse_env("THINKING", d.thinking)?,
             frequency_penalty: parse_env("FREQUENCY_PENALTY", d.frequency_penalty)?,
-        })
+        };
+        values.validate()?;
+        Ok(values)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if !(self.temperature.is_finite() && self.temperature >= 0.0) {
+            return Err(anyhow!("TEMPERATURE должен быть конечным и неотрицательным"));
+        }
+        if !(self.top_p.is_finite() && self.top_p > 0.0 && self.top_p <= 1.0) {
+            return Err(anyhow!("TOP_P должен быть в интервале (0, 1]"));
+        }
+        if !(self.min_p.is_finite() && (0.0..=1.0).contains(&self.min_p)) {
+            return Err(anyhow!("MIN_P должен быть в интервале [0, 1]"));
+        }
+        if !(self.presence_penalty.is_finite() && self.presence_penalty >= 0.0) {
+            return Err(anyhow!(
+                "PRESENCE_PENALTY должен быть конечным и неотрицательным"
+            ));
+        }
+        if !(self.repetition_penalty.is_finite() && self.repetition_penalty > 0.0) {
+            return Err(anyhow!(
+                "REPETITION_PENALTY должен быть конечным и положительным"
+            ));
+        }
+        if self.max_tokens == 0 {
+            return Err(anyhow!("MAX_TOKENS должен быть больше нуля"));
+        }
+        Ok(())
     }
 }
 
@@ -116,6 +144,20 @@ pub struct SamplingPolicy {
     pub lock: bool,
 }
 
+impl Default for SamplingPolicy {
+    fn default() -> Self {
+        Self {
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            min_p: None,
+            presence_penalty: None,
+            repetition_penalty: None,
+            lock: true,
+        }
+    }
+}
+
 fn env_opt<T: std::str::FromStr>(name: &str) -> Result<Option<T>>
 where
     T::Err: std::fmt::Display,
@@ -131,15 +173,38 @@ where
 
 impl SamplingPolicy {
     pub fn from_env() -> Result<Self> {
-        Ok(Self {
+        let lock = match get_env_var("SAMPLING_LOCK")
+            .as_deref()
+            .map(str::trim)
+        {
+            None | Some("") | Some("1") | Some("true") | Some("TRUE") => true,
+            Some("0") | Some("false") | Some("FALSE") => false,
+            Some(value) => {
+                return Err(anyhow!(
+                    "SAMPLING_LOCK: ожидалось 0/1/false/true, получено {value:?}"
+                ))
+            }
+        };
+        let policy = Self {
             temperature: env_opt("TEMPERATURE")?,
             top_p: env_opt("TOP_P")?,
             top_k: env_opt("TOP_K")?,
             min_p: env_opt("MIN_P")?,
             presence_penalty: env_opt("PRESENCE_PENALTY")?,
             repetition_penalty: env_opt("REPETITION_PENALTY")?,
-            lock: !matches!(get_env_var("SAMPLING_LOCK").as_deref(), Some("0")),
-        })
+            lock,
+        };
+        let probe = SamplingDefaults {
+            temperature: policy.temperature.unwrap_or(0.0),
+            top_p: policy.top_p.unwrap_or(1.0),
+            top_k: policy.top_k.unwrap_or(0),
+            min_p: policy.min_p.unwrap_or(0.0),
+            presence_penalty: policy.presence_penalty.unwrap_or(0.0),
+            repetition_penalty: policy.repetition_penalty.unwrap_or(1.0),
+            ..SamplingDefaults::default()
+        };
+        probe.validate()?;
+        Ok(policy)
     }
 
     /// Наложить заданные переменные на значения пресета.
@@ -163,25 +228,21 @@ impl SamplingPolicy {
             v.repetition_penalty = x;
         }
     }
-}
 
-/// Политика читается один раз: env процесса за время жизни сервера не меняется.
-pub fn sampling_policy() -> &'static SamplingPolicy {
-    static P: std::sync::OnceLock<SamplingPolicy> = std::sync::OnceLock::new();
-    P.get_or_init(|| {
-        SamplingPolicy::from_env().unwrap_or_else(|e| {
-            eprintln!("[sampling] {e}; беру пресет карточки без переопределений");
-            SamplingPolicy {
-                temperature: None,
-                top_p: None,
-                top_k: None,
-                min_p: None,
-                presence_penalty: None,
-                repetition_penalty: None,
-                lock: true,
-            }
-        })
-    })
+    /// Политика, эквивалентная полностью заполненным значениям из WebUI.
+    /// `lock` сохраняется отдельно: endpoint дефолтов не управляет тем,
+    /// разрешено ли клиентским запросам переопределять сэмплинг.
+    pub fn from_defaults(defaults: &SamplingDefaults, lock: bool) -> Self {
+        Self {
+            temperature: Some(defaults.temperature),
+            top_p: Some(defaults.top_p),
+            top_k: Some(defaults.top_k),
+            min_p: Some(defaults.min_p),
+            presence_penalty: Some(defaults.presence_penalty),
+            repetition_penalty: Some(defaults.repetition_penalty),
+            lock,
+        }
+    }
 }
 
 pub type SamplingPresets = std::collections::HashMap<String, SamplingPresetValues>;
@@ -364,6 +425,9 @@ pub struct Config {
     pub prefix_cache_mib: usize,
     pub media_temp: PathBuf,
     pub sampling: SamplingDefaults,
+    /// Явные env-переопределения поверх карточки модели и политика приоритета
+    /// параметров из inference-запроса.
+    pub sampling_policy: SamplingPolicy,
     pub presets: SamplingPresets,
     pub env_file: PathBuf,
     /// Batch size для prefill (`BATCH_SIZE`, default 2048).
@@ -382,7 +446,7 @@ pub struct Config {
     pub rope_scale_type: String,
     /// Seed (`SEED`, default 0 = random).
     pub seed: u64,
-    /// Context overflow policy (`CTX_OVERFLOW`, default "sliding_window").
+    /// Context overflow policy (`CTX_OVERFLOW`, default "error").
     pub ctx_overflow: String,
     /// Frequency penalty (`FREQUENCY_PENALTY`, default 0.0).
     pub frequency_penalty: f32,
@@ -451,6 +515,7 @@ impl Config {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::temp_dir().join("yttri-media")),
             sampling: SamplingDefaults::from_env()?,
+            sampling_policy: SamplingPolicy::from_env()?,
             presets,
             env_file,
             batch_size: parse_env("BATCH_SIZE", 2048usize)?,
@@ -461,7 +526,7 @@ impl Config {
             rope_scale: parse_env("ROPE_SCALE", 1.0f32)?,
             rope_scale_type: get_env_var("ROPE_SCALE_TYPE").unwrap_or_else(|| "none".into()),
             seed: parse_env("SEED", 0u64)?,
-            ctx_overflow: get_env_var("CTX_OVERFLOW").unwrap_or_else(|| "sliding_window".into()),
+            ctx_overflow: get_env_var("CTX_OVERFLOW").unwrap_or_else(|| "error".into()),
             frequency_penalty: parse_env("FREQUENCY_PENALTY", 0.0f32)?,
             max_queue: parse_env("MAX_QUEUE", 64usize)?,
             req_timeout: parse_env("REQ_TIMEOUT", 600u64)?,

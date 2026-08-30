@@ -1,37 +1,38 @@
 # Codebase Wiki — Navigation Guide
 
-This project has a compiled knowledge wiki. Use it instead of scanning raw files.
+This project has a compiled knowledge wiki. Use it for orientation, then read live source for code changes and debugging.
 
 ## How to use this wiki
 
-1. Start at INDEX.md — scan the topic table to find relevant modules
-2. Read 1-3 topic articles relevant to your current task
-3. Check coverage tags:
-   - [coverage: high] — trust this section, skip raw files
-   - [coverage: medium] — good overview, check raw sources for implementation details
-   - [coverage: low] — read the raw source files listed in Sources
-4. Check concepts/ for cross-cutting patterns (path-dependency on candle-fork, not-Send serialization)
-5. Only read raw source files when you need code-level detail
+1. Начать с `INDEX.md`.
+2. Для runtime-задач читать `engine-layer`, затем `configuration-and-profiles` или `prefix-cache`.
+3. Для API/tool-loop/sampling — `http-api-layer` + `configuration-and-profiles`.
+4. Для VRAM/CUDA validation — `testing` и concept `candle-fork-coupling` (название файла историческое; runtime теперь `yttri-forge`).
+5. При расхождении docs и live code доверять `Cargo.toml`, исходникам и targeted tests; фиксировать documentation drift отдельно.
 
-## When NOT to use the wiki
+## When NOT to use the wiki alone
 
-- Writing new code (read the actual source files for exact syntax/types)
-- Debugging a specific function (go to the file directly)
-- The wiki article says [coverage: low] for what you need
+- Реализация или отладка конкретной функции.
+- Проверка текущей конфигурации живого Windows-сервера.
+- CUDA/MSVC/driver поведение и performance numbers.
+- Точные внешние contracts, которые могли измениться.
 
 ## Stats
 
-Compiled: 2026-08-08 | Topics: 5 | Sources: 25 | Auto-updates on session start
+Compiled: 2026-08-30 | Topics: 8 | Sources: 51 | Auto-updates on session start
 
 ## Topics
 
-- **project-overview** — цель, стек, статус, дорожная карта, решения BD-001..BD-020
-- **engine-layer** — Engine trait, CandleEngine, BatchedEngine, контракт
-- **http-api-layer** — axum, три API, auth, SSE, tool calls
-- **web-chat** — статичный HTML-чат, localStorage, thinking-парсер
-- **testing** — unit-тесты, API integration, stability smoke, bench
+- **project-overview** — фактический scope и архитектура.
+- **engine-layer** — engine contract, scheduler, cancellation, MTP.
+- **http-api-layer** — inference/admin/HF/media API, SSE и tools.
+- **configuration-and-profiles** — env, profiles, presets и sampling lock.
+- **prefix-cache** — state snapshots, host RAM, int8 KV и LRU.
+- **multimodal-and-components** — media pipeline и component lifecycle.
+- **web-chat** — Studio proxy и fallback UI.
+- **testing** — CUDA gates, parity, stability и WDDM memory.
 
 ## Concepts
 
-- **candle-fork-coupling** — path-зависимость на candle-fork, TODO-F1..F6
-- **not-send-serialization** — модель не Send → один поток + channels
+- **candle-fork-coupling** — историческое имя статьи о текущей path-зависимости на `yttri-forge`.
+- **not-send-serialization** — один владелец GPU state и channel-based API.

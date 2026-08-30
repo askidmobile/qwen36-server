@@ -1,118 +1,76 @@
 ---
 topic: Project Overview
 slug: project-overview
-last_compiled: 2026-08-08
-sources: 9
+last_compiled: 2026-08-30
+sources: 8
 status: active
 ---
 
 # Project Overview
 
-## Purpose [coverage: high — 9 sources]
+## Purpose [coverage: high — 8 sources]
 
-`qwen36-server` — Rust-сервер инференса **Qwen3.6-27B** (GGUF, 2-bit) на собственном candle-форке [candle-fork](../candle-fork). Три API (OpenAI Chat Completions, OpenAI Responses, Anthropic Messages) + веб-чат. 4 одновременных клиента через batch-планировщик. Целевая площадка: Windows + CUDA (yttri-win, RTX 3060 12 GB).
+`qwen36-server` вырос из сервера одной Qwen3.6-27B в **Yttri Self-Inference Server**: локальный Rust-сервер GGUF-инференса для Qwen 3.5/3.6/3.8, Ornith 1.0/1.5 и Gemma 4. Он предоставляет OpenAI Chat Completions, OpenAI Responses, Anthropic Messages, admin/HuggingFace/media API и проксирует Unsloth Studio.
 
-Ключевые параметры:
-- Модель: unsloth/Qwen3.6-27B-GGUF → старт UD-Q2_K_XL (11.8 GB); фаза 2 — IQ2 (BD-003)
-- Контекст: 81 920 токенов на старте (нативный потолок 262 144) (BD-009)
-- llama.cpp НЕ используется как компонент — только эталон для parity (BD-001)
-- Критерий успеха v1: 4 слота × генерации 8-16K токенов без падений и утечек VRAM (BD-008)
+Основной runtime — собственный `yttri-forge`, подключённый path-зависимостями. Целевая площадка остаётся Windows + CUDA, в частности RTX 3060 12 GB; macOS/Metal используется для разработки. Критерий стабильности BD-008 — четыре слота с длинными генерациями без падений и утечек.
 
-Статус: собранный сервер работает. Smoke на реальной GGUF (Qwen3.5-4B) пройден — chat/stream/messages/responses/models. BatchedEngine подключён (фаза 4). IQ2-ядра — фаза 5 (не начата).
+## Architecture [coverage: high — 8 sources]
 
-## Architecture [coverage: high — 9 sources]
+- `main.rs`: env/profile → выбор движка → `SwappableEngine` → axum.
+- `engine_batched.rs`: основной путь qwen35/qwen35moe, включая один слот; continuous batching, paged KV, CUDA graphs, MTP и prefix cache.
+- `engine.rs`: общий контракт и `CandleEngine` для других архитектур/диагностики.
+- `engine_swap.rs`: горячая замена модели без изменения HTTP-контракта.
+- `api/`: OpenAI, Anthropic, Responses, admin, HF, media и Studio proxy.
+- `profile.rs`: валидированные профили и component artifacts.
+- `media/`: временное хранение и подготовка image/video.
+- `prefix_cache.rs`, `vram_plan.rs`: повторное использование префила и планирование памяти.
 
-Single Rust-крейт, path-зависимость на `candle-fork`. Структура:
+## Talks To [coverage: high — 8 sources]
 
-```
-src/
-  main.rs          — entry point: env → engine → axum HTTP
-  lib.rs           — модули: config, engine, sampler, api, engine_batched, engine_types
-  config.rs        — Config::from_env (QWEN36_* env vars)
-  engine.rs        — Engine trait + CandleEngine (single-slot, Mutex)
-  engine_batched.rs — BatchedEngine (4 слота, dispatch loop + BatchScheduler)
-  engine_types.rs  — реэкспорт контрактных типов из engine
-  sampler.rs       — свой сэмплер (temperature/top_k/top_p/min_p/penalties) + пресеты BD-016
-  api/
-    openai.rs      — POST /v1/chat/completions + GET /v1/models
-    anthropic.rs   — POST /v1/messages
-    responses.rs   — POST /v1/responses
-  api.rs           — Router, auth middleware, SSE helper, generate_collect, parse_tool_calls
-web/
-  index.html       — статичный веб-чат (SSE, localStorage, thinking-парсер)
-docs/
-  brief/           — PROJECT-BRIEF, decisions (BD-001..BD-020), open-questions, research, interview-log
-  engine-api.md    — внутренний контракт Engine trait + HTTP endpoints
-  batch-integration.md — дизайн BatchedEngine
-tests/
-  api_test.rs      — 10 интеграционных тестов (MockEngine)
-  stability_plan.md — план критерия BD-008
-scripts/
-  stability_smoke.sh — 4-client smoke для BD-008
-  bench.ps1        — PowerShell бенчмарк (TTFT, decode, prefill, concurrent)
-```
+- `../yttri-forge/engine/{qwen35-batch,candle-core,candle-transformers}` — инференс и CUDA/Metal kernels.
+- axum/tokio — HTTP, SSE, очереди и фоновые задачи.
+- Hugging Face — поиск/probe/download GGUF через server API.
+- Unsloth Studio — reverse proxy на `STUDIO_URL`; встроенный WebUI только fallback.
+- API-клиенты OpenAI/Anthropic-совместимого формата.
 
-Engine выбирается по `QWEN36_SLOTS`: slots > 1 → BatchedEngine; slots == 1 → CandleEngine (single-slot, для smoke/дебага).
+## API Surface [coverage: high — 7 sources]
 
-## Talks To [coverage: high — 9 sources]
+- `/v1/chat/completions`, `/v1/responses`, `/v1/messages`, `/v1/models`.
+- Admin: список/переключение/выгрузка моделей, контекстная матрица, пресеты сэмплинга.
+- HF: search/files/probe/download/downloads.
+- Media upload для runtimes с vision/video.
+- Всё вне `/v1/*` проксируется в Studio; `GET /` получает встроенный чат при недоступном Studio.
 
-- **candle-fork** (path-dep) — `qwen35-batch` крейт: `ModelWeights`, `Qwen35BatchAdapter`, `BatchScheduler`, `tokenizer` (build_chatml_text, encode_no_think, decode_text, strip_thinking). `candle-core` — Device/Tokenizer типы.
-- **axum 0.8** — HTTP-сервер, SSE, Router, middleware
-- **tokio** — async runtime, mpsc channels, spawn_blocking
-- **tokenizers 0.22** — BPE-токенизатор (загружается из GGUF metadata)
-- **Клиенты**: OpenAI SDK, Anthropic SDK, браузерный чат, curl — через LAN HTTP
+## Data [coverage: high — 6 sources]
 
-## API Surface [coverage: high — 9 sources]
+- GGUF/YTF и versioned profile artifacts на диске.
+- Временные media-файлы удаляются после использования/TTL/cancel/error (BD-026).
+- Model state, paged KV и CUDA graphs — VRAM; prefix snapshots — системная RAM.
+- Чаты встроенного WebUI — localStorage; сервер не ведёт историю диалогов.
 
-| Эндпоинт | Спека | Статус |
-|---|---|---|
-| `POST /v1/chat/completions` | OpenAI | полный: stream SSE, tools, usage |
-| `POST /v1/responses` | OpenAI Responses | базовый: input→output, SSE, store=false (BD-012) |
-| `POST /v1/messages` | Anthropic | полный: stream, tools, anthropic-version |
-| `GET /v1/models` | OpenAI + ext | id/object/created/owned_by + контекст, квант, слоты, режимы (BD-015) |
-| `GET /` | — | статика веб-чата |
+## Key Decisions [coverage: high — 5 sources]
 
-Auth: `Authorization: Bearer $QWEN36_API_KEY` на всех `/v1/*`. Vision → 400 (BD-004).
+- BD-021 заменил мастер-ключ именованными API-ключами.
+- BD-022 разрешил Vision/Video для валидированных profiles.
+- BD-029: MTP обязан сохранять распределение, но не побитовую траекторию при смене формы GPU-вычислений.
+- BD-030: включённый MTP загружается при старте; выключенный не занимает VRAM.
+- BD-031: переполнение по умолчанию — `400 context_length_exceeded`; sliding window только через `CTX_OVERFLOW=sliding_window`.
+- BD-032: выделенный agent endpoint держит sampling в server env; reasoning не выбирает sampling profile.
 
-## Data [coverage: high — 9 sources]
+## Gotchas [coverage: high — 7 sources]
 
-- GGUF-модель на диске (D: на yttri-win, путь из `QWEN36_MODEL`)
-- Логи — stdout (BD-014)
-- Чаты — localStorage браузера
-- Persistent state в памяти: candle ModelWeights (одна загрузка), BatchScheduler + slots, KV cache / DeltaNet state (batched buffers в форке)
-- Ничего на диске кроме модели (BD-014)
-
-## Key Decisions [coverage: high — 9 sources]
-
-Решения BD-001..BD-020 обязательны; отмена — только новой строкой «overrides BD-XXX». Полный лог — [../docs/brief/decisions.md](../docs/brief/decisions.md).
-
-Ключевые:
-- BD-001: candle-форк, не llama.cpp
-- BD-007: 4 слота через BatchScheduler
-- BD-008: критерий v1 — только стабильность
-- BD-009: контекст 81 920
-- BD-016: сэмплинг-пресеты из model card
-- BD-017: sliding window (system сохраняется, `truncated: true`)
-- BD-019: порядок работ — Q2_K_XL single-slot → API+чат → 4 слота → IQ2
-- BD-020: главный риск — качество 2-bit, план отступления 3-bit/4-bit
-
-## Gotchas [coverage: medium — 5 sources]
-
-- `DECODE_BATCH_CAPACITY = 4` хардкод в форке → `QWEN36_SLOTS ≤ 4` (clamp с warning)
-- Prefill неделим (PREFILL_CHUNK=usize::MAX) — длинный prompt одного клиента блокирует decode остальных
-- Cancel mid-prefill невозможен (потолок форка)
-- Модель не Send-friendly (CUDA/Metal contexts) — все вызовы сериализованы через один std::thread (dispatch loop), не tokio::spawn
-- Q2_K_XL (11.8 GB) превышает VRAM 12 GB при 4 слотах — работает через системный RAM swap; IQ2_XXS (9.39 GB) освободит ~2.4 GB (фаза 5)
-- Бенчмарк на Q4_K_M показывает низкие скорости из-за swap-bound режима (TTFT 2595 ms, decode 1.1 tok/s)
+- `CLAUDE.md` и BD-028 ещё называют `candle-fork`, но live `Cargo.toml` зависит только от `yttri-forge`; при расхождении доверять сборочному контракту.
+- Исторический brief описывает Qwen3.6-27B/Q2/80K; фактический scope зафиксирован в `PROJECT-BRIEF-addendum.md`.
+- VRAM-планер даёт справочную оценку; реальное окно paged pool движок вычисляет отдельно по свободной памяти.
+- Полный контекст на 12 GB возможен только при тщательно выбранных slots/KV dtype; WDDM shared usage — обязательная метрика paging.
 
 ## Sources
 
 - [README.md](../../README.md)
 - [CLAUDE.md](../../CLAUDE.md)
-- [AGENTS.md](../../AGENTS.md)
-- [docs/brief/PROJECT-BRIEF.md](../../docs/brief/PROJECT-BRIEF.md)
-- [docs/brief/decisions.md](../../docs/brief/decisions.md)
-- [docs/brief/open-questions.md](../../docs/brief/open-questions.md)
-- [docs/brief/research.md](../../docs/brief/research.md)
-- [docs/brief/interview-log.md](../../docs/brief/interview-log.md)
 - [Cargo.toml](../../Cargo.toml)
+- [PROJECT-BRIEF.md](../../docs/brief/PROJECT-BRIEF.md)
+- [PROJECT-BRIEF-addendum.md](../../docs/brief/PROJECT-BRIEF-addendum.md)
+- [decisions.md](../../docs/brief/decisions.md)
+- [open-questions.md](../../docs/brief/open-questions.md)
+- [src/main.rs](../../src/main.rs)

@@ -45,6 +45,10 @@ pub struct AppState {
     /// Глобальные fallback/limit defaults из .env; режимные значения берутся
     /// из model-specific `presets`.
     pub sampling: Arc<RwLock<crate::config::SamplingDefaults>>,
+    /// Явные env-переопределения поверх пресета и замок request-level
+    /// параметров. Хранится в state, а не в глобальном OnceLock, чтобы runtime
+    /// и сохранённый `.env` не расходились.
+    pub sampling_policy: Arc<RwLock<crate::config::SamplingPolicy>>,
     /// Effective presets активного семейства (built-in + MODEL_PRESETS).
     pub presets: Arc<RwLock<crate::config::SamplingPresets>>,
     /// Путь к .env для персистентности дефолтов.
@@ -401,6 +405,7 @@ pub fn resolve_sampling(
     presets: &crate::config::SamplingPresets,
     preset_name: &str,
     defaults: &crate::config::SamplingDefaults,
+    policy: &crate::config::SamplingPolicy,
 ) -> crate::config::SamplingPresetValues {
     let mut v = presets.get(preset_name).cloned().unwrap_or(
         crate::config::SamplingPresetValues {
@@ -412,7 +417,7 @@ pub fn resolve_sampling(
             repetition_penalty: defaults.repetition_penalty,
         },
     );
-    crate::config::sampling_policy().apply(&mut v);
+    policy.apply(&mut v);
     v
 }
 

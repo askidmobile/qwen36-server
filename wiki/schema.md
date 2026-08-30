@@ -1,24 +1,29 @@
 # Wiki Schema — qwen36-server
 
-Last compiled: 2026-08-08
+Last compiled: 2026-08-30
 
 ## Topics
 
 | Slug | Name | Description |
 |---|---|---|
-| project-overview | Project Overview | Общий обзор: цель, стек, статус, дорожная карта, ключевые решения BD-001..BD-020 |
-| engine-layer | Engine Layer | Engine trait, CandleEngine (single-slot), BatchedEngine (4 слота), контракт docs/engine-api.md |
-| http-api-layer | HTTP API Layer | axum router, три API (OpenAI/Anthropic/Responses), auth, SSE, tool calls |
-| web-chat | Web Chat | Статичный HTML-чат: localStorage, SSE-стрим, thinking-парсер, пресеты, прогресс-бар |
-| testing | Testing and Validation | Unit-тесты, API integration (MockEngine), stability smoke (BD-008), bench.ps1 |
+| project-overview | Project Overview | Фактический scope Yttri Self-Inference Server, runtime и решения |
+| engine-layer | Engine Layer | Engine contract, Batched/Candle/Swappable engines, GPU lifecycle |
+| http-api-layer | HTTP API Layer | Inference/admin/HF/media API, auth, SSE и tools |
+| configuration-and-profiles | Configuration and Profiles | `.env`, model profiles, capabilities и sampling policy |
+| prefix-cache | Prefix Cache | Host-backed state snapshots, prefix matching, LRU и int8 pool |
+| multimodal-and-components | Multimodal and Components | Media TTL pipeline, profiles, vision/video/MTP lifecycle |
+| web-chat | Web UI and Studio Proxy | Unsloth Studio proxy и встроенный fallback WebUI |
+| testing | Testing and Validation | Unit/API/CUDA parity, cancellation, memory и stability gates |
 
 ## Concepts
 
 | Slug | Name | Connects |
 |---|---|---|
-| candle-fork-coupling | Path-Dependency on candle-fork | project-overview, engine-layer, testing |
-| not-send-serialization | Not-Send Model Serialization | engine-layer, project-overview |
+| candle-fork-coupling | Runtime Path-Dependency on yttri-forge | project-overview, engine-layer, prefix-cache, testing |
+| not-send-serialization | Single-Owner GPU State | engine-layer, prefix-cache, testing |
 
 ## Evolution Log
 
-- 2026-08-08: Initial schema generated from 5 topics, 2 concepts (first compile, codebase mode)
+- 2026-08-30: Зафиксирован BD-032 и внешне проверенный sampling/reasoning/tool-loop contract.
+- 2026-08-30: 5 → 8 topics; актуализирован runtime `yttri-forge`, добавлены profiles, components и prefix reuse.
+- 2026-08-08: Initial schema generated from 5 topics and 2 concepts.
