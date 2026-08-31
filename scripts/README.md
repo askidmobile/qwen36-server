@@ -82,7 +82,7 @@ curl.exe -s -m 180 http://127.0.0.1:18099/v1/chat/completions `
 ### Runtime-заметки (2026-08-31, Qwen3.8)
 
 - **cudart PATH**: exe линкуется с cudart 12.4; в `inference-run.bat` PATH должен включать `...CUDA\v12.4\bin` ПЕРЕД v13.2 — иначе процесс умирает молча (exit 0, ноль вывода, Event Log: APPCRASH nvcuda64.dll 0xc0000005 при холодных запусках).
-- **IQ1S**: UD-кванты unsloth содержат до ~20 тензоров IQ1S; в форке (82dc7e23) — requant в Q4_0 при загрузке. Если у модели снова «not supported IQ1S» — форк на yttri-forge свежий, `engine/candle-core` пересобран в `qwen36-server\target`.
+- **IQ1S**: UD-кванты unsloth содержат до ~20 тензоров IQ1S; в форке (44385cfd→76c8c773) — нативные CUDA-ядра: mmvq `mul_mat_vec_iq1_s_q8_1_b{1..8}`, dequantize f32/f16 (block_dim **32**, как в llama.cpp — при 256 тредах раскладка il/ib ломается и weights читаются мусором), MMQ-инстансы отключены (MMA-тайл IQ1_S даёт NaN, prefill через tiled dequant+cuBLAS). Если «unsupported IQ1S» — форк/сборка не синхронны.
 - **VRAM-остаток после force-kill**: после нескольких `Stop-Process -Force` WDDM не успевает вычистить backing — used VRAM остаётся высоким при пустых процессах, а следующий инстанс получает выселенную память (генерация через paging, на слот может попадать мусорный контекст и петли). Лечение: убедиться, что процессов нет, пауза 5–10 с, затем чистый старт; после старта сверить `nvidia-smi` used ≈ weights+MTP+KV (~11 ГБ на Q2_K_XL).
 - Петли «-2K» на 2-битных квантах: причина комбинация входных повторов + t=1.0 + слабые штрафы; `REPETITION_PENALTY=1.05`, `PRESENCE_PENALTY=0.3` + чистая VRAM дают нулевые петли. При возврате петель — поднять repetition до 1.1 или снизить TEMPERATURE до 0.7.
 
