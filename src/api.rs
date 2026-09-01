@@ -241,6 +241,9 @@ pub struct GenOutcome {
     pub text: String,
     pub finish_reason: String,
     pub usage: crate::engine_types::GenerationUsage,
+    /// Генерация оборвалась внутри think-блока (length до think-close):
+    /// весь `text` — thinking, не ответ. См. `StreamEvent::Done`.
+    pub ended_in_thinking: bool,
     /// Записи по сгенерированным токенам, если клиент их просил. `None` —
     /// не просил; пустой вектор — просил, но токенов не было.
     pub logprobs: Option<Vec<crate::engine_types::TokenLogprob>>,
@@ -372,6 +375,7 @@ pub async fn generate_collect(
             crate::engine_types::StreamEvent::Done {
                 finish_reason,
                 usage,
+                ended_in_thinking,
             } => {
                 guard.disarm();
                 return Ok(GenOutcome {
@@ -379,6 +383,7 @@ pub async fn generate_collect(
                     finish_reason,
                     usage,
                     logprobs,
+                    ended_in_thinking,
                 });
             }
             crate::engine_types::StreamEvent::Error(e) => {
@@ -405,6 +410,24 @@ pub fn parse_tool_calls_with_schema(
     tools: Option<&serde_json::Value>,
 ) -> (String, Vec<(String, String)>) {
     tools::parse_tool_calls_with_schema(text, tools)
+}
+
+/// Инструменты действительно включены только для непустого JSON-массива.
+/// `null`, `{}` и `[]` не должны переводить обычный текст модели в tool calls.
+pub fn tools_enabled(tools: Option<&serde_json::Value>) -> bool {
+    tools::tools_enabled(tools)
+}
+
+/// Разбирать tool calls можно только из завершённого ответа на запрос, где
+/// инструменты были объявлены. При `length` хвост генерации заведомо неполон:
+/// tolerant parser раньше закрывал JSON сам и отдавал клиенту исполняемый,
+/// хотя модель не успела сформировать обязательные аргументы.
+pub fn parse_tool_calls_for_response(
+    text: &str,
+    finish_reason: &str,
+    tools: Option<&serde_json::Value>,
+) -> (String, Vec<(String, String)>) {
+    tools::parse_tool_calls_for_response(text, finish_reason, tools)
 }
 
 /// Эффективный сэмплинг: пресет карточки модели, поверх — явные env-переменные.

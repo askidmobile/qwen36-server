@@ -298,6 +298,10 @@ pub enum StreamEvent {
     Done {
         finish_reason: String, // "stop" | "length"
         usage: GenerationUsage,
+        /// Генерация оборвалась ВНУТРИ think-блока (in_reasoning=true при
+        /// финале): think-close маркер не успел выйти, весь накопленный text —
+        /// thinking, а не ответ. HTTP-слой обязан убрать его из content.
+        ended_in_thinking: bool,
     },
     Error(String),
 }
@@ -606,6 +610,10 @@ fn run_generation(
     let finish = move |reason: &str, completion: usize, tx: &mpsc::Sender<StreamEvent>| {
         let _ = tx.blocking_send(StreamEvent::Done {
             finish_reason: reason.into(),
+            // Single-slot путь не отслеживает think-фазу: его основной клиент —
+            // Ornith/27B идут через BatchedEngine. Отсутствие маркера здесь —
+            // прежнее поведение.
+            ended_in_thinking: false,
             usage: GenerationUsage {
                 prompt_tokens,
                 completion_tokens: completion,

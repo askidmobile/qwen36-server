@@ -146,6 +146,8 @@ struct SlotBinding {
     usage: MediaUsage,
     _media_lease: Option<PreparedLease>,
     cancel: crate::engine_types::CancelFlag,
+    /// Сколько токенов generated уже проверено на think-open/close.
+    phase_checked: usize,
     /// Идут ли сейчас токены размышления. По контракту OpenAI в logprobs
     /// попадают только токены ответа. Фаза определяется ИДЕНТИФИКАТОРОМ
     /// токена `</think>`, а не текстом: сплиттер режет текст и придерживает
@@ -961,10 +963,26 @@ fn drain_after_step(
             .get_mut(&idx)
             .map(|st| std::mem::take(&mut st.pending_logprobs))
             .unwrap_or_default();
-        // Фаза по идентификатору токена: в logprobs по контракту идут только
-        // токены ответа. Сами `<think>` и `</think>` не попадают ни туда, ни
-        // сюда. Записи выравниваем по хвосту generated и сверяем
-        // идентификаторы: если очередь разошлась с историей (откат
+        // Фаза по идентификатору токена для ВСЕХ запросов: length-обрыв внутри
+        // think-блока обязан докладываться в Done.ended_in_thinking, а фаза
+        // раньше обновлялась только когда клиент просил logprobs. Новые токены
+        // [phase_checked..generated.len()) сверяем с id think-open/close.
+        // ID фиксированы константами форка (у Ornith/Qwen3.8 те же ID 248068/69;
+        // token_to_id по строкам из vocab Qwen3.5 ненадёжен — glyph не строковый).
+        const THINK_OPEN_ID: u32 = 248068;
+        const THINK_CLOSE_ID: u32 = 248069;
+        let _ = tokenizer;
+        for &t in &generated[b.phase_checked..] {
+            if t == THINK_CLOSE_ID {
+                b.in_reasoning = false;
+            } else if t == THINK_OPEN_ID {
+                b.in_reasoning = true;
+            }
+        }
+        b.phase_checked = generated.len();
+        // В logprobs по контракту идут только токены ответа. Сами
+        // `<think>` и `</think>` туда не попадают. Записи выравниваем по
+        // хвосту generated: если очередь разошлась с историей (откат
         // спекуляции), считаем всё ответом, чем врать о фазе.
         let chunk_logprobs: Option<Vec<TokenLogprob>> = b.params.logprobs.map(|_| {
             let think_open = tokenizer.token_to_id("<think>");
@@ -1250,6 +1268,7 @@ fn seed_slot(
         last_progress: Instant::now(),
         usage,
         _media_lease: media_lease,
+        phase_checked: 0,
         in_reasoning: params_thinking,
         prompt: prompt_for_cache,
         prefix_captured: false,
@@ -1293,8 +1312,13 @@ fn finish_slot(
             "stop" // EOS
         };
         let truncated = slot_truncated.remove(&idx).unwrap_or(false);
+        // Закончили ВНУТРИ think-блока (length-обрыв до think-close)? Весь
+        // накопленный text — thinking, HTTP-слой обязан убрать его из content
+        // (иначе клиент видит сырые рассуждения вместо ответа).
+        let ended_in_thinking = b.in_reasoning;
         let _ = b.out.try_send(StreamEvent::Done {
             finish_reason: finish_reason.into(),
+            ended_in_thinking,
             usage: GenerationUsage {
                 prompt_tokens: b.prompt_tokens,
                 completion_tokens: b.completion_tokens,

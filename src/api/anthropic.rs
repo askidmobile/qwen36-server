@@ -7,8 +7,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::api::{
-    bad_request, engine_error, generate_collect, parse_tool_calls_with_schema,
-    prepare_inference_request, sse_response, ApiKeyIdentity, AppState,
+    bad_request, engine_error, generate_collect, parse_tool_calls_for_response,
+    prepare_inference_request, sse_response, tools_enabled, ApiKeyIdentity, AppState,
 };
 use crate::engine_types::{ChatMessage, ContentBlock, GenParams, StreamEvent};
 use crate::media::MediaKind;
@@ -230,7 +230,8 @@ pub async fn messages(
             Ok(o) => o,
             Err(r) => return r,
         };
-        let (text, calls) = parse_tool_calls_with_schema(&out.text, req.tools.as_ref());
+        let (text, calls) =
+            parse_tool_calls_for_response(&out.text, &out.finish_reason, req.tools.as_ref());
         let content = build_content_blocks(&text, &calls);
         return Json(json!({
             "id": id,
@@ -252,7 +253,7 @@ pub async fn messages(
     }
 
     let req_tools = req.tools.clone();
-    let has_tools = req_tools.as_ref().map(|t| !t.is_null()).unwrap_or(false);
+    let has_tools = tools_enabled(req_tools.as_ref());
     let cancel = request.cancel.clone();
     let rx = match state.engine.generate(request).await {
         Ok(r) => r,
@@ -303,6 +304,7 @@ pub async fn messages(
         StreamEvent::Done {
             finish_reason,
             usage,
+            ..
         } => {
             if !started {
                 started = true;
@@ -319,7 +321,13 @@ pub async fn messages(
                     ),
                 );
             }
-            let (text, calls) = parse_tool_calls_with_schema(&acc, req_tools.as_ref());
+            let (text, calls) = if has_tools {
+                parse_tool_calls_for_response(&acc, &finish_reason, req_tools.as_ref())
+            } else {
+                // Текст уже отправлен дельтами; без объявленных tools его не
+                // следует повторно разбирать или дублировать.
+                (String::new(), Vec::new())
+            };
             // tools в запросе: текст был буферизован — эмитим без разметки.
             if has_tools && !text.is_empty() {
                 out.push(

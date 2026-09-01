@@ -9,8 +9,8 @@ use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
 
 use crate::api::{
-    bad_request, engine_error, generate_collect, parse_tool_calls_with_schema,
-    prepare_inference_request, sse_response, ApiKeyIdentity, AppState,
+    bad_request, engine_error, generate_collect, parse_tool_calls_for_response,
+    prepare_inference_request, sse_response, tools_enabled, ApiKeyIdentity, AppState,
 };
 use crate::engine_types::{ChatMessage, ContentBlock, GenParams, StreamEvent};
 use crate::media::MediaKind;
@@ -291,6 +291,12 @@ fn oai_tool_calls(calls: &[(String, String)]) -> Value {
     )
 }
 
+fn requested_model_matches(requested: &str, current_id: &str, current_quant: &str) -> bool {
+    requested.eq_ignore_ascii_case(current_id)
+        || (!current_quant.is_empty()
+            && requested.eq_ignore_ascii_case(&format!("{current_id}-{current_quant}")))
+}
+
 pub async fn chat_completions(
     State(state): State<AppState>,
     Extension(owner): Extension<ApiKeyIdentity>,
@@ -300,9 +306,14 @@ pub async fn chat_completions(
     // GGUF и загружал его: достаточно было обратиться к 'ornith-1.5-9b' вместо
     // 'ornith-1.5-9b-mtp', чтобы рабочая конфигурация со спекуляцией молча
     // сменилась на другую модель. Модель задаётся при запуске, и только там.
-    let current_id = state.engine.model_info().id;
+    // Разрешён лишь display alias той же модели с её же quant-суффиксом:
+    // `ornith-1.5-9b-mtp-Q6_K` не требует и не вызывает переключения.
+    let current_model = state.engine.model_info();
+    let current_id = current_model.id;
     let requested = req.model.as_deref().unwrap_or("").trim();
-    if !requested.is_empty() && !requested.eq_ignore_ascii_case(&current_id) {
+    if !requested.is_empty()
+        && !requested_model_matches(requested, &current_id, &current_model.quant)
+    {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({
@@ -377,7 +388,7 @@ pub async fn chat_completions(
     if req.stream {
         // tools в запросе → буферизуем текст (иначе <tool_call> разметка
         // утекает в SSE-поток раньше парсинга — аудит 2026-08-10).
-        let has_tools = req.tools.as_ref().map(|t| !t.is_null()).unwrap_or(false);
+        let has_tools = tools_enabled(req.tools.as_ref());
         return stream_chat(state, request, include_usage, has_tools).await;
     }
 
@@ -386,14 +397,30 @@ pub async fn chat_completions(
         Err(r) => return r,
     };
     // Отрезать Qwen </think> и Gemma 4 thought-channel из content.
-    let (reasoning, text_body) = split_reasoning(&out.text);
-    let (text, calls) = parse_tool_calls_with_schema(&text_body, req.tools.as_ref());
+    // Length-обрыв до think-close: движок доложил `ended_in_thinking` — весь
+    // текст thinking, маркера в нём нет (decode_bytes дропает <|...|>-токены),
+    // сплиттер слеп. Отдаём рассуждение как reasoning_content с честным
+    // сигналом, content — пустой (клиент знает: budget исчерпан).
+    let (reasoning, text_body) = if out.ended_in_thinking {
+        (!out.text.trim().is_empty()).then_some(out.text.trim().to_string()).map(|r| (Some(r), String::new()))
+            .unwrap_or((None, String::new()))
+    } else {
+        split_reasoning(&out.text)
+    };
+    let (text, calls) =
+        parse_tool_calls_for_response(&text_body, &out.finish_reason, req.tools.as_ref());
     crate::api::warn_unknown_tool_calls(&calls, req.tools.as_ref());
     // Gemma fallback: если content пустой, но reasoning есть —
     // переносим reasoning в content, чтобы пользователь не получил пустой ответ
     // (модель часто пишет весь ответ внутри reasoning без перехода к <|channel>final).
     let is_gemma = state.engine.model_info().id.starts_with("gemma-4");
+    // Length-обрыв внутри think-блока: content пуст по построению (весь текст —
+    // thinking), но клиент без понимания reasoning_content увидит пустой ответ.
+    // Отдаём рассуждение как content с finish_reason=length — это честный сигнал
+    // «бюджет исчерпан на размышлениях», а не молчание.
     let (final_content, final_reasoning) = if text.is_empty() && reasoning.is_some() && is_gemma {
+        (reasoning.clone(), None)
+    } else if text.is_empty() && reasoning.is_some() && out.ended_in_thinking {
         (reasoning.clone(), None)
     } else {
         ((!text.is_empty()).then_some(text), reasoning)
@@ -906,6 +933,7 @@ async fn stream_chat(
         StreamEvent::Done {
             finish_reason,
             usage,
+            ..
         } => {
             if first {
                 first = false;
@@ -969,7 +997,7 @@ async fn stream_chat(
                 }
                 finish_reason.as_str()
             } else {
-                let (reasoning, text_body) = split_reasoning(&acc);
+                let (reasoning, _) = split_reasoning(&acc);
                 if let Some(reasoning) = reasoning {
                     out.push(Event::default().data(chunk(
                         &id,
@@ -978,14 +1006,17 @@ async fn stream_chat(
                         None,
                     )));
                 }
-                let (text, calls) = if has_tools && !gemma_channel {
+                let (text, calls) = if has_tools {
                     // Контент уже ушёл в поток по мере генерации, поэтому
                     // разбираем только хвост с разметкой — иначе отправили бы
                     // весь ответ повторно. Остаётся дослать непоместившуюся
                     // придержку и текст, который парсер извлёк между вызовами.
                     let mut head = std::mem::take(&mut tool_pending);
-                    let (rest, calls) =
-                        parse_tool_calls_with_schema(&tool_tail, req_tools.as_ref());
+                    let (rest, calls) = parse_tool_calls_for_response(
+                        &tool_tail,
+                        &finish_reason,
+                        req_tools.as_ref(),
+                    );
                     if !rest.is_empty() {
                         if !head.is_empty() && !head.ends_with(char::is_whitespace) {
                             head.push(' ');
@@ -994,7 +1025,9 @@ async fn stream_chat(
                     }
                     (head.trim().to_string(), calls)
                 } else {
-                    parse_tool_calls_with_schema(&text_body, req_tools.as_ref())
+                    // Обычный content уже ушёл дельтами. Без tools запрещено
+                    // повторно интерпретировать встреченный в тексте тег.
+                    (String::new(), Vec::new())
                 };
                 crate::api::warn_unknown_tool_calls(&calls, req_tools.as_ref());
                 // Остаток текста (придержка и то, что было между вызовами) —
