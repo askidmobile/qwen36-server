@@ -1,20 +1,20 @@
 ---
 topic: Project Overview
 slug: project-overview
-last_compiled: 2026-08-30
-sources: 8
+last_compiled: 2026-09-01
+sources: 9
 status: active
 ---
 
 # Project Overview
 
-## Purpose [coverage: high — 8 sources]
+## Purpose [coverage: high — 9 sources]
 
 `qwen36-server` вырос из сервера одной Qwen3.6-27B в **Yttri Self-Inference Server**: локальный Rust-сервер GGUF-инференса для Qwen 3.5/3.6/3.8, Ornith 1.0/1.5 и Gemma 4. Он предоставляет OpenAI Chat Completions, OpenAI Responses, Anthropic Messages, admin/HuggingFace/media API и проксирует Unsloth Studio.
 
 Основной runtime — собственный `yttri-forge`, подключённый path-зависимостями. Целевая площадка остаётся Windows + CUDA, в частности RTX 3060 12 GB; macOS/Metal используется для разработки. Критерий стабильности BD-008 — четыре слота с длинными генерациями без падений и утечек.
 
-## Architecture [coverage: high — 8 sources]
+## Architecture [coverage: high — 9 sources]
 
 - `main.rs`: env/profile → выбор движка → `SwappableEngine` → axum.
 - `engine_batched.rs`: основной путь qwen35/qwen35moe, включая один слот; continuous batching, paged KV, CUDA graphs, MTP и prefix cache.
@@ -24,8 +24,9 @@ status: active
 - `profile.rs`: валидированные профили и component artifacts.
 - `media/`: временное хранение и подготовка image/video.
 - `prefix_cache.rs`, `vram_plan.rs`: повторное использование префила и планирование памяти.
+- `scripts/README.md`: единственный эксплуатационный runbook для Windows-задачи `qwen36-inference`, актуального exe, логов и smoke-проверки.
 
-## Talks To [coverage: high — 8 sources]
+## Talks To [coverage: high — 9 sources]
 
 - `../yttri-forge/engine/{qwen35-batch,candle-core,candle-transformers}` — инференс и CUDA/Metal kernels.
 - axum/tokio — HTTP, SSE, очереди и фоновые задачи.
@@ -63,6 +64,7 @@ status: active
 - Исторический brief описывает Qwen3.6-27B/Q2/80K; фактический scope зафиксирован в `PROJECT-BRIEF-addendum.md`.
 - VRAM-планер даёт справочную оценку; реальное окно paged pool движок вычисляет отдельно по свободной памяти.
 - Полный контекст на 12 GB возможен только при тщательно выбранных slots/KV dtype; WDDM shared usage — обязательная метрика paging.
+- Текущее имя модели в `CLAUDE.md`/runbook — снимок документации, а не live-гарантия; перед диагностикой нужно сверять `loaded: id=... quant=...` в свежем серверном логе.
 
 ## Sources
 
@@ -74,3 +76,4 @@ status: active
 - [decisions.md](../../docs/brief/decisions.md)
 - [open-questions.md](../../docs/brief/open-questions.md)
 - [src/main.rs](../../src/main.rs)
+- [scripts/README.md](../../scripts/README.md)

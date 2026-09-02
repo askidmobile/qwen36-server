@@ -1,25 +1,25 @@
 ---
 topic: Engine Layer
 slug: engine-layer
-last_compiled: 2026-08-31
-sources: 9
+last_compiled: 2026-09-01
+sources: 10
 status: active
 ---
 
 # Engine Layer
 
-## Purpose [coverage: high — 8 sources]
+## Purpose [coverage: high — 9 sources]
 
 Engine-слой изолирует API от конкретного runtime. `Engine` принимает `InferenceRequest` и возвращает поток `StreamEvent`; контракт включает structured messages/tools, media, reasoning effort, cancellation, logprobs и usage MTP/media.
 
-## Architecture [coverage: high — 8 sources]
+## Architecture [coverage: high — 9 sources]
 
 - `BatchedEngine` — основной qwen35/qwen35moe путь даже при `SLOTS=1`: scheduler, chunked prefill, paged KV, CUDA graphs, MTP и prefix reuse.
 - `CandleEngine` — single-stream fallback для других архитектур и `QWEN36_FORCE_CANDLE_ENGINE=1`.
 - `SwappableEngine` — `RwLock<Option<Arc<dyn Engine>>>`, hot unload/install и стабильный API объект.
 - Dispatch loop остаётся выделенным `std::thread`: model/CUDA state принадлежит одному потоку, HTTP общается каналами.
 
-## Talks To [coverage: high — 8 sources]
+## Talks To [coverage: high — 9 sources]
 
 - `qwen35_batch::{BatchScheduler,Qwen35BatchAdapter,ModelWeights}` из `yttri-forge`.
 - tokenizer/chat template для текстовых и tool сообщений.
@@ -62,6 +62,7 @@ Engine-слой изолирует API от конкретного runtime. `Eng
 - Prefix snapshot пока не включает MTP attention KV и предыдущий target hidden row. Попытка speculative decode после такого restore смешивает состояния двух позиций, поэтому защищена per-slot gate.
 - CUDA draft graph MTP необходимо проверять отдельно от самого MTP: eager-CUDA draft остаётся спекулятивным декодированием, даже когда `QWEN36_MTP_GRAPH=0`.
 - На живом long-miss после короткого warmup draft graph дал `CUDA_ERROR_INVALID_VALUE`, тогда как eager-CUDA MTP прошёл без fallback. Наиболее вероятный lifetime-риск виден в source: `catch_up` может перевыделить K/V, пока старый `DraftGraph` всё ещё хранит запечённый адрес; stale graph удаляется только при следующем `draft_graphed`. До отдельного CUDA A/B это гипотеза, поэтому рабочая настройка отключает только graph replay.
+- После принудительных остановок Windows-runbook требует проверить отсутствие старого процесса и фактическое dedicated/shared VRAM перед новым стартом: остаточный WDDM backing способен сделать следующий прогон нерепрезентативным.
 
 ## Sources
 
@@ -74,3 +75,4 @@ Engine-слой изолирует API от конкретного runtime. `Eng
 - [src/main.rs](../../src/main.rs)
 - [docs/engine-api.md](../../docs/engine-api.md)
 - [yttri-forge mtp.rs](../../../yttri-forge/engine/qwen35-batch/src/real/mtp.rs)
+- [scripts/README.md](../../scripts/README.md)

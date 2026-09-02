@@ -1,5 +1,5 @@
 {
-  "last_compiled": "2026-08-31",
+  "last_compiled": "2026-09-01",
   "topics": [
     "project-overview",
     "engine-layer",
@@ -66,9 +66,11 @@
     "scripts/stability_smoke.sh",
     "scripts/bench.ps1",
     "scripts/build_windows.bat",
+    "scripts/README.md",
+    "tools/kv_corruption_test.py",
     "../yttri-forge/engine/qwen35-batch/src/real/adapter.rs",
     "../yttri-forge/engine/qwen35-batch/src/real/model_weights.rs",
     "../yttri-forge/engine/qwen35-batch/src/real/mtp.rs"
   ],
-  "total_sources_scanned": 54
+  "total_sources_scanned": 56
 }

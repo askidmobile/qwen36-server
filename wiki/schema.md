@@ -1,6 +1,6 @@
 # Wiki Schema — qwen36-server
 
-Last compiled: 2026-08-31
+Last compiled: 2026-09-01
 
 ## Topics
 

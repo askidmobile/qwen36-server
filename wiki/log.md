@@ -1,3 +1,27 @@
+## 2026-09-01
+
+**Topics updated:** http-api-layer, testing
+**Concepts updated:** none
+**New topics:** none
+**Sources scanned:** 56
+**Sources changed:** src/api.rs, src/api/openai.rs, src/api/anthropic.rs, src/api/tools.rs, tests/api_test.rs
+**Mode:** codebase, incremental compilation
+**Notes:** Tool calls теперь fail-closed на `length` и после schema validation; разрешён только display alias `id-quant` той же модели, добавлены OpenAI/Anthropic stream/non-stream регрессии.
+
+---
+
+## 2026-09-01
+
+**Topics updated:** project-overview, engine-layer, configuration-and-profiles, testing
+**Concepts updated:** candle-fork-coupling
+**New topics:** none
+**Sources scanned:** 56
+**Sources changed:** scripts/README.md, tools/kv_corruption_test.py
+**Mode:** codebase, incremental compilation
+**Notes:** Добавлены production launcher/log/binary contract yttri-win, WDDM post-kill checks и границы long-context canary как диагностического oracle.
+
+---
+
 ## 2026-08-31
 
 **Topics updated:** prefix-cache, engine-layer, testing
