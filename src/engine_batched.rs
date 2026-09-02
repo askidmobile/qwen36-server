@@ -1126,6 +1126,11 @@ const LOOP_MAX_PERIOD: usize = 96;
 /// Раньше этого числа токенов не смотрим: короткий ответ с повторами
 /// (список, таблица) — норма, а не петля.
 const LOOP_MIN_TOKENS: usize = 256;
+/// Сколько токенов обязан покрыть повторяющийся хвост, чтобы считаться петлёй.
+/// Без этого порога период 1 срабатывал на четырёх одинаковых токенах подряд —
+/// `9999` в `z-index`, `----` в разделителе, `0000` в цвете, — и рвал вёрстку
+/// посреди файла. Настоящая петля занимает десятки токенов, а не единицы.
+const LOOP_MIN_SPAN: usize = 96;
 
 /// Сторож зацикливания. `LOOP_GUARD=0` выключает.
 fn loop_guard_enabled() -> bool {
@@ -1148,9 +1153,15 @@ fn detect_loop(generated: &[u32]) -> Option<usize> {
         return None;
     }
     for period in 1..=LOOP_MAX_PERIOD.min(n / LOOP_MIN_REPEATS) {
-        let need = period * LOOP_MIN_REPEATS;
+        // Одного числа повторов мало. `z-index: 9999` — это четыре одинаковых
+        // токена подряд, то есть формально «период 1, четыре повтора», и по
+        // старому порогу генерация обрывалась прямо посреди CSS. Поэтому
+        // повторы обязаны покрыть ещё и LOOP_MIN_SPAN токенов: для периода 1
+        // это 96 одинаковых токенов подряд, для периода 24 — четыре повтора.
+        let repeats = LOOP_MIN_REPEATS.max(LOOP_MIN_SPAN.div_ceil(period));
+        let need = period * repeats;
         if n < need {
-            break;
+            continue;
         }
         let tail = &generated[n - need..];
         let first = &tail[..period];
@@ -1559,6 +1570,28 @@ mod tests {
         // Ровно на границе включения петля уже ловится.
         let at_edge: Vec<u32> = std::iter::repeat(5).take(LOOP_MIN_TOKENS).collect();
         assert_eq!(detect_loop(&at_edge), Some(1));
+    }
+
+    /// Короткие серии одинаковых токенов — обычный код, а не петля.
+    /// Регрессия: сторож рвал генерацию на `z-index: 9999` (четыре токена
+    /// `9` подряд), обрывая CSS посреди файла с finish_reason "length".
+    #[test]
+    fn detect_loop_spares_short_runs_of_identical_tokens() {
+        let digit = 24u32; // условный токен «9»
+        for run in [4usize, 8, 16, LOOP_MIN_SPAN - 1] {
+            let mut css: Vec<u32> = (0..600).map(|i| (i * 31 % 800) as u32).collect();
+            css.extend(std::iter::repeat(digit).take(run));
+            assert_eq!(
+                detect_loop(&css),
+                None,
+                "серия из {run} одинаковых токенов не должна считаться петлёй"
+            );
+        }
+
+        // А вот залипание на одном токене на всю длину — уже петля.
+        let mut stuck: Vec<u32> = (0..600).map(|i| (i * 31 % 800) as u32).collect();
+        stuck.extend(std::iter::repeat(digit).take(LOOP_MIN_SPAN));
+        assert_eq!(detect_loop(&stuck), Some(1));
     }
 
     #[test]
