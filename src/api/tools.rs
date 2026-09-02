@@ -23,6 +23,34 @@ pub fn parse_tool_calls(text: &str) -> (String, Vec<(String, String)>) {
     parse_tool_calls_with_schema(text, None)
 }
 
+pub fn tools_enabled(tools: Option<&Value>) -> bool {
+    tools
+        .and_then(Value::as_array)
+        .map(|tools| !tools.is_empty())
+        .unwrap_or(false)
+}
+
+/// Не превращать незавершённую генерацию или обычный текст без объявленных
+/// инструментов в исполняемый вызов.
+pub fn parse_tool_calls_for_response(
+    text: &str,
+    finish_reason: &str,
+    tools: Option<&Value>,
+) -> (String, Vec<(String, String)>) {
+    if finish_reason == "length" {
+        if tools_enabled(tools) && find_tool_tag(text, "<tool").is_some() {
+            eprintln!(
+                "[tools] вызов не исполнен: генерация оборвалась по length до подтверждения"
+            );
+        }
+        return (text.to_string(), Vec::new());
+    }
+    if !tools_enabled(tools) {
+        return (text.to_string(), Vec::new());
+    }
+    parse_tool_calls_with_schema(text, tools)
+}
+
 /// То же, но с исходной JSON Schema инструментов.
 ///
 /// Hermes передаёт каждое значение как текст между `<parameter>`-тегами.
@@ -54,27 +82,47 @@ pub fn parse_tool_calls_with_schema(
             Some((end, close_end)) => {
                 let body = after[..end].trim();
                 if let Some(call) = parse_block_body(body, tools) {
-                    calls.push(call);
-                } else {
-                    // Нераспарсенный блок — НЕ возвращаем разметку пользователю
-                    // (Yttri: strip_tool_call_tags), выкидываем теги, текст тела оставляем.
-                    if !body.is_empty() && !body.starts_with("<function=") && !body.starts_with('{') {
-                        rest.push_str(body);
+                    if let Err(error) = validate_tool_call(&call, tools) {
+                        eprintln!("[tools] невалидный вызов {}: {error}", call.0);
+                        append_invalid_body(&mut rest, body);
+                    } else {
+                        calls.push(call);
                     }
+                } else {
+                    // Нераспарсенный блок не должен исчезать: это обычный
+                    // видимый текст, а не подтверждённая команда клиенту.
+                    append_invalid_body(&mut rest, body);
                 }
                 s = &after[close_end..];
             }
             None => {
                 // Незакрытый тег: пробуем распарсить хвост (обрыв генерации).
-                if let Some(call) = parse_block_body(after.trim(), tools) {
-                    calls.push(call);
+                let body = after.trim();
+                if let Some(call) = parse_block_body(body, tools) {
+                    if let Err(error) = validate_tool_call(&call, tools) {
+                        eprintln!("[tools] невалидный вызов {}: {error}", call.0);
+                        append_invalid_body(&mut rest, body);
+                    } else {
+                        calls.push(call);
+                    }
+                } else {
+                    append_invalid_body(&mut rest, body);
                 }
                 break;
             }
         }
     }
-    normalize_string_arguments(&mut calls, tools);
     (rest.trim().to_string(), calls)
+}
+
+fn append_invalid_body(rest: &mut String, body: &str) {
+    if body.is_empty() {
+        return;
+    }
+    if !rest.is_empty() && !rest.ends_with(char::is_whitespace) {
+        rest.push('\n');
+    }
+    rest.push_str(body);
 }
 
 /// Найти тег по префиксу (`<tool` или `</tool`), вернуть (начало, конец_после_>`).
@@ -121,10 +169,10 @@ fn parse_hermes(body: &str, tools: Option<&Value>) -> Option<(String, String)> {
         let after_open = &s[k_end + 1..];
         let (value, next) = match after_open.find("</parameter>") {
             Some(vend) => (
-                after_open[..vend].trim_matches('\n').to_string(),
+                strip_hermes_framing_newlines(&after_open[..vend]).to_string(),
                 &after_open[vend + "</parameter>".len()..],
             ),
-            None => (after_open.trim().to_string(), ""),
+            None => (strip_one_leading_newline(after_open).to_string(), ""),
         };
         // В Hermes все параметры изначально текстовые. Тип восстанавливаем по
         // schema; эвристический JSON-разбор оставляем только когда схема не
@@ -145,27 +193,161 @@ fn parse_hermes(body: &str, tools: Option<&Value>) -> Option<(String, String)> {
     Some((name.to_string(), Value::Object(args).to_string()))
 }
 
+/// Hermes отделяет значение параметра одним переводом строки после открывающего
+/// и перед закрывающим тегом. Удаляем только эти два framing-разделителя:
+/// `trim_matches('\n')` раньше стирал намеренные пустые строки из `write.content`.
+fn strip_hermes_framing_newlines(value: &str) -> &str {
+    strip_one_trailing_newline(strip_one_leading_newline(value))
+}
+
+fn strip_one_leading_newline(value: &str) -> &str {
+    value
+        .strip_prefix("\r\n")
+        .or_else(|| value.strip_prefix('\n'))
+        .unwrap_or(value)
+}
+
+fn strip_one_trailing_newline(value: &str) -> &str {
+    value
+        .strip_suffix("\r\n")
+        .or_else(|| value.strip_suffix('\n'))
+        .unwrap_or(value)
+}
+
+fn tool_definition<'a>(tools: Option<&'a Value>, name: &str) -> Option<&'a Value> {
+    tools?.as_array()?.iter().find(|tool| {
+        tool.pointer("/function/name")
+            .or_else(|| tool.get("name"))
+            .and_then(Value::as_str)
+            == Some(name)
+    })
+}
+
+fn tool_parameters(tool: &Value) -> Option<&Value> {
+    tool.pointer("/function/parameters")
+        .or_else(|| tool.get("input_schema"))
+        .or_else(|| tool.get("parameters"))
+}
+
+/// Проверить верхнеуровневый контракт вызова перед тем, как API отдаст его
+/// агенту на исполнение. Это намеренно небольшой, консервативный subset JSON
+/// Schema: object/array/scalar types, required, properties, items,
+/// additionalProperties=false и anyOf/oneOf. Непонятные keywords не делают
+/// корректный вызов невалидным.
+fn validate_tool_call(call: &(String, String), tools: Option<&Value>) -> Result<(), String> {
+    let Some(tool_list) = tools.and_then(Value::as_array) else {
+        return Ok(()); // legacy parser без schema сохраняет прежний контракт
+    };
+    let Some(tool) = tool_definition(tools, &call.0) else {
+        return Err(format!("инструмент {:?} не объявлен в запросе", call.0));
+    };
+    let arguments: Value = serde_json::from_str(&call.1)
+        .map_err(|error| format!("arguments не являются JSON: {error}"))?;
+    if !arguments.is_object() {
+        return Err("arguments должны быть JSON-объектом".into());
+    }
+    if tool_list.is_empty() {
+        return Err("список tools пуст".into());
+    }
+    if let Some(schema) = tool_parameters(tool) {
+        validate_schema_value(&arguments, schema, "arguments")?;
+    }
+    Ok(())
+}
+
+fn validate_schema_value(value: &Value, schema: &Value, path: &str) -> Result<(), String> {
+    if let Some(branches) = schema.get("anyOf").and_then(Value::as_array) {
+        if !branches
+            .iter()
+            .any(|branch| validate_schema_value(value, branch, path).is_ok())
+        {
+            return Err(format!("{path} не соответствует ни одной ветке anyOf"));
+        }
+    }
+    if let Some(branches) = schema.get("oneOf").and_then(Value::as_array) {
+        let matches = branches
+            .iter()
+            .filter(|branch| validate_schema_value(value, branch, path).is_ok())
+            .count();
+        if matches != 1 {
+            return Err(format!(
+                "{path} должен соответствовать ровно одной ветке oneOf"
+            ));
+        }
+    }
+
+    if let Some(kind) = schema.get("type") {
+        let accepted = match kind {
+            Value::String(kind) => value_matches_type(value, kind),
+            Value::Array(kinds) => kinds
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|kind| value_matches_type(value, kind)),
+            _ => true,
+        };
+        if !accepted {
+            return Err(format!("{path} имеет тип {}, несовместимый со schema", value_kind(value)));
+        }
+    }
+
+    if let Value::Object(object) = value {
+        if let Some(required) = schema.get("required").and_then(Value::as_array) {
+            for key in required.iter().filter_map(Value::as_str) {
+                if !object.contains_key(key) {
+                    return Err(format!("{path}.{key}: отсутствует обязательное поле"));
+                }
+            }
+        }
+        let properties = schema.get("properties").and_then(Value::as_object);
+        for (key, child) in object {
+            if let Some(child_schema) = properties.and_then(|properties| properties.get(key)) {
+                validate_schema_value(child, child_schema, &format!("{path}.{key}"))?;
+            } else if schema.get("additionalProperties") == Some(&Value::Bool(false)) {
+                return Err(format!("{path}.{key}: дополнительное поле запрещено"));
+            }
+        }
+    }
+
+    if let (Value::Array(items), Some(item_schema)) = (value, schema.get("items")) {
+        for (index, item) in items.iter().enumerate() {
+            validate_schema_value(item, item_schema, &format!("{path}[{index}]"))?;
+        }
+    }
+    Ok(())
+}
+
+fn value_matches_type(value: &Value, kind: &str) -> bool {
+    match kind {
+        "null" => value.is_null(),
+        "boolean" => value.is_boolean(),
+        "object" => value.is_object(),
+        "array" => value.is_array(),
+        "number" => value.is_number(),
+        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "string" => value.is_string(),
+        _ => true,
+    }
+}
+
+fn value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(number) if number.is_i64() || number.is_u64() => "integer",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
 /// Найти JSON Schema аргументов и вернуть schema конкретного свойства.
 /// Поддерживаются оба реально принимаемых API-формата:
 /// OpenAI `function.parameters` и Anthropic `input_schema`.
 fn property_schema<'a>(tools: Option<&'a Value>, name: &str, key: &str) -> Option<&'a Value> {
-    let tools = tools?.as_array()?;
-    tools.iter().find_map(|tool| {
-        let (tool_name, schema) = if let Some(function) = tool.get("function") {
-            (
-                function.get("name")?.as_str()?,
-                function.get("parameters")?,
-            )
-        } else {
-            (
-                tool.get("name")?.as_str()?,
-                tool.get("input_schema").or_else(|| tool.get("parameters"))?,
-            )
-        };
-        (tool_name == name)
-            .then(|| schema.get("properties")?.get(key))
-            .flatten()
-    })
+    tool_parameters(tool_definition(tools, name)?)?
+        .get("properties")?
+        .get(key)
 }
 
 fn property_requires_string(tools: Option<&Value>, name: &str, key: &str) -> bool {
@@ -187,35 +369,6 @@ fn property_requires_string(tools: Option<&Value>, name: &str, key: &str) -> boo
             has_string && only_string_or_null
         }
         _ => false,
-    }
-}
-
-/// JSON-формат tool call уже несёт типы явно, но маленькая модель может и там
-/// положить object в строковое поле. По контракту клиента важнее schema:
-/// сериализуем значение обратно в строку. Для Hermes это также страховка на
-/// случай альтернативной разметки, не прошедшей через `parse_hermes`.
-fn normalize_string_arguments(calls: &mut [(String, String)], tools: Option<&Value>) {
-    for (name, args) in calls {
-        let Ok(Value::Object(mut object)) = serde_json::from_str::<Value>(args) else {
-            continue;
-        };
-        let mut changed = false;
-        for (key, value) in &mut object {
-            if property_requires_string(tools, name, key) && !value.is_string() {
-                let serialized = match &*value {
-                    Value::Null => "null".to_string(),
-                    Value::Bool(value) => value.to_string(),
-                    Value::Number(value) => value.to_string(),
-                    Value::Array(_) | Value::Object(_) => value.to_string(),
-                    Value::String(value) => value.clone(),
-                };
-                *value = Value::String(serialized);
-                changed = true;
-            }
-        }
-        if changed {
-            *args = Value::Object(object).to_string();
-        }
     }
 }
 
@@ -548,7 +701,8 @@ mod tests {
                         "properties": {
                             "command": {"type": "string"},
                             "timeout": {"type": "integer"}
-                        }
+                        },
+                        "required": ["command"]
                     }
                 }
             },
@@ -561,7 +715,8 @@ mod tests {
                         "properties": {
                             "path": {"type": "string"},
                             "content": {"type": "string"}
-                        }
+                        },
+                        "required": ["path", "content"]
                     }
                 }
             }
@@ -596,14 +751,88 @@ mod tests {
     }
 
     #[test]
-    fn json_tool_call_object_is_coerced_to_declared_string() {
+    fn json_tool_call_wrong_declared_type_is_not_executable() {
         let tools = openai_tools_schema();
-        let (_, calls) = parse_tool_calls_with_schema(
+        let (text, calls) = parse_tool_calls_with_schema(
             "<tool_call>{\"name\":\"bash\",\"arguments\":{\"command\":{\"model\":\"brave\"}}}</tool_call>",
             Some(&tools),
         );
+        assert!(calls.is_empty());
+        assert!(text.contains("\"model\":\"brave\""));
+    }
+
+    #[test]
+    fn missing_required_argument_is_not_executable() {
+        let tools = openai_tools_schema();
+        let (text, calls) = parse_tool_calls_with_schema(
+            "<tool_call>{\"name\":\"write\",\"arguments\":{\"content\":\"body\"}}</tool_call>",
+            Some(&tools),
+        );
+        assert!(calls.is_empty());
+        assert!(text.contains("\"name\":\"write\""));
+        assert!(text.contains("\"content\":\"body\""));
+    }
+
+    #[test]
+    fn length_response_is_never_repaired_into_executable_call() {
+        let tools = openai_tools_schema();
+        let partial =
+            "<tool_call>{\"name\":\"write\",\"arguments\":{\"content\":\"body\"";
+        let (text, calls) = parse_tool_calls_for_response(partial, "length", Some(&tools));
+        assert!(calls.is_empty());
+        assert_eq!(text, partial);
+    }
+
+    #[test]
+    fn tool_markup_without_tools_is_plain_text() {
+        let output = "<tool_call>{\"name\":\"bash\",\"arguments\":{\"command\":\"ls\"}}</tool_call>";
+        let (text, calls) = parse_tool_calls_for_response(output, "stop", None);
+        assert!(calls.is_empty());
+        assert_eq!(text, output);
+    }
+
+    #[test]
+    fn incompatible_argument_type_is_not_executable() {
+        let tools = openai_tools_schema();
+        let (text, calls) = parse_tool_calls_with_schema(
+            "<tool_call>{\"name\":\"bash\",\"arguments\":{\"command\":\"ls\",\"timeout\":\"soon\"}}</tool_call>",
+            Some(&tools),
+        );
+        assert!(calls.is_empty());
+        assert!(text.contains("\"timeout\":\"soon\""));
+    }
+
+    #[test]
+    fn null_required_path_is_not_coerced_to_string() {
+        let tools = openai_tools_schema();
+        let (text, calls) = parse_tool_calls_with_schema(
+            "<tool_call>{\"name\":\"write\",\"arguments\":{\"path\":null,\"content\":\"body\"}}</tool_call>",
+            Some(&tools),
+        );
+        assert!(calls.is_empty());
+        assert!(text.contains("\"path\":null"));
+    }
+
+    #[test]
+    fn undeclared_tool_is_not_executable() {
+        let tools = openai_tools_schema();
+        let (text, calls) = parse_tool_calls_with_schema(
+            "<tool_call>{\"name\":\"delete_everything\",\"arguments\":{}}</tool_call>",
+            Some(&tools),
+        );
+        assert!(calls.is_empty());
+        assert!(text.contains("delete_everything"));
+    }
+
+    #[test]
+    fn hermes_removes_only_structural_boundary_newlines() {
+        let tools = openai_tools_schema();
+        let (_, calls) = parse_tool_calls_with_schema(
+            "<tool_call>\n<function=write>\n<parameter=path>\n/tmp/a.css\n</parameter>\n<parameter=content>\nline1\n\n</parameter>\n</function>\n</tool_call>",
+            Some(&tools),
+        );
         let args: Value = serde_json::from_str(&calls[0].1).unwrap();
-        assert_eq!(args["command"], "{\"model\":\"brave\"}");
+        assert_eq!(args["content"], "line1\n");
     }
 
     #[test]

@@ -745,6 +745,17 @@ mod tests {
     // Тесты гоняют env процесса — сериализуем вручную через один тест.
     #[test]
     fn from_env_defaults_and_required_keys() {
+        // get_env_var читает сперва чистое имя, потом QWEN36_*/YTTRI_*.
+        // С появлением CLI чистые имена стали основными, поэтому чистить
+        // надо обе формы: иначе API_KEYS из окружения запуска отменяет
+        // проверку «без ключей старт запрещён».
+        for name in [
+            "API_KEYS", "PROFILE", "MODEL", "HOST", "PORT", "CTX", "SLOTS",
+            "MEDIA_TEMP", "PREFIX_CACHE_MIB",
+        ] {
+            env::remove_var(name);
+            env::remove_var(format!("YTTRI_{name}"));
+        }
         env::remove_var("QWEN36_API_KEYS");
         assert!(Config::from_env().is_err(), "без API keys старт запрещён");
 

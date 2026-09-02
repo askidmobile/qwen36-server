@@ -14,6 +14,7 @@ impl Engine for MockEngine {
     async fn generate(&self, _request: InferenceRequest) -> anyhow::Result<mpsc::Receiver<StreamEvent>> {
         let (tx, rx) = mpsc::channel(1);
         let _ = tx.send(StreamEvent::Done {
+            ended_in_thinking: false,
             finish_reason: "stop".into(),
             usage: Default::default(),
         }).await;

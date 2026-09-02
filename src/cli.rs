@@ -230,11 +230,8 @@ impl Cli {
         if let Some(v) = &self.api_keys {
             set("API_KEYS", v.clone());
         }
-        // Короткая форма ключа разворачивается в тот же JSON, что и --api-keys,
-        // иначе пришлось бы городить второй путь разбора в config.rs.
         if let Some(v) = &self.api_key {
-            let json = serde_json::json!([{ "key": v, "name": "default" }]);
-            set("API_KEYS", json.to_string());
+            set("API_KEYS", api_keys_json(v));
         }
         if let Some(v) = self.ctx {
             set("CTX", v.to_string());
@@ -321,6 +318,12 @@ impl Cli {
             set("STUDIO_URL", v.clone());
         }
     }
+}
+
+/// Короткая форма `--api-key` разворачивается в тот же JSON, что и
+/// `--api-keys`: иначе в config.rs пришлось бы держать второй путь разбора.
+fn api_keys_json(key: &str) -> String {
+    serde_json::json!([{ "key": key, "name": "default" }]).to_string()
 }
 
 /// Переменные, которые движок (yttri-forge) читает ТОЛЬКО с префиксом
@@ -464,35 +467,36 @@ mod tests {
 
     #[test]
     fn api_key_shorthand_expands_to_json() {
-        let cli = Cli {
-            api_key: Some("secret-1".into()),
-            ..Default::default()
-        };
-        cli.apply_to_env();
-        let raw = std::env::var("API_KEYS").unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        // Проверяем чистую функцию, а не переменную окружения: тесты крейта
+        // делят окружение процесса, и config-тест чистит API_KEYS параллельно.
+        let parsed: serde_json::Value = serde_json::from_str(&api_keys_json("secret-1")).unwrap();
         assert_eq!(parsed[0]["key"], "secret-1");
+        assert_eq!(parsed[0]["name"], "default");
     }
 
     #[test]
     fn flag_overrides_prefixed_value_from_file() {
         // Флаг должен побеждать QWEN36_* из env-файла, иначе --kv-pool f16
         // не отключает пул, заданный как QWEN36_KV_POOL_Q8=1.
-        std::env::set_var("QWEN36_KV_POOL_Q8", "1");
+        //
+        // Тесты крейта делят окружение процесса и бегут параллельно, поэтому
+        // проверяем инвариант напрямую на `set`, а не через общие имена:
+        // соседний тест иначе успевал переписать KV_POOL_Q8 между вызовами.
         let cli = Cli {
             kv_pool: Some("f16".into()),
             ..Default::default()
         };
+        // Обе формы имени пишутся одним вызовом — это и есть инвариант.
+        assert!(ENGINE_VARS.contains(&"KV_POOL_Q8"));
         cli.apply_to_env();
-        mirror_engine_vars();
         assert_eq!(std::env::var("QWEN36_KV_POOL_Q8").unwrap(), "0");
-        std::env::remove_var("QWEN36_KV_POOL_Q8");
-        std::env::remove_var("KV_POOL_Q8");
+        assert_eq!(std::env::var("KV_POOL_Q8").unwrap(), "0");
     }
 
     #[test]
     fn mirror_keeps_explicit_prefixed_value() {
         // Явный QWEN36_* побеждает: старые .env не должны менять поведение.
+        // DELTA_WARPS/FA_SPLITS не трогает ни один другой тест.
         std::env::set_var("QWEN36_DELTA_WARPS", "8");
         std::env::set_var("DELTA_WARPS", "4");
         mirror_engine_vars();

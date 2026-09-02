@@ -24,10 +24,16 @@ impl Engine for CaptureEngine {
         self.requests.lock().unwrap().push(request);
         let (tx, rx) = tokio::sync::mpsc::channel(4);
         tokio::spawn(async move {
-            let _ = tx.send(StreamEvent::Delta("ответ".into())).await;
+            let _ = tx
+                .send(StreamEvent::Delta {
+                    text: "ответ".into(),
+                    logprobs: None,
+                })
+                .await;
             let _ = tx
                 .send(StreamEvent::Done {
                     finish_reason: "stop".into(),
+                    ended_in_thinking: false,
                     usage: GenerationUsage {
                         prompt_tokens: 12,
                         completion_tokens: 2,
@@ -79,6 +85,9 @@ fn app(engine: Arc<CaptureEngine>) -> axum::Router {
         hf_downloads: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         sampling: Arc::new(std::sync::RwLock::new(
             qwen36_server::config::SamplingDefaults::default(),
+        )),
+        sampling_policy: Arc::new(std::sync::RwLock::new(
+            qwen36_server::config::SamplingPolicy::default(),
         )),
         presets: Arc::new(std::sync::RwLock::new(
             qwen36_server::config::SamplingPresets::new(),

@@ -11,6 +11,7 @@ use tower::ServiceExt;
 
 struct MockEngine {
     deltas: Vec<String>,
+    finish_reason: String,
 }
 
 #[async_trait::async_trait]
@@ -24,13 +25,20 @@ impl Engine for MockEngine {
     ) -> anyhow::Result<tokio::sync::mpsc::Receiver<StreamEvent>> {
         let (tx, rx) = tokio::sync::mpsc::channel(8);
         let deltas = self.deltas.clone();
+        let finish_reason = self.finish_reason.clone();
         tokio::spawn(async move {
             for d in deltas {
-                let _ = tx.send(StreamEvent::Delta(d)).await;
+                let _ = tx
+                    .send(StreamEvent::Delta {
+                        text: d,
+                        logprobs: None,
+                    })
+                    .await;
             }
             let _ = tx
                 .send(StreamEvent::Done {
-                    finish_reason: "stop".into(),
+                    finish_reason,
+                    ended_in_thinking: false,
                     usage: GenerationUsage {
                         prompt_tokens: 10,
                         completion_tokens: 3,
@@ -54,8 +62,13 @@ impl Engine for MockEngine {
 }
 
 fn app(deltas: Vec<&str>) -> axum::Router {
+    app_with_finish(deltas, "stop")
+}
+
+fn app_with_finish(deltas: Vec<&str>, finish_reason: &str) -> axum::Router {
     let mock: Arc<dyn Engine> = Arc::new(MockEngine {
         deltas: deltas.into_iter().map(String::from).collect(),
+        finish_reason: finish_reason.into(),
     });
     let switcher = Arc::new(qwen36_server::engine_swap::SwappableEngine::new(
         mock,
@@ -94,12 +107,49 @@ fn app(deltas: Vec<&str>) -> axum::Router {
         sampling: Arc::new(std::sync::RwLock::new(
             qwen36_server::config::SamplingDefaults::default(),
         )),
+        sampling_policy: Arc::new(std::sync::RwLock::new(
+            qwen36_server::config::SamplingPolicy::default(),
+        )),
         presets: Arc::new(std::sync::RwLock::new(
             qwen36_server::config::SamplingPresets::new(),
         )),
         env_file: std::path::PathBuf::from(".env"),
     })
 }
+
+fn openai_write_tool() -> serde_json::Value {
+    serde_json::json!([{
+        "type": "function",
+        "function": {
+            "name": "write",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"}
+                },
+                "required": ["path", "content"]
+            }
+        }
+    }])
+}
+
+fn anthropic_write_tool() -> serde_json::Value {
+    serde_json::json!([{
+        "name": "write",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "content": {"type": "string"}
+            },
+            "required": ["path", "content"]
+        }
+    }])
+}
+
+const TRUNCATED_WRITE_CALL: &str =
+    "<tool_call>{\"name\":\"write\",\"arguments\":{\"content\":\"body\"";
 
 fn authed(req: Request<Body>) -> Request<Body> {
     let (mut parts, body) = req.into_parts();
@@ -206,8 +256,12 @@ async fn zero_output_tokens_are_bad_requests() {
     }
 }
 
+/// При серверной политике сэмплинга (SAMPLING_LOCK=1, умолчание) клиентские
+/// temperature/top_p/min_p/penalties отбрасываются ещё до валидации, поэтому
+/// заведомо неверные значения не делают запрос неверным — источник истины
+/// карточка модели. Проверять их отказом можно только при снятом замке.
 #[tokio::test]
-async fn invalid_chat_sampling_parameters_are_bad_requests() {
+async fn invalid_chat_sampling_parameters_are_ignored_under_locked_policy() {
     for body in [
         serde_json::json!({"messages": [], "temperature": -0.1}),
         serde_json::json!({"messages": [], "top_p": 0.0}),
@@ -215,12 +269,28 @@ async fn invalid_chat_sampling_parameters_are_bad_requests() {
         serde_json::json!({"messages": [], "presence_penalty": 2.1}),
         serde_json::json!({"messages": [], "repetition_penalty": 0.0}),
     ] {
+        let shown = body.to_string();
         let resp = app(vec![])
             .oneshot(authed(json_req("POST", "/v1/chat/completions", body)))
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(resp.status(), StatusCode::OK, "{shown}");
     }
+}
+
+/// max_tokens замок не трогает: клиентское значение проходит как есть,
+/// поэтому ноль обязан отвергаться.
+#[tokio::test]
+async fn zero_max_tokens_is_bad_request() {
+    let resp = app(vec![])
+        .oneshot(authed(json_req(
+            "POST",
+            "/v1/chat/completions",
+            serde_json::json!({"messages": [], "max_tokens": 0}),
+        )))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -291,6 +361,40 @@ async fn chat_completions_non_stream() {
 }
 
 #[tokio::test]
+async fn chat_completions_accepts_loaded_model_with_quant_suffix() {
+    let resp = app(vec!["ok"])
+        .oneshot(authed(json_req(
+            "POST",
+            "/v1/chat/completions",
+            serde_json::json!({
+                "model": "QWEN3.6-27B-Q2_K_XL",
+                "messages": [{"role": "user", "content": "hi"}],
+            }),
+        )))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn chat_completions_rejects_a_different_model() {
+    let resp = app(vec!["must not run"])
+        .oneshot(authed(json_req(
+            "POST",
+            "/v1/chat/completions",
+            serde_json::json!({
+                "model": "another-model-Q6_K",
+                "messages": [{"role": "user", "content": "hi"}],
+            }),
+        )))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let v: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
+    assert_eq!(v["error"]["type"], "model_not_loaded");
+}
+
+#[tokio::test]
 async fn chat_completions_stream_has_done() {
     let resp = app(vec!["a", "b"])
         .oneshot(authed(json_req(
@@ -337,6 +441,93 @@ async fn chat_completions_tool_calls() {
         "get_weather"
     );
     assert_eq!(v["choices"][0]["message"]["content"], "let me check");
+}
+
+#[tokio::test]
+async fn openai_length_does_not_execute_truncated_tool_call() {
+    let resp = app_with_finish(vec![TRUNCATED_WRITE_CALL], "length")
+        .oneshot(authed(json_req(
+            "POST",
+            "/v1/chat/completions",
+            serde_json::json!({
+                "messages": [{"role": "user", "content": "write"}],
+                "tools": openai_write_tool(),
+            }),
+        )))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
+    assert_eq!(v["choices"][0]["finish_reason"], "length");
+    assert!(v["choices"][0]["message"]["tool_calls"].is_null());
+    assert!(v["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap()
+        .contains("<tool_call>"));
+}
+
+#[tokio::test]
+async fn openai_stream_length_does_not_execute_truncated_tool_call() {
+    let resp = app_with_finish(vec![TRUNCATED_WRITE_CALL], "length")
+        .oneshot(authed(json_req(
+            "POST",
+            "/v1/chat/completions",
+            serde_json::json!({
+                "messages": [{"role": "user", "content": "write"}],
+                "stream": true,
+                "thinking": false,
+                "tools": openai_write_tool(),
+            }),
+        )))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp).await;
+    assert!(body.contains("<tool_call>"), "body: {body}");
+    assert!(body.contains("\"finish_reason\":\"length\""), "body: {body}");
+    assert!(!body.contains("\"tool_calls\""), "body: {body}");
+}
+
+#[tokio::test]
+async fn complete_tool_call_missing_required_argument_is_plain_text() {
+    let output =
+        "<tool_call>{\"name\":\"write\",\"arguments\":{\"content\":\"body\"}}</tool_call>";
+    let resp = app(vec![output])
+        .oneshot(authed(json_req(
+            "POST",
+            "/v1/chat/completions",
+            serde_json::json!({
+                "messages": [{"role": "user", "content": "write"}],
+                "tools": openai_write_tool(),
+            }),
+        )))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
+    assert_eq!(v["choices"][0]["finish_reason"], "stop");
+    assert!(v["choices"][0]["message"]["tool_calls"].is_null());
+    assert!(v["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap()
+        .contains("\"name\":\"write\""));
+}
+
+#[tokio::test]
+async fn tool_markup_without_declared_tools_stays_content() {
+    let output = "<tool_call>{\"name\":\"write\",\"arguments\":{}}</tool_call>";
+    let resp = app(vec![output])
+        .oneshot(authed(json_req(
+            "POST",
+            "/v1/chat/completions",
+            serde_json::json!({"messages": [{"role": "user", "content": "quote it"}]}),
+        )))
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
+    assert_eq!(v["choices"][0]["finish_reason"], "stop");
+    assert!(v["choices"][0]["message"]["tool_calls"].is_null());
+    assert_eq!(v["choices"][0]["message"]["content"], output);
 }
 
 #[tokio::test]
@@ -431,7 +622,56 @@ async fn anthropic_stream() {
 }
 
 #[tokio::test]
-async fn switch_model_rejects_too_many_slots_before_unloading_current_engine() {
+async fn anthropic_length_does_not_execute_truncated_tool_call() {
+    let resp = app_with_finish(vec![TRUNCATED_WRITE_CALL], "length")
+        .oneshot(authed(json_req(
+            "POST",
+            "/v1/messages",
+            serde_json::json!({
+                "max_tokens": 100,
+                "messages": [{"role": "user", "content": "write"}],
+                "tools": anthropic_write_tool(),
+            }),
+        )))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
+    assert_eq!(v["stop_reason"], "max_tokens");
+    assert_eq!(v["content"][0]["type"], "text");
+    assert!(v["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("<tool_call>"));
+    assert!(v["content"].as_array().unwrap().iter().all(|block| block["type"] != "tool_use"));
+}
+
+#[tokio::test]
+async fn anthropic_stream_length_does_not_execute_truncated_tool_call() {
+    let resp = app_with_finish(vec![TRUNCATED_WRITE_CALL], "length")
+        .oneshot(authed(json_req(
+            "POST",
+            "/v1/messages",
+            serde_json::json!({
+                "max_tokens": 100,
+                "stream": true,
+                "messages": [{"role": "user", "content": "write"}],
+                "tools": anthropic_write_tool(),
+            }),
+        )))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp).await;
+    assert!(body.contains("<tool_call>"), "body: {body}");
+    assert!(body.contains("\"stop_reason\":\"max_tokens\""), "body: {body}");
+    assert!(!body.contains("\"type\":\"tool_use\""), "body: {body}");
+}
+
+/// Ручки смены модели на живом сервере сняты в 15427c3: модель задаётся при
+/// запуске. Проверяем, что маршрута нет и загруженная модель не меняется.
+#[tokio::test]
+async fn switch_model_endpoint_is_gone_and_model_stays_loaded() {
     let app = app(vec![]);
     let resp = app
         .clone()
@@ -442,7 +682,7 @@ async fn switch_model_rejects_too_many_slots_before_unloading_current_engine() {
         )))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
     let resp = app
         .oneshot(authed(
