@@ -74,6 +74,14 @@ pub struct Cli {
     #[arg(short = 'c', long, value_name = "N")]
     pub ctx: Option<usize>,
 
+    /// Потолок окна внимания, токенов (умолчание 81920).
+    ///
+    /// Отдельно от --ctx: `--ctx` объявляет контекст клиенту, а это —
+    /// сколько движок реально держит в окне. Если потолок меньше,
+    /// префилл падает на границе: «narrow invalid args start + len > dim_len».
+    #[arg(long, value_name = "N")]
+    pub context_limit: Option<usize>,
+
     /// Число параллельных слотов генерации.
     #[arg(short = 's', long, value_name = "N")]
     pub slots: Option<usize>,
@@ -236,6 +244,9 @@ impl Cli {
         if let Some(v) = self.ctx {
             set("CTX", v.to_string());
         }
+        if let Some(v) = self.context_limit {
+            set("CONTEXT_LIMIT", v.to_string());
+        }
         if let Some(v) = self.slots {
             set("SLOTS", v.to_string());
         }
@@ -343,6 +354,7 @@ const ENGINE_VARS: &[&str] = &[
     "GPU_ONLY",
     "MOE_BACKEND",
     "PREFILL_CHUNK",
+    "CONTEXT_LIMIT",
     // KV-кеш и память
     "KV_POOL_Q8",
     "KV_CACHE_DTYPE",
