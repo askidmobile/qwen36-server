@@ -328,15 +328,19 @@ pub fn default_presets_for_model(model_name: &str) -> SamplingPresets {
     match sampling_family_for_model(model_name) {
         "ornith-1.5" => {
             // Official Ornith 1.5 card: general 1.0/.95/20/presence 1.5;
-            // precise coding .6/.95/20/presence 0.0.
-            // repetition_penalty 1.05 сверх карточки: она его не задаёт, а без
-            // штрафа модель зацикливалась на самопроверке. 1.05 — минимум,
-            // который рвёт буквальный повтор, не искажая нормальный текст.
-            let general = preset_rp(1.0, 0.95, 20, 1.5, 1.05);
+            // precise coding .6/.95/20/presence 0.0; repetition_penalty 1.0.
+            //
+            // Штраф за повтор НЕ трогаем, хотя соблазн есть: пробовали 1.05
+            // против зацикливания — сломало shell-команды. Штраф давит каждый
+            // уже встреченный токен, а `$`, `{`, `}` в скрипте повторяются
+            // десятки раз, и символ просто выпадает: `$NINEROUTER_KEY` стал
+            // `NINEROUTER_KEY`, `'{"model":...}'` потерял скобки. От петель
+            // защищает detect_loop в engine_batched, а не сэмплинг.
+            let general = preset(1.0, 0.95, 20, 1.5);
             insert_modes(
                 &mut m,
                 general.clone(),
-                preset_rp(0.6, 0.95, 20, 0.0, 1.05),
+                preset(0.6, 0.95, 20, 0.0),
                 general.clone(),
                 general,
             );
@@ -752,11 +756,11 @@ mod tests {
         }
 
         let ornith = default_presets_for_model("Ornith-1.5-9B-Q6_K.gguf");
-        // Штраф 1.05 сверх карточки — защита от зацикливания, см. preset_rp.
-        assert_preset_rp(&ornith, "thinking", 1.0, 0.95, 20, 1.5, 1.05);
-        assert_preset_rp(&ornith, "thinking-coding", 0.6, 0.95, 20, 0.0, 1.05);
-        assert_preset_rp(&ornith, "instruct", 1.0, 0.95, 20, 1.5, 1.05);
-        assert_preset_rp(&ornith, "instruct-reasoning", 1.0, 0.95, 20, 1.5, 1.05);
+        // repetition_penalty строго 1.0 как в карточке: 1.05 ломал shell-код.
+        assert_preset(&ornith, "thinking", 1.0, 0.95, 20, 1.5);
+        assert_preset(&ornith, "thinking-coding", 0.6, 0.95, 20, 0.0);
+        assert_preset(&ornith, "instruct", 1.0, 0.95, 20, 1.5);
+        assert_preset(&ornith, "instruct-reasoning", 1.0, 0.95, 20, 1.5);
 
         let qwen38 = default_presets_for_model("Qwen3.8-27B-Q8_0.gguf");
         assert_preset(&qwen38, "thinking", 1.0, 0.95, 20, 0.0);
