@@ -1,5 +1,24 @@
 # Запуск сервера
 
+Бинарь называется **`yforge`** (`yforge.exe` на Windows). Логи идут в
+stdout/stderr — перенаправляйте средствами оболочки, как у `llama.cpp`.
+
+Настройки берутся из трёх источников, приоритет по убыванию:
+флаги командной строки → окружение процесса → env-файл (`--env`).
+Имена переменных без префикса (`CTX`, `SLOTS`), устаревшие `QWEN36_*`
+по-прежнему принимаются. Полный список флагов — `yforge --help`
+и [README.md](../README.md).
+
+```bat
+:: то же самое тремя способами
+yforge.exe --model D:\Models\m.gguf --api-key KEY --ctx 131072 --slots 1
+set CTX=131072 && yforge.exe --model D:\Models\m.gguf --api-key KEY
+yforge.exe --env D:\configs\prod.env
+
+:: проверить итоговую конфигурацию, не загружая модель
+yforge.exe --env D:\configs\prod.env --dry-run
+```
+
 ## Раскладка
 
 | ОС | Скрипт | Что делает |
@@ -17,7 +36,7 @@
 
 Рабочая директория: `D:\Projects\yttri-inference\qwen36-server` (копия этого репо).
 Секреты: `D:\Projects\yttri-inference\qwen36-server\.env` (в git не ходит, бэкап `.env.bak-ornith`).
-Экешник: `D:\Projects\yttri-inference\qwen36-server\target\release\qwen36-server.exe` — всегда свежее корневого `D:\Projects\yttri-inference\target\release`, сверяйте даты.
+Экзешник: `D:\Projects\yttri-inference\qwen36-server\target\release\yforge.exe` — всегда свежее корневого `D:\Projects\yttri-inference\target\release`, сверяйте даты.
 Модели: `D:\Models\<org>\<repo>\<file>.gguf`.
 
 ### Как сервер живёт
@@ -54,15 +73,26 @@ netstat -ano | findstr :18099
 ### Ключи .env, которые трогаем при смене модели
 
 ```env
-QWEN36_MODEL=D:\Models\unsloth\Qwen3.8-27B-GGUF\Qwen3.8-27B-UD-IQ2_XXS.gguf
-QWEN36_MTP=1
-QWEN36_MTP_PATH=D:\Models\unsloth\Qwen3.8-27B-GGUF\mtp-Qwen3.8-27B-Q4_0.gguf
-QWEN36_CTX=131072
-QWEN36_SLOTS=4
+MODEL=D:\Models\unsloth\Qwen3.8-27B-GGUF\Qwen3.8-27B-UD-IQ2_XXS.gguf
+MTP=1
+MTP_PATH=D:\Models\unsloth\Qwen3.8-27B-GGUF\mtp-Qwen3.8-27B-Q4_0.gguf
+CTX=131072
+SLOTS=4
 GPU_ONLY=1
+KV_POOL_Q8=1
+CUDA_GRAPHS=1
 ```
 
-`QWEN36_MTP_PATH` — draft-модель для спекуляции; работает и без профиля-манифеста.
+Те же значения флагами, без правки файла:
+
+```bat
+yforge.exe --env .env --model D:\Models\...\Qwen3.8-27B-UD-IQ2_XXS.gguf --mtp 1
+```
+
+`MTP_PATH` — draft-модель для спекуляции; работает и без профиля-манифеста.
+`KV_POOL_Q8=1` (`--kv-pool q8`) вдвое сокращает постоянный пул KV — он
+выделяется на всё окно сразу при старте и является главной статьёй VRAM
+после весов.
 VRAM-планер сам ужмёт ctx/slots под 12 GB — следить за `[vram] plan` в логе.
 
 ### Smoke-проверка после перезапуска

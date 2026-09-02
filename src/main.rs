@@ -1,16 +1,21 @@
-//! Бинарь qwen36-server: env QWEN36_* → engine → HTTP (три API + веб-чат).
+//! Бинарь `yforge`: CLI/env/env-файл → engine → HTTP (три API + веб-чат).
 //!
-//! Engine выбирается по QWEN36_SLOTS:
+//! Настройки берутся из трёх источников по убыванию приоритета: флаги
+//! командной строки, окружение процесса, env-файл (`--env`). Разбор — в
+//! [`qwen36_server::cli`].
+//!
+//! Engine выбирается по `SLOTS`:
 //! - qwen35/qwen35moe → BatchedEngine при любом числе слотов (BD-007).
 //!   Одиночный слот тоже идёт сюда: paged-пул пропорционален числу слотов,
 //!   поэтому SLOTS=1 вдвое дешевле по VRAM, а CandleEngine отдавал бы CUDA-графы
-//!   вместе со скоростью декода. Откат — QWEN36_FORCE_CANDLE_ENGINE=1.
+//!   вместе со скоростью декода. Откат — FORCE_CANDLE_ENGINE=1.
 //! - остальные архитектуры → CandleEngine (single-slot, Mutex).
 
 use anyhow::Result;
-use axum::Router;
+use clap::Parser;
 use qwen36_server::{
     api::{build_router, AppState},
+    cli::{mirror_engine_vars, Cli},
     config::Config,
     engine::{CandleEngine, Engine},
     engine_batched::{BatchConfig, BatchedEngine},
@@ -18,11 +23,31 @@ use qwen36_server::{
 };
 use std::sync::Arc;
 
+/// Строка лога в стиле llama.cpp: `yforge: ключ = значение`.
+macro_rules! log_kv {
+    ($key:expr, $($arg:tt)*) => {
+        println!("yforge: {:<22} = {}", $key, format_args!($($arg)*))
+    };
+}
+
+/// Заголовок секции: пустая строка + подпись.
+fn log_section(title: &str) {
+    println!("\nyforge: === {title} ===");
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cli = Cli::parse();
+    // Флаги — в окружение ДО чтения env-файла: файл пишет только незанятые
+    // имена, поэтому приоритет «флаг > окружение > файл» получается сам.
+    cli.apply_to_env();
+
     #[cfg(feature = "cuda")]
     qwen36_server::engine::cuda_prefer_blocking_sync();
     let cfg = Config::load()?;
+    // Движок в форке читает только QWEN36_*; чистые имена зеркалим после
+    // загрузки файла, когда все три источника уже слиты в окружение.
+    let mirrored = mirror_engine_vars();
     let profile = cfg.resolved_profile.clone();
     let media = Arc::new(qwen36_server::media::MediaService::new(
         qwen36_server::media::MediaConfig {
@@ -34,8 +59,20 @@ async fn main() -> Result<()> {
         media.store.clone(),
         std::time::Duration::from_secs(60),
     );
-    eprintln!(
-        "[qwen36] api keys: {} ({})",
+    log_section("конфигурация");
+    log_kv!("build", "{} ({})", env!("CARGO_PKG_VERSION"), backend_name());
+    log_kv!("env file", "{}", cfg.env_file.display());
+    if mirrored > 0 {
+        log_kv!("engine vars", "{mirrored} проброшено как QWEN36_*");
+    }
+    log_kv!("model", "{}", cfg.model.display());
+    if let Some(profile) = &cfg.profile {
+        log_kv!("profile", "{}", profile.display());
+    }
+    log_kv!("listen", "{}:{}", cfg.host, cfg.port);
+    log_kv!(
+        "api keys",
+        "{} ({})",
         cfg.api_keys.len(),
         cfg.api_keys
             .iter()
@@ -43,10 +80,52 @@ async fn main() -> Result<()> {
             .collect::<Vec<_>>()
             .join(", ")
     );
-    eprintln!(
-        "[qwen36] model={:?} profile={:?} ctx={} slots={} listen={}:{}",
-        cfg.model, cfg.profile, cfg.ctx, cfg.slots, cfg.host, cfg.port
+    log_kv!("n_ctx", "{}", cfg.ctx);
+    log_kv!("n_slots", "{}", cfg.slots);
+    log_kv!("n_batch", "{}", cfg.batch_size);
+    log_kv!("max_tokens", "{}", cfg.sampling.max_tokens);
+    log_kv!("gpu_layers", "{}", cfg.gpu_layers);
+    log_kv!("kv_cache_type", "{}", cfg.kv_cache_type);
+    log_kv!(
+        "kv_pool",
+        "{}",
+        match std::env::var("QWEN36_KV_POOL_Q8").as_deref() {
+            Ok("1") => "q8 (int8, вдвое меньше VRAM)",
+            _ => "f16",
+        }
     );
+    log_kv!(
+        "cuda_graphs",
+        "{}",
+        match std::env::var("QWEN36_CUDA_GRAPHS").as_deref() {
+            Ok("1") => "включены",
+            _ => "выключены",
+        }
+    );
+    log_kv!(
+        "prefix_cache",
+        "{}",
+        if cfg.prefix_cache_mib == 0 {
+            "выключен".to_string()
+        } else {
+            format!("{} MiB", cfg.prefix_cache_mib)
+        }
+    );
+    log_kv!("flash_attn", "{}", if cfg.flash_attn { "1" } else { "0" });
+    log_kv!("req_timeout", "{} s", cfg.req_timeout);
+    log_kv!(
+        "sampling",
+        "temp={} top_p={} top_k={} thinking={}",
+        cfg.sampling.temperature,
+        cfg.sampling.top_p,
+        cfg.sampling.top_k,
+        cfg.sampling.thinking
+    );
+
+    if cli.dry_run {
+        println!("\nyforge: --dry-run: модель не загружается, выход");
+        return Ok(());
+    }
 
     let architecture = qwen36_server::engine::gguf_architecture(&cfg.model)?;
     let qwen35 = matches!(architecture.as_str(), "qwen35" | "qwen35moe");
@@ -55,7 +134,10 @@ async fn main() -> Result<()> {
     // 12 ГБ это прямо удваивает достижимый контекст. Раньше одиночный слот
     // уходил на CandleEngine и терял CUDA-графы вместе со скоростью декода.
     // QWEN36_FORCE_CANDLE_ENGINE=1 возвращает прежний путь для отладки.
-    let force_candle = std::env::var("QWEN36_FORCE_CANDLE_ENGINE").as_deref() == Ok("1");
+    let force_candle = std::env::var("FORCE_CANDLE_ENGINE")
+        .or_else(|_| std::env::var("QWEN36_FORCE_CANDLE_ENGINE"))
+        .as_deref()
+        == Ok("1");
     let engine: Arc<dyn Engine> = if qwen35 && !force_candle {
         let bcfg = BatchConfig {
             model_path: cfg.model.to_string_lossy().into_owned(),
@@ -96,7 +178,8 @@ async fn main() -> Result<()> {
                 // Тонкий MTP-артефакт без полного профиля: эксперименты и
                 // модели, для которых манифест ещё не собран.
                 .or_else(|| {
-                    std::env::var("QWEN36_MTP_PATH")
+                    std::env::var("MTP_PATH")
+                        .or_else(|_| std::env::var("QWEN36_MTP_PATH"))
                         .ok()
                         .filter(|p| !p.is_empty())
                         .map(std::path::PathBuf::from)
@@ -115,10 +198,11 @@ async fn main() -> Result<()> {
     // Mutably wrapped: unload_model clears it to free CUDA context + VRAM.
     let cuda_device = std::sync::Arc::new(std::sync::RwLock::new(cuda_device));
     let info = engine.model_info();
-    eprintln!(
-        "[qwen36] loaded: id={} quant={} ctx={} slots={}",
-        info.id, info.quant, info.context_length, info.slots
-    );
+    log_section("модель загружена");
+    log_kv!("id", "{}", info.id);
+    log_kv!("quant", "{}", info.quant);
+    log_kv!("n_ctx (факт)", "{}", info.context_length);
+    log_kv!("n_slots (факт)", "{}", info.slots);
 
     // Корень сканирования моделей: MODELS_DIR (или QWEN36_MODELS_DIR) или родитель директории
     // модели (D:\Models\org\repo\model.gguf → D:\Models).
@@ -157,8 +241,24 @@ async fn main() -> Result<()> {
     };
     let app = build_router(state)
         .merge(qwen36_server::api::proxy::proxy_router(cfg.studio_url.clone()));
-    eprintln!("[qwen36] studio proxy → {}", cfg.studio_url);
     let listener = tokio::net::TcpListener::bind(format!("{}:{}", cfg.host, cfg.port)).await?;
+    log_section("сервер запущен");
+    log_kv!("studio proxy", "{}", cfg.studio_url);
+    log_kv!("OpenAI API", "http://{}:{}/v1", cfg.host, cfg.port);
+    log_kv!("Anthropic API", "http://{}:{}/v1/messages", cfg.host, cfg.port);
+    log_kv!("WebUI", "http://{}:{}/", cfg.host, cfg.port);
+    println!("\nyforge: готов принимать запросы");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Имя бекенда для строки версии — как `llama.cpp` печатает свой билд.
+fn backend_name() -> &'static str {
+    if cfg!(feature = "cuda") {
+        "CUDA"
+    } else if cfg!(feature = "metal") {
+        "Metal"
+    } else {
+        "CPU"
+    }
 }

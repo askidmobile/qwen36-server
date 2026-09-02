@@ -3,6 +3,7 @@
 
 pub mod component_manager;
 pub mod chat_template;
+pub mod cli;
 pub mod config;
 pub mod engine;
 pub mod engine_swap;

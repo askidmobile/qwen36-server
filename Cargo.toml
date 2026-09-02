@@ -2,7 +2,13 @@
 name = "qwen36-server"
 version = "0.1.0"
 edition = "2021"
-description = "Qwen3.6-27B GGUF inference server на yttri-forge (BD-002)"
+description = "Yttri Forge — сервер локального инференса GGUF (Qwen 3.5/3.6/3.8, Ornith)"
+
+# Имя исполняемого файла: yforge(.exe). Крейт остаётся qwen36-server, чтобы не
+# ломать `use qwen36_server::...` в тестах и внешних потребителях библиотеки.
+[[bin]]
+name = "yforge"
+path = "src/main.rs"
 
 [dependencies]
 # Форк лежит соседней директорией (macOS/Windows/Linux одинаково):
