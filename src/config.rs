@@ -254,13 +254,27 @@ fn preset(
     top_k: usize,
     presence_penalty: f32,
 ) -> SamplingPresetValues {
+    preset_rp(temperature, top_p, top_k, presence_penalty, 1.0)
+}
+
+/// То же, но с явным repetition_penalty. Нужен там, где карточка модели не
+/// задаёт штраф, а без него генерация уходит в петлю: наблюдалось на Ornith
+/// 1.5 — 15 000 токенов повтора после того, как модель заметила свою опечатку
+/// и начала бесконечно себя перепроверять.
+fn preset_rp(
+    temperature: f32,
+    top_p: f32,
+    top_k: usize,
+    presence_penalty: f32,
+    repetition_penalty: f32,
+) -> SamplingPresetValues {
     SamplingPresetValues {
         temperature,
         top_p,
         top_k,
         min_p: 0.0,
         presence_penalty,
-        repetition_penalty: 1.0,
+        repetition_penalty,
     }
 }
 
@@ -315,11 +329,14 @@ pub fn default_presets_for_model(model_name: &str) -> SamplingPresets {
         "ornith-1.5" => {
             // Official Ornith 1.5 card: general 1.0/.95/20/presence 1.5;
             // precise coding .6/.95/20/presence 0.0.
-            let general = preset(1.0, 0.95, 20, 1.5);
+            // repetition_penalty 1.05 сверх карточки: она его не задаёт, а без
+            // штрафа модель зацикливалась на самопроверке. 1.05 — минимум,
+            // который рвёт буквальный повтор, не искажая нормальный текст.
+            let general = preset_rp(1.0, 0.95, 20, 1.5, 1.05);
             insert_modes(
                 &mut m,
                 general.clone(),
-                preset(0.6, 0.95, 20, 0.0),
+                preset_rp(0.6, 0.95, 20, 0.0, 1.05),
                 general.clone(),
                 general,
             );
@@ -676,13 +693,31 @@ mod tests {
         top_k: usize,
         presence_penalty: f32,
     ) {
+        assert_preset_rp(presets, name, temperature, top_p, top_k, presence_penalty, 1.0)
+    }
+
+    /// Ornith 1.5 намеренно идёт со штрафом 1.05: карточка его не задаёт, а без
+    /// него генерация зацикливалась (15 000 токенов повтора на самопроверке).
+    #[allow(clippy::too_many_arguments)]
+    fn assert_preset_rp(
+        presets: &SamplingPresets,
+        name: &str,
+        temperature: f32,
+        top_p: f32,
+        top_k: usize,
+        presence_penalty: f32,
+        repetition_penalty: f32,
+    ) {
         let value = presets.get(name).unwrap_or_else(|| panic!("missing preset {name}"));
         assert_eq!(value.temperature, temperature, "{name}.temperature");
         assert_eq!(value.top_p, top_p, "{name}.top_p");
         assert_eq!(value.top_k, top_k, "{name}.top_k");
         assert_eq!(value.min_p, 0.0, "{name}.min_p");
         assert_eq!(value.presence_penalty, presence_penalty, "{name}.presence_penalty");
-        assert_eq!(value.repetition_penalty, 1.0, "{name}.repetition_penalty");
+        assert_eq!(
+            value.repetition_penalty, repetition_penalty,
+            "{name}.repetition_penalty"
+        );
     }
 
     #[test]
@@ -717,10 +752,11 @@ mod tests {
         }
 
         let ornith = default_presets_for_model("Ornith-1.5-9B-Q6_K.gguf");
-        assert_preset(&ornith, "thinking", 1.0, 0.95, 20, 1.5);
-        assert_preset(&ornith, "thinking-coding", 0.6, 0.95, 20, 0.0);
-        assert_preset(&ornith, "instruct", 1.0, 0.95, 20, 1.5);
-        assert_preset(&ornith, "instruct-reasoning", 1.0, 0.95, 20, 1.5);
+        // Штраф 1.05 сверх карточки — защита от зацикливания, см. preset_rp.
+        assert_preset_rp(&ornith, "thinking", 1.0, 0.95, 20, 1.5, 1.05);
+        assert_preset_rp(&ornith, "thinking-coding", 0.6, 0.95, 20, 0.0, 1.05);
+        assert_preset_rp(&ornith, "instruct", 1.0, 0.95, 20, 1.5, 1.05);
+        assert_preset_rp(&ornith, "instruct-reasoning", 1.0, 0.95, 20, 1.5, 1.05);
 
         let qwen38 = default_presets_for_model("Qwen3.8-27B-Q8_0.gguf");
         assert_preset(&qwen38, "thinking", 1.0, 0.95, 20, 0.0);

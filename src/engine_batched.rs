@@ -141,6 +141,8 @@ struct SlotBinding {
     stable_toks: usize,
     stable_len: usize,
     stop_hit: bool,
+    /// Генерация зациклилась: один и тот же кусок повторяется без конца.
+    looped: bool,
     cancelled: bool,
     last_progress: Instant,
     usage: MediaUsage,
@@ -1092,9 +1094,71 @@ fn drain_after_step(
         if cut_at.is_some() {
             b.stop_hit = true;
         }
+        // Зацикливание: модель повторяет один и тот же блок токенов и без
+        // потолка max_tokens не остановится. Наблюдалось вживую — 15 000
+        // токенов подряд после того, как модель заметила свою же опечатку и
+        // ушла в бесконечную самопроверку. repetition_penalty у карточки
+        // Ornith равен 1.0, то есть штраф выключен и не мешает повтору.
+        //
+        // Проверяем хвост: если последние N токенов встречались подряд
+        // MIN_REPEATS раз, дальше смысла нет. Порог с запасом: осмысленный
+        // текст (списки, таблицы, повторяющаяся разметка) даёт совпадения
+        // короткие и не подряд.
+        if !b.stop_hit && !b.looped && loop_guard_enabled() {
+            if let Some(period) = detect_loop(generated) {
+                b.looped = true;
+                b.stop_hit = true;
+                eprintln!(
+                    "[loop] slot {idx}: генерация зациклилась (период {period} токенов,                      сгенерировано {}), обрываем",
+                    generated.len()
+                );
+            }
+        }
         slot_emitted_toks.insert(idx, generated.len());
     }
     HOST_DRAIN_NS.fetch_add(t_drain.elapsed().as_nanos() as u64, Ordering::Relaxed);
+}
+
+/// Минимум повторов подряд, при котором хвост считается петлёй.
+const LOOP_MIN_REPEATS: usize = 4;
+/// Максимальная длина повторяющегося блока, которую ищем.
+const LOOP_MAX_PERIOD: usize = 96;
+/// Раньше этого числа токенов не смотрим: короткий ответ с повторами
+/// (список, таблица) — норма, а не петля.
+const LOOP_MIN_TOKENS: usize = 256;
+
+/// Сторож зацикливания. `LOOP_GUARD=0` выключает.
+fn loop_guard_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("LOOP_GUARD")
+            .or_else(|_| std::env::var("QWEN36_LOOP_GUARD"))
+            .as_deref()
+            != Ok("0")
+    })
+}
+
+/// Период повторяющегося хвоста, если генерация зациклилась.
+///
+/// Хвост длиной `period` должен повториться подряд `LOOP_MIN_REPEATS` раз.
+/// Возвращает самый короткий такой период — он точнее описывает петлю.
+fn detect_loop(generated: &[u32]) -> Option<usize> {
+    let n = generated.len();
+    if n < LOOP_MIN_TOKENS {
+        return None;
+    }
+    for period in 1..=LOOP_MAX_PERIOD.min(n / LOOP_MIN_REPEATS) {
+        let need = period * LOOP_MIN_REPEATS;
+        if n < need {
+            break;
+        }
+        let tail = &generated[n - need..];
+        let first = &tail[..period];
+        if tail.chunks_exact(period).all(|c| c == first) {
+            return Some(period);
+        }
+    }
+    None
 }
 
 /// Текущее использование KV (MiB) всеми привязанными слотами.
@@ -1264,6 +1328,7 @@ fn seed_slot(
         stable_toks: 0,
         stable_len: 0,
         stop_hit: false,
+        looped: false,
         cancelled: false,
         last_progress: Instant::now(),
         usage,
@@ -1304,7 +1369,12 @@ fn finish_slot(
         }
     }
     if !b.cancelled {
-        let finish_reason = if b.stop_hit {
+        let finish_reason = if b.looped {
+            // Не "stop": клиент должен видеть, что ответ оборван сторожем,
+            // а не завершён моделью. Иначе агент примет мусорный хвост за
+            // законченную мысль.
+            "length"
+        } else if b.stop_hit {
             "stop"
         } else if b.completion_tokens >= b.params.max_tokens {
             "length"
@@ -1468,6 +1538,28 @@ impl ForkSampler for IndexedSampler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detect_loop_catches_repeat_and_spares_normal_text() {
+        // Петля: блок из 3 токенов, повторённый до конца.
+        let mut looped: Vec<u32> = (0..200).collect();
+        for _ in 0..40 {
+            looped.extend_from_slice(&[7, 8, 9]);
+        }
+        assert_eq!(detect_loop(&looped), Some(3));
+
+        // Осмысленный текст: повторы есть, но не подряд одним блоком.
+        let normal: Vec<u32> = (0..400).map(|i| (i * 37 % 900) as u32).collect();
+        assert_eq!(detect_loop(&normal), None);
+
+        // Короткий ответ не трогаем, даже если он весь из повторов.
+        let short: Vec<u32> = std::iter::repeat(5).take(LOOP_MIN_TOKENS - 1).collect();
+        assert_eq!(detect_loop(&short), None);
+
+        // Ровно на границе включения петля уже ловится.
+        let at_edge: Vec<u32> = std::iter::repeat(5).take(LOOP_MIN_TOKENS).collect();
+        assert_eq!(detect_loop(&at_edge), Some(1));
+    }
 
     #[test]
     fn batchconfig_clamps_slots() {

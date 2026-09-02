@@ -1284,6 +1284,8 @@ mod tests {
         assert_eq!(params.top_p, 0.95);
         assert_eq!(params.top_k, 20);
         assert_eq!(params.presence_penalty, 1.5);
-        assert_eq!(params.repetition_penalty, 1.0);
+        // 1.05, а не 1.0: Ornith идёт с мягким штрафом за повтор сверх
+        // карточки — защита от зацикливания, см. config::preset_rp.
+        assert_eq!(params.repetition_penalty, 1.05);
     }
 }
