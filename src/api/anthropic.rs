@@ -189,7 +189,13 @@ pub async fn messages(
         .read()
         .expect("sampling policy lock")
         .clone();
-    let preset_name = if defaults.thinking { "thinking" } else { "instruct" };
+    // Инструменты выбирают кодовый профиль карточки — как в OpenAI-пути,
+    // см. развёрнутое обоснование в openai.rs рядом с `let coding`.
+    let preset_name = match (defaults.thinking, tools_enabled(req.tools.as_ref())) {
+        (_, true) => "thinking-coding",
+        (true, false) => "thinking",
+        (false, false) => "instruct",
+    };
     let pv = crate::api::resolve_sampling(
         &state.presets.read().expect("presets lock"),
         preset_name,

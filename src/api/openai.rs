@@ -131,12 +131,33 @@ fn to_gen_params(
         .or(effort_thinking)
         .unwrap_or(d.thinking);
 
-    // 2. Выбираем базовый пресет только по наличию thinking. reasoning_effort
-    // задаёт глубину рассуждений в chat template, но не означает «точный код»
-    // и не должен молча менять temperature/presence_penalty. В частности,
-    // high/xhigh от агентских клиентов раньше включал Ornith-профиль 0.6/0.0
-    // и возвращал уже устранённое залипание на повторных tool calls.
-    let preset_name = if thinking { "thinking" } else { "instruct" };
+    // 2. Пресет выбирается по двум признакам: thinking и наличие инструментов.
+    //
+    // reasoning_effort сюда НЕ входит: он задаёт глубину рассуждений в chat
+    // template, но не означает «точный код». high/xhigh от агентских клиентов
+    // раньше включал профиль 0.6/0.0 и возвращал залипание на повторных tool
+    // calls, поэтому этот путь закрыт.
+    //
+    // Объявленные инструменты — признак другого рода: клиент ждёт машинно
+    // разбираемый вызов, где имя файла и JSON-аргументы должны совпасть
+    // побуквенно. Карточка Ornith 1.5 для этого даёт отдельный профиль
+    // (0.6/0.0 против общего 1.0/1.5), и до сих пор он не выбирался никогда —
+    // «thinking-coding» лежал в пресетах мёртвым грузом.
+    //
+    // Замер 2026-09-03, 10 генераций shell-кода на профиль: общий профиль
+    // испортил 3 из 10, кодовый — 1 из 10, greedy — 0. Порча одинаковая:
+    // лишний пробел внутри идентификатора, `${API_ TOKEN}` вместо
+    // `${API_TOKEN}`. Температура её масштабирует, но не создаёт, поэтому
+    // 0.6 снижает частоту, а не устраняет причину.
+    //
+    // Залипание, из-за которого presence 1.5 когда-то держали, теперь
+    // ловится detect_loop в engine_batched — сэмплинг для этого не нужен.
+    let coding = crate::api::tools_enabled(req.tools.as_ref());
+    let preset_name = match (thinking, coding) {
+        (_, true) => "thinking-coding",
+        (true, false) => "thinking",
+        (false, false) => "instruct",
+    };
 
     // 3. Базовые параметры: пресет карточки модели, поверх — явные env.
     let pv = crate::api::resolve_sampling(presets, preset_name, d, policy);
@@ -1285,5 +1306,44 @@ mod tests {
         assert_eq!(params.top_k, 20);
         assert_eq!(params.presence_penalty, 1.5);
         assert_eq!(params.repetition_penalty, 1.0);
+    }
+
+    /// Объявленные инструменты переключают на кодовый профиль карточки:
+    /// клиент ждёт побуквенно точные имена и JSON-аргументы.
+    #[test]
+    fn declared_tools_select_coding_sampling() {
+        let req: ChatCompletionRequest = serde_json::from_value(json!({
+            "messages": [],
+            "tools": [{
+                "type": "function",
+                "function": { "name": "read_file", "parameters": {} }
+            }]
+        }))
+        .unwrap();
+        let defaults = crate::config::SamplingDefaults::default();
+        let presets = crate::config::default_presets_for_model("Ornith-1.5-9B-Q6_K.gguf");
+        let params = to_gen_params(&req, &defaults, &presets, &Default::default());
+
+        assert_eq!(params.temperature, 0.6);
+        assert_eq!(params.presence_penalty, 0.0);
+        assert_eq!(params.top_p, 0.95);
+        assert_eq!(params.top_k, 20);
+        assert_eq!(params.repetition_penalty, 1.0);
+    }
+
+    /// Пустой список инструментов — не агентский запрос: остаётся общий профиль.
+    #[test]
+    fn empty_tools_keep_general_sampling() {
+        let req: ChatCompletionRequest = serde_json::from_value(json!({
+            "messages": [],
+            "tools": []
+        }))
+        .unwrap();
+        let defaults = crate::config::SamplingDefaults::default();
+        let presets = crate::config::default_presets_for_model("Ornith-1.5-9B-Q6_K.gguf");
+        let params = to_gen_params(&req, &defaults, &presets, &Default::default());
+
+        assert_eq!(params.temperature, 1.0);
+        assert_eq!(params.presence_penalty, 1.5);
     }
 }

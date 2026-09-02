@@ -114,18 +114,47 @@ pub async fn responses(
         Ok(m) => m,
         Err(r) => return r,
     };
-    let mut params = GenParams::default();
+    // Сэмплинг берётся из пресета карточки, как в OpenAI- и Anthropic-путях.
+    // Раньше здесь стоял GenParams::default() — temperature 0.7 и top_p 0.80,
+    // то есть ни общий профиль карточки (1.0/0.95), ни кодовый (0.6/0.95).
+    // Инструментов этот API не принимает, поэтому выбор только по thinking.
+    let defaults = state.sampling.read().expect("sampling lock").clone();
+    let policy = state
+        .sampling_policy
+        .read()
+        .expect("sampling policy lock")
+        .clone();
+    let preset_name = if defaults.thinking { "thinking" } else { "instruct" };
+    let pv = crate::api::resolve_sampling(
+        &state.presets.read().expect("presets lock"),
+        preset_name,
+        &defaults,
+        &policy,
+    );
+    let mut params = GenParams {
+        temperature: pv.temperature,
+        top_p: pv.top_p,
+        top_k: pv.top_k,
+        min_p: pv.min_p,
+        presence_penalty: pv.presence_penalty,
+        repetition_penalty: pv.repetition_penalty,
+        thinking: defaults.thinking,
+        ..GenParams::default()
+    };
     if let Some(m) = req.max_output_tokens {
         if m == 0 {
             return bad_request("max_output_tokens must be greater than 0");
         }
         params.max_tokens = m;
     }
-    if let Some(t) = req.temperature {
-        params.temperature = t;
-    }
-    if let Some(t) = req.top_p {
-        params.top_p = t;
+    // Клиентский сэмплинг — только при снятом замке, как в OpenAI-пути.
+    if !policy.lock {
+        if let Some(t) = req.temperature {
+            params.temperature = t;
+        }
+        if let Some(t) = req.top_p {
+            params.top_p = t;
+        }
     }
 
     let id = format!("resp_{}", uuid::Uuid::new_v4().simple());
