@@ -48,24 +48,23 @@ fn python_method_callback(
                     let sep = args.first().and_then(|a| a.as_str());
                     let maxsplit = args.get(1).and_then(|a| a.as_i64());
                     let parts: Vec<minijinja::Value> = match (sep, maxsplit) {
-                        (Some(sep), Some(n)) if n >= 0 => {
-                            s.splitn(n as usize + 1, sep).map(minijinja::Value::from).collect()
-                        }
-                        (Some(sep), _) => {
-                            s.split(sep).map(minijinja::Value::from).collect()
-                        }
+                        (Some(sep), Some(n)) if n >= 0 => s
+                            .splitn(n as usize + 1, sep)
+                            .map(minijinja::Value::from)
+                            .collect(),
+                        (Some(sep), _) => s.split(sep).map(minijinja::Value::from).collect(),
                         (None, Some(n)) if n >= 0 => {
                             // Python: split whitespace with maxsplit
-                            let mut v: Vec<minijinja::Value> = s.split_whitespace().map(minijinja::Value::from).collect();
+                            let mut v: Vec<minijinja::Value> =
+                                s.split_whitespace().map(minijinja::Value::from).collect();
                             if v.len() > n as usize + 1 {
-                                let remainder: Vec<String> = v.drain((n as usize)..).map(|val| val.to_string()).collect();
+                                let remainder: Vec<String> =
+                                    v.drain((n as usize)..).map(|val| val.to_string()).collect();
                                 v.push(minijinja::Value::from(remainder.join(" ")));
                             }
                             v
                         }
-                        (None, _) => {
-                            s.split_whitespace().map(minijinja::Value::from).collect()
-                        }
+                        (None, _) => s.split_whitespace().map(minijinja::Value::from).collect(),
                     };
                     return Ok(minijinja::Value::from(parts));
                 }
@@ -81,12 +80,12 @@ fn python_method_callback(
                 }
                 "startswith" if args.len() == 1 => {
                     return Ok(minijinja::Value::from(
-                        s.starts_with(args[0].as_str().unwrap_or(""))
+                        s.starts_with(args[0].as_str().unwrap_or("")),
                     ));
                 }
                 "endswith" if args.len() == 1 => {
                     return Ok(minijinja::Value::from(
-                        s.ends_with(args[0].as_str().unwrap_or(""))
+                        s.ends_with(args[0].as_str().unwrap_or("")),
                     ));
                 }
                 _ => {}
@@ -229,19 +228,25 @@ mod tests {
         let msgs = vec![
             crate::engine_types::ChatMessage {
                 role: "user".into(),
-                content: vec![crate::engine_types::ContentBlock::Text { text: "Привет".into() }],
+                content: vec![crate::engine_types::ContentBlock::Text {
+                    text: "Привет".into(),
+                }],
                 tool_calls: vec![],
                 reasoning_content: None,
             },
             crate::engine_types::ChatMessage {
                 role: "assistant".into(),
-                content: vec![crate::engine_types::ContentBlock::Text { text: "Привет! Как дела?".into() }],
+                content: vec![crate::engine_types::ContentBlock::Text {
+                    text: "Привет! Как дела?".into(),
+                }],
                 tool_calls: vec![],
                 reasoning_content: Some("Думаю как ответить на приветствие".into()),
             },
             crate::engine_types::ChatMessage {
                 role: "user".into(),
-                content: vec![crate::engine_types::ContentBlock::Text { text: "Что ты умеешь?".into() }],
+                content: vec![crate::engine_types::ContentBlock::Text {
+                    text: "Что ты умеешь?".into(),
+                }],
                 tool_calls: vec![],
                 reasoning_content: None,
             },

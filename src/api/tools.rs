@@ -10,12 +10,12 @@
 
 use serde_json::Value;
 
-/// Печать сырого текста модели перед разбором (QWEN36_TOOLS_DEBUG=1).
+/// Печать сырого текста модели перед разбором (TOOLS_DEBUG=1).
 /// Нужна, чтобы отличить обрезание в генерации от обрезания в разборе: без неё
 /// оба выглядят одинаково — короткое значение в готовом вызове.
 fn tools_debug() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("QWEN36_TOOLS_DEBUG").is_ok_and(|v| v != "0"))
+    *V.get_or_init(|| std::env::var("TOOLS_DEBUG").is_ok_and(|v| v != "0"))
 }
 
 /// (остальной текст, [(name, arguments_json_string)])
@@ -39,9 +39,7 @@ pub fn parse_tool_calls_for_response(
 ) -> (String, Vec<(String, String)>) {
     if finish_reason == "length" {
         if tools_enabled(tools) && find_tool_tag(text, "<tool").is_some() {
-            eprintln!(
-                "[tools] вызов не исполнен: генерация оборвалась по length до подтверждения"
-            );
+            eprintln!("[tools] вызов не исполнен: генерация оборвалась по length до подтверждения");
         }
         return (text.to_string(), Vec::new());
     }
@@ -137,7 +135,10 @@ fn find_tool_tag(s: &str, prefix: &str) -> Option<(usize, usize)> {
         let rel_close = tail.find('>')?;
         let name = &tail[..rel_close];
         let name_clean = name.trim_matches(|c: char| c == '|' || c == '_' || c == ' ');
-        if matches!(name_clean, "call" | "calls" | "" | "1" | "2" | "3" | "4" | "5") {
+        if matches!(
+            name_clean,
+            "call" | "calls" | "" | "1" | "2" | "3" | "4" | "5"
+        ) {
             return Some((i, i + prefix.len() + rel_close + 1));
         }
         from = i + prefix.len() + rel_close + 1;
@@ -286,7 +287,10 @@ fn validate_schema_value(value: &Value, schema: &Value, path: &str) -> Result<()
             _ => true,
         };
         if !accepted {
-            return Err(format!("{path} имеет тип {}, несовместимый со schema", value_kind(value)));
+            return Err(format!(
+                "{path} имеет тип {}, несовместимый со schema",
+                value_kind(value)
+            ));
         }
     }
 
@@ -585,10 +589,7 @@ fn scan_tail(s: &str) -> (Option<usize>, Vec<char>) {
             _ => {}
         }
     }
-    (
-        if in_string { Some(string_start) } else { None },
-        openers,
-    )
+    (if in_string { Some(string_start) } else { None }, openers)
 }
 
 /// `{"name": fs_read}` → `{"name": "fs_read"}` — голое слово после `:`.
@@ -639,9 +640,7 @@ fn quote_bare_word_values(s: &str) -> Option<String> {
             {
                 // голое слово до , } ] или whitespace+delimiter
                 let start = i;
-                while i < bytes.len()
-                    && !matches!(bytes[i], b',' | b'}' | b']' | b'\n' | b'\r')
-                {
+                while i < bytes.len() && !matches!(bytes[i], b',' | b'}' | b']' | b'\n' | b'\r') {
                     i += 1;
                 }
                 let word = s[start..i].trim_end();
@@ -776,8 +775,7 @@ mod tests {
     #[test]
     fn length_response_is_never_repaired_into_executable_call() {
         let tools = openai_tools_schema();
-        let partial =
-            "<tool_call>{\"name\":\"write\",\"arguments\":{\"content\":\"body\"";
+        let partial = "<tool_call>{\"name\":\"write\",\"arguments\":{\"content\":\"body\"";
         let (text, calls) = parse_tool_calls_for_response(partial, "length", Some(&tools));
         assert!(calls.is_empty());
         assert_eq!(text, partial);
@@ -785,7 +783,8 @@ mod tests {
 
     #[test]
     fn tool_markup_without_tools_is_plain_text() {
-        let output = "<tool_call>{\"name\":\"bash\",\"arguments\":{\"command\":\"ls\"}}</tool_call>";
+        let output =
+            "<tool_call>{\"name\":\"bash\",\"arguments\":{\"command\":\"ls\"}}</tool_call>";
         let (text, calls) = parse_tool_calls_for_response(output, "stop", None);
         assert!(calls.is_empty());
         assert_eq!(text, output);
@@ -880,18 +879,16 @@ mod tests {
 
     #[test]
     fn heal_bare_word_value() {
-        let (_, calls) = parse_tool_calls(
-            "<tool_call>{\"name\": fs_read, \"arguments\": {}}</tool_call>",
-        );
+        let (_, calls) =
+            parse_tool_calls("<tool_call>{\"name\": fs_read, \"arguments\": {}}</tool_call>");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "fs_read");
     }
 
     #[test]
     fn unclosed_tag() {
-        let (_, calls) = parse_tool_calls(
-            "text <tool_call>{\"name\": \"f\", \"arguments\": {\"x\": 1}}",
-        );
+        let (_, calls) =
+            parse_tool_calls("text <tool_call>{\"name\": \"f\", \"arguments\": {\"x\": 1}}");
         assert_eq!(calls.len(), 1);
     }
 

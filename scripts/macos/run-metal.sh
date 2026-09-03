@@ -8,7 +8,7 @@ SERVER_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$SERVER_DIR"
 
 if [ ! -f .env ]; then
-    echo "[run] .env не найден — скопируйте: cp .env.example .env и заполните QWEN36_API_KEYS/QWEN36_MODEL"
+    echo "[run] .env не найден — скопируйте: cp .env.example .env и заполните API_KEYS/MODEL"
     exit 1
 fi
 

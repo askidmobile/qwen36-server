@@ -30,6 +30,10 @@ pub struct ChatCompletionRequest {
     repetition_penalty: Option<f32>,
     seed: Option<u64>,
     max_tokens: Option<usize>,
+    /// Современное имя OpenAI для Chat Completions. Принимаем оба поля:
+    /// старое `max_tokens` остаётся совместимым, но одновременно задавать
+    /// разные значения нельзя — иначе лимит зависит от порядка/клиента.
+    max_completion_tokens: Option<usize>,
     stop: Option<Value>, // string | [string]
     #[allow(dead_code)]
     tools: Option<Value>,
@@ -107,11 +111,22 @@ fn parse_content(m: &OaiMessage) -> Result<Vec<ContentBlock>, Response> {
     }
 }
 
+fn completion_token_limit(req: &ChatCompletionRequest) -> Result<Option<usize>, Response> {
+    match (req.max_tokens, req.max_completion_tokens) {
+        (Some(legacy), Some(current)) if legacy != current => Err(bad_request(format!(
+            "max_tokens ({legacy}) и max_completion_tokens ({current}) должны совпадать, если заданы вместе"
+        ))),
+        (Some(value), _) | (_, Some(value)) => Ok(Some(value)),
+        (None, None) => Ok(None),
+    }
+}
+
 fn to_gen_params(
     req: &ChatCompletionRequest,
     d: &crate::config::SamplingDefaults,
     presets: &crate::config::SamplingPresets,
     policy: &crate::config::SamplingPolicy,
+    max_tokens: Option<usize>,
 ) -> GenParams {
     // 1. Определяем флаг thinking и уровень рассуждений (reasoning_effort)
     let ctk = req
@@ -212,7 +227,7 @@ fn to_gen_params(
         min_p,
         presence_penalty: presence_p,
         repetition_penalty: rep_p,
-        max_tokens: req.max_tokens.unwrap_or(d.max_tokens),
+        max_tokens: max_tokens.unwrap_or(d.max_tokens),
         stop: stop_list,
         seed: req.seed,
         thinking,
@@ -328,7 +343,7 @@ pub async fn chat_completions(
     // 'ornith-1.5-9b-mtp', чтобы рабочая конфигурация со спекуляцией молча
     // сменилась на другую модель. Модель задаётся при запуске, и только там.
     // Разрешён лишь display alias той же модели с её же quant-суффиксом:
-    // `ornith-1.5-9b-mtp-Q6_K` не требует и не вызывает переключения.
+    // `ornith-1.5-9b-Q4_K_M` не требует и не вызывает переключения.
     let current_model = state.engine.model_info();
     let current_id = current_model.id;
     let requested = req.model.as_deref().unwrap_or("").trim();
@@ -362,11 +377,16 @@ pub async fn chat_completions(
     if let Err(response) = validate_logprobs(&req) {
         return response;
     }
+    let max_tokens = match completion_token_limit(&req) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
     let params = to_gen_params(
         &req,
         &state.sampling.read().expect("sampling lock"),
         &state.presets.read().expect("presets lock"),
         &state.sampling_policy.read().expect("sampling policy lock"),
+        max_tokens,
     );
     if params.max_tokens == 0 {
         return bad_request("max_tokens must be greater than 0");
@@ -423,7 +443,9 @@ pub async fn chat_completions(
     // сплиттер слеп. Отдаём рассуждение как reasoning_content с честным
     // сигналом, content — пустой (клиент знает: budget исчерпан).
     let (reasoning, text_body) = if out.ended_in_thinking {
-        (!out.text.trim().is_empty()).then_some(out.text.trim().to_string()).map(|r| (Some(r), String::new()))
+        (!out.text.trim().is_empty())
+            .then_some(out.text.trim().to_string())
+            .map(|r| (Some(r), String::new()))
             .unwrap_or((None, String::new()))
     } else {
         split_reasoning(&out.text)
@@ -550,7 +572,10 @@ pub fn extract_gemma_fallback_content(reasoning: &str) -> Option<String> {
         if let Some(prev_quote) = text[..last_quote_start].rfind('"') {
             let inside = &text[prev_quote + 1..last_quote_start];
             // Проверяем, что внутри есть буквы и это осмысленный ответ
-            if inside.chars().any(char::is_alphabetic) && inside.len() < 500 && !inside.contains('\n') {
+            if inside.chars().any(char::is_alphabetic)
+                && inside.len() < 500
+                && !inside.contains('\n')
+            {
                 return Some(inside.trim().to_string());
             }
         }
@@ -585,12 +610,15 @@ fn split_reasoning(text: &str) -> (Option<String>, String) {
             .trim_start_matches(['\r', '\n'])
             .trim()
             .to_string();
-        let fallback_content = extract_gemma_fallback_content(&reasoning)
-            .unwrap_or_else(|| reasoning.clone());
+        let fallback_content =
+            extract_gemma_fallback_content(&reasoning).unwrap_or_else(|| reasoning.clone());
         if fallback_content == reasoning {
             return (None, reasoning);
         } else {
-            return ((!reasoning.is_empty()).then_some(reasoning), fallback_content);
+            return (
+                (!reasoning.is_empty()).then_some(reasoning),
+                fallback_content,
+            );
         }
     }
     (None, text.to_string())
@@ -710,7 +738,10 @@ async fn stream_chat(
     // 0=ищем thought-open, 1=в thought (до close), 2=ищем final-open, 3=в final
     let mut gemma_phase: u8 = 0;
     sse_response(rx, cancel, move |ev, out| match ev {
-        StreamEvent::Delta { text: d, logprobs: lp } => {
+        StreamEvent::Delta {
+            text: d,
+            logprobs: lp,
+        } => {
             if gemma_channel {
                 if first {
                     first = false;
@@ -788,16 +819,26 @@ async fn stream_chat(
                             if let Some(p) = gemma_buf.find(GEMMA_FINAL_OPEN) {
                                 gemma_buf.drain(..p + GEMMA_FINAL_OPEN.len());
                                 while let Some(c) = gemma_buf.chars().next() {
-                                    if c == '\n' || c == '\r' || c == ' ' { gemma_buf.drain(..c.len_utf8()); } else { break; }
+                                    if c == '\n' || c == '\r' || c == ' ' {
+                                        gemma_buf.drain(..c.len_utf8());
+                                    } else {
+                                        break;
+                                    }
                                 }
                                 gemma_phase = 3;
-                            } else if gemma_buf.starts_with("<|channel>") || GEMMA_FINAL_OPEN.starts_with(&gemma_buf) {
+                            } else if gemma_buf.starts_with("<|channel>")
+                                || GEMMA_FINAL_OPEN.starts_with(&gemma_buf)
+                            {
                                 // Частичный тег <|channel>final — ждем продолжения
                                 break;
                             } else if !gemma_buf.trim().is_empty() && !gemma_buf.contains('<') {
                                 // Модель не выделила тег final, а сразу начала отвечать текстом
                                 while let Some(c) = gemma_buf.chars().next() {
-                                    if c == '\n' || c == '\r' || c == ' ' { gemma_buf.drain(..c.len_utf8()); } else { break; }
+                                    if c == '\n' || c == '\r' || c == ' ' {
+                                        gemma_buf.drain(..c.len_utf8());
+                                    } else {
+                                        break;
+                                    }
                                 }
                                 gemma_phase = 3;
                             } else {
@@ -991,8 +1032,8 @@ async fn stream_chat(
                         }
                         // Если за весь стрим не было отправлено ни одного байта контента:
                         // извлекаем ответ или отдаем накопленный текст как content!
-                        let fallback = extract_gemma_fallback_content(&acc)
-                            .unwrap_or_else(|| acc.clone());
+                        let fallback =
+                            extract_gemma_fallback_content(&acc).unwrap_or_else(|| acc.clone());
                         let fallback = fallback.trim().to_string();
                         if !fallback.is_empty() {
                             out.push(Event::default().data(chunk(
@@ -1054,7 +1095,12 @@ async fn stream_chat(
                 // Остаток текста (придержка и то, что было между вызовами) —
                 // одной дельтой до tool_calls-чанков.
                 if (has_tools || gemma_channel) && !text.is_empty() {
-                    out.push(Event::default().data(chunk(&id, &model, json!({"content": text}), None)));
+                    out.push(Event::default().data(chunk(
+                        &id,
+                        &model,
+                        json!({"content": text}),
+                        None,
+                    )));
                 }
                 for (i, (name, args)) in calls.iter().enumerate() {
                     out.push(Event::default().data(chunk(
@@ -1227,6 +1273,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn max_completion_tokens_is_supported() {
+        let req: ChatCompletionRequest = serde_json::from_value(json!({
+            "messages": [],
+            "max_completion_tokens": 123
+        }))
+        .unwrap();
+        assert_eq!(completion_token_limit(&req).unwrap(), Some(123));
+
+        let defaults = crate::config::SamplingDefaults::default();
+        let presets = crate::config::default_presets();
+        let params = to_gen_params(
+            &req,
+            &defaults,
+            &presets,
+            &Default::default(),
+            completion_token_limit(&req).unwrap(),
+        );
+        assert_eq!(params.max_tokens, 123);
+    }
+
+    #[test]
+    fn conflicting_completion_token_fields_are_rejected() {
+        let req: ChatCompletionRequest = serde_json::from_value(json!({
+            "messages": [],
+            "max_tokens": 12,
+            "max_completion_tokens": 34
+        }))
+        .unwrap();
+        assert!(completion_token_limit(&req).is_err());
+    }
+
+    #[test]
     fn locked_sampling_ignores_client_extensions() {
         let req: ChatCompletionRequest = serde_json::from_value(json!({
             "messages": [],
@@ -1239,7 +1317,7 @@ mod tests {
         .unwrap();
         let defaults = crate::config::SamplingDefaults::default();
         let presets = crate::config::default_presets();
-        let params = to_gen_params(&req, &defaults, &presets, &Default::default());
+        let params = to_gen_params(&req, &defaults, &presets, &Default::default(), None);
         assert_eq!(params.top_k, 20);
         assert_eq!(params.min_p, 0.0);
         assert_eq!(params.presence_penalty, 0.0);
@@ -1263,7 +1341,7 @@ mod tests {
             lock: false,
             ..Default::default()
         };
-        let params = to_gen_params(&req, &defaults, &presets, &policy);
+        let params = to_gen_params(&req, &defaults, &presets, &policy, None);
         assert_eq!(params.top_k, 7);
         assert_eq!(params.min_p, 0.1);
         assert_eq!(params.presence_penalty, 1.2);
@@ -1279,7 +1357,7 @@ mod tests {
         .unwrap();
         let defaults = crate::config::SamplingDefaults::default();
         let presets = crate::config::default_presets_for_model("gemma-4-E4B-it-Q8_0.gguf");
-        let params = to_gen_params(&req, &defaults, &presets, &Default::default());
+        let params = to_gen_params(&req, &defaults, &presets, &Default::default(), None);
 
         assert_eq!(params.temperature, 1.0);
         assert_eq!(params.top_p, 0.95);
@@ -1296,9 +1374,8 @@ mod tests {
         }))
         .unwrap();
         let defaults = crate::config::SamplingDefaults::default();
-        let presets =
-            crate::config::default_presets_for_model("Ornith-1.5-9B-Q6_K.gguf");
-        let params = to_gen_params(&req, &defaults, &presets, &Default::default());
+        let presets = crate::config::default_presets_for_model("Ornith-1.5-9B-Q4_K_M.gguf");
+        let params = to_gen_params(&req, &defaults, &presets, &Default::default(), None);
 
         assert!(params.thinking);
         assert_eq!(params.temperature, 1.0);
@@ -1321,8 +1398,8 @@ mod tests {
         }))
         .unwrap();
         let defaults = crate::config::SamplingDefaults::default();
-        let presets = crate::config::default_presets_for_model("Ornith-1.5-9B-Q6_K.gguf");
-        let params = to_gen_params(&req, &defaults, &presets, &Default::default());
+        let presets = crate::config::default_presets_for_model("Ornith-1.5-9B-Q4_K_M.gguf");
+        let params = to_gen_params(&req, &defaults, &presets, &Default::default(), None);
 
         assert_eq!(params.temperature, 0.6);
         assert_eq!(params.presence_penalty, 0.0);
@@ -1340,8 +1417,8 @@ mod tests {
         }))
         .unwrap();
         let defaults = crate::config::SamplingDefaults::default();
-        let presets = crate::config::default_presets_for_model("Ornith-1.5-9B-Q6_K.gguf");
-        let params = to_gen_params(&req, &defaults, &presets, &Default::default());
+        let presets = crate::config::default_presets_for_model("Ornith-1.5-9B-Q4_K_M.gguf");
+        let params = to_gen_params(&req, &defaults, &presets, &Default::default(), None);
 
         assert_eq!(params.temperature, 1.0);
         assert_eq!(params.presence_penalty, 1.5);

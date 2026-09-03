@@ -16,8 +16,12 @@ struct MockEngine {
 
 #[async_trait::async_trait]
 impl Engine for MockEngine {
-    fn supports_vision(&self) -> bool { true }
-    fn supports_video(&self) -> bool { true }
+    fn supports_vision(&self) -> bool {
+        true
+    }
+    fn supports_video(&self) -> bool {
+        true
+    }
 
     async fn generate(
         &self,
@@ -484,14 +488,16 @@ async fn openai_stream_length_does_not_execute_truncated_tool_call() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_string(resp).await;
     assert!(body.contains("<tool_call>"), "body: {body}");
-    assert!(body.contains("\"finish_reason\":\"length\""), "body: {body}");
+    assert!(
+        body.contains("\"finish_reason\":\"length\""),
+        "body: {body}"
+    );
     assert!(!body.contains("\"tool_calls\""), "body: {body}");
 }
 
 #[tokio::test]
 async fn complete_tool_call_missing_required_argument_is_plain_text() {
-    let output =
-        "<tool_call>{\"name\":\"write\",\"arguments\":{\"content\":\"body\"}}</tool_call>";
+    let output = "<tool_call>{\"name\":\"write\",\"arguments\":{\"content\":\"body\"}}</tool_call>";
     let resp = app(vec![output])
         .oneshot(authed(json_req(
             "POST",
@@ -643,7 +649,11 @@ async fn anthropic_length_does_not_execute_truncated_tool_call() {
         .as_str()
         .unwrap()
         .contains("<tool_call>"));
-    assert!(v["content"].as_array().unwrap().iter().all(|block| block["type"] != "tool_use"));
+    assert!(v["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|block| block["type"] != "tool_use"));
 }
 
 #[tokio::test]
@@ -664,7 +674,10 @@ async fn anthropic_stream_length_does_not_execute_truncated_tool_call() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_string(resp).await;
     assert!(body.contains("<tool_call>"), "body: {body}");
-    assert!(body.contains("\"stop_reason\":\"max_tokens\""), "body: {body}");
+    assert!(
+        body.contains("\"stop_reason\":\"max_tokens\""),
+        "body: {body}"
+    );
     assert!(!body.contains("\"type\":\"tool_use\""), "body: {body}");
 }
 

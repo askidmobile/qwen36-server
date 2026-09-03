@@ -32,4 +32,4 @@ echo "[build] cargo build --release --features cuda (CUDA_COMPUTE_CAP=$CUDA_COMP
 cargo build --release --features cuda
 
 echo "[ok] бинарник: $SERVER_DIR/target/release/qwen36-server"
-echo "[run] cp .env.example .env; отредактируйте QWEN36_API_KEYS/QWEN36_MODEL; ./target/release/qwen36-server"
+echo "[run] cp .env.example .env; отредактируйте API_KEYS/MODEL; ./target/release/qwen36-server"

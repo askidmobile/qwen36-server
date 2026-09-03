@@ -321,9 +321,15 @@ pub trait Engine: Send + Sync {
     async fn generate(&self, request: InferenceRequest) -> Result<mpsc::Receiver<StreamEvent>>;
     fn model_info(&self) -> ModelInfo;
     /// Эффективные runtime capabilities, не возможности семейства модели.
-    fn supports_vision(&self) -> bool { false }
-    fn supports_video(&self) -> bool { false }
-    fn supports_mtp(&self) -> bool { false }
+    fn supports_vision(&self) -> bool {
+        false
+    }
+    fn supports_video(&self) -> bool {
+        false
+    }
+    fn supports_mtp(&self) -> bool {
+        false
+    }
     /// Остановить фоновые потоки движка (dispatch thread). Вызывается при unload.
     /// Default no-op — single-slot CandleEngine ничего не держит в фоне.
     fn shutdown(&self) {}
@@ -408,7 +414,6 @@ impl CandleEngine {
     pub fn load(cfg: &Config) -> Result<Self> {
         let device = select_device()?;
         let gpu_only = std::env::var("GPU_ONLY")
-            .or_else(|_| std::env::var("QWEN36_GPU_ONLY"))
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
         if gpu_only && !device.is_cuda() {
@@ -661,7 +666,10 @@ fn run_generation(
             () => {
                 if full_text.starts_with(&emitted_text) && full_text.len() > emitted_text.len() {
                     let tail = full_text[emitted_text.len()..].to_string();
-                    let _ = tx.blocking_send(StreamEvent::Delta { text: tail, logprobs: None });
+                    let _ = tx.blocking_send(StreamEvent::Delta {
+                        text: tail,
+                        logprobs: None,
+                    });
                 }
             };
         }
@@ -682,10 +690,20 @@ fn run_generation(
                 &mut rng,
             );
             if generated.len() < 10 {
-                eprintln!("[gemma-tok] first #{} tok={} ({:?})", generated.len(), tok, tokenizer.id_to_token(tok));
+                eprintln!(
+                    "[gemma-tok] first #{} tok={} ({:?})",
+                    generated.len(),
+                    tok,
+                    tokenizer.id_to_token(tok)
+                );
             }
             if stop_tokens.contains(&tok) {
-                eprintln!("[gemma-tok] STOP AT #{} tok={} ({:?})", generated.len(), tok, tokenizer.id_to_token(tok));
+                eprintln!(
+                    "[gemma-tok] STOP AT #{} tok={} ({:?})",
+                    generated.len(),
+                    tok,
+                    tokenizer.id_to_token(tok)
+                );
                 flush_tail!();
                 finish("stop", generated.len(), &tx);
                 return Ok(());
@@ -725,7 +743,10 @@ fn run_generation(
                 let chunk = &full_text[emitted_text.len()..end];
                 if !chunk.is_empty()
                     && tx
-                        .blocking_send(StreamEvent::Delta { text: chunk.to_string(), logprobs: None })
+                        .blocking_send(StreamEvent::Delta {
+                            text: chunk.to_string(),
+                            logprobs: None,
+                        })
                         .is_err()
                 {
                     return Ok(()); // клиент отключился
@@ -811,8 +832,16 @@ pub fn architecture_capability(arch: &str) -> (bool, &'static str, &'static str)
         "qwen35" | "qwen35moe" => (true, "qwen35", "BatchedEngine continuous batching"),
         "gemma4" => (true, "gemma4", "CandleEngine serialized"),
         "llama" => (true, "llama", "CandleEngine serialized"),
-        "gpt-oss" => (false, "gpt-oss", "no Candle graph runtime; MXFP4 storage/dispatch unimplemented"),
-        _ => (false, "unknown", "unknown GGUF architecture; no runtime route"),
+        "gpt-oss" => (
+            false,
+            "gpt-oss",
+            "no Candle graph runtime; MXFP4 storage/dispatch unimplemented",
+        ),
+        _ => (
+            false,
+            "unknown",
+            "unknown GGUF architecture; no runtime route",
+        ),
     }
 }
 
@@ -874,17 +903,17 @@ fn load_model(path: &Path, device: &candle_core::Device) -> Result<(RuntimeModel
 
 /// Ожидание GPU без холостого вращения ядра CPU. По умолчанию драйвер ждёт
 /// результата spin-циклом: одно ядро на 100% всё время декода, хотя хостовые
-/// фазы шага занимают ~1.5% (замер 2026-08-27, QWEN36_HOST_TIMING). Флаг
+/// фазы шага занимают ~1.5% (замер 2026-08-27, HOST_TIMING). Флаг
 /// CU_CTX_SCHED_BLOCKING_SYNC переводит ожидание в сон; цена — десятки мкс
 /// на пробуждение при шаге в 33 мс. На yttri-win то же ядро обслуживает HTTP.
-/// Откат: QWEN36_CUDA_SPIN=1. Ставится до создания первого контекста;
+/// Откат: CUDA_SPIN=1. Ставится до создания первого контекста;
 /// повторные вызовы безвредны.
 #[cfg(feature = "cuda")]
 pub fn cuda_prefer_blocking_sync() {
     use candle_core::cuda_backend::cudarc::driver::{result, sys};
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        if std::env::var("QWEN36_CUDA_SPIN").as_deref() == Ok("1") {
+        if std::env::var("CUDA_SPIN").as_deref() == Ok("1") {
             return;
         }
         if result::init().is_err() {
@@ -956,7 +985,7 @@ pub fn maybe_retain_mempool(dev: &candle_core::Device) {
     //
     // Кап по умолчанию 512 MiB: мелкие буферы decode hot path переиспользуются,
     // крупные префилл транзиенты возвращаются системе. Env-override для тюнинга.
-    let cap_mib: u64 = std::env::var("QWEN36_MEMPOOL_RETAIN_MIB")
+    let cap_mib: u64 = std::env::var("MEMPOOL_RETAIN_MIB")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(512);
@@ -969,9 +998,9 @@ pub fn maybe_retain_mempool(dev: &candle_core::Device) {
         return;
     }
     match mem_pool::set_release_threshold_mib(cuda_dev, cap_mib) {
-        Ok(()) => eprintln!(
-            "[cuda] mempool release-threshold: {cap_mib}MiB (free={free}/{total}MiB)"
-        ),
+        Ok(()) => {
+            eprintln!("[cuda] mempool release-threshold: {cap_mib}MiB (free={free}/{total}MiB)")
+        }
         Err(e) => eprintln!("[cuda] mempool threshold не установлен: {e:#}"),
     }
 }
@@ -1022,7 +1051,6 @@ pub fn ctx_overflow_is_error() -> bool {
     static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *MODE.get_or_init(|| {
         std::env::var("CTX_OVERFLOW")
-            .or_else(|_| std::env::var("QWEN36_CTX_OVERFLOW"))
             .map(|v| v != "sliding_window")
             .unwrap_or(true)
     })

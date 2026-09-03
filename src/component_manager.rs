@@ -52,7 +52,11 @@ impl Drop for ComponentLease {
 }
 
 impl ComponentManager {
-    pub fn new(vision_path: Option<PathBuf>, mtp_path: Option<PathBuf>, ttl: Duration) -> Arc<Self> {
+    pub fn new(
+        vision_path: Option<PathBuf>,
+        mtp_path: Option<PathBuf>,
+        ttl: Duration,
+    ) -> Arc<Self> {
         Arc::new(Self {
             components: RwLock::new([
                 ComponentEntry {
@@ -146,7 +150,8 @@ impl ComponentManager {
         let mut comps = self.components.write().unwrap();
         // MTP has lower priority -> evict first
         let mtp_idx = ComponentKind::Mtp as usize;
-        if comps[mtp_idx].leases == 0 && matches!(comps[mtp_idx].state, ComponentState::Warm { .. }) {
+        if comps[mtp_idx].leases == 0 && matches!(comps[mtp_idx].state, ComponentState::Warm { .. })
+        {
             comps[mtp_idx].state = ComponentState::Unloaded;
             return Some(ComponentKind::Mtp);
         }

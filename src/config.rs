@@ -1,4 +1,5 @@
-//! Конфиг из env `QWEN36_*` (docs/engine-api.md §Config).
+//! Конфиг из env: имена без префикса — `CTX`, `SLOTS`, `MODEL`
+//! (docs/engine-api.md §Config).
 
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
@@ -22,7 +23,7 @@ impl std::fmt::Debug for ApiKey {
     }
 }
 
-/// Дефолты сэмплинга — задаются в .env при запуске (QWEN36_*), меняются
+/// Дефолты сэмплинга — задаются в .env при запуске, меняются
 /// через WebUI с сохранением обратно в .env. Код-дефолты = fallback,
 /// если .env не задаёт значения.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -74,7 +75,9 @@ impl SamplingDefaults {
 
     fn validate(&self) -> Result<()> {
         if !(self.temperature.is_finite() && self.temperature >= 0.0) {
-            return Err(anyhow!("TEMPERATURE должен быть конечным и неотрицательным"));
+            return Err(anyhow!(
+                "TEMPERATURE должен быть конечным и неотрицательным"
+            ));
         }
         if !(self.top_p.is_finite() && self.top_p > 0.0 && self.top_p <= 1.0) {
             return Err(anyhow!("TOP_P должен быть в интервале (0, 1]"));
@@ -100,7 +103,7 @@ impl SamplingDefaults {
 }
 
 /// Пресет режима. Встроенные значения выбираются по семейству модели;
-/// пользовательские переопределения хранятся в QWEN36_MODEL_PRESETS.
+/// пользовательские переопределения хранятся в MODEL_PRESETS.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SamplingPresetValues {
     pub temperature: f32,
@@ -173,10 +176,7 @@ where
 
 impl SamplingPolicy {
     pub fn from_env() -> Result<Self> {
-        let lock = match get_env_var("SAMPLING_LOCK")
-            .as_deref()
-            .map(str::trim)
-        {
+        let lock = match get_env_var("SAMPLING_LOCK").as_deref().map(str::trim) {
             None | Some("") | Some("1") | Some("true") | Some("TRUE") => true,
             Some("0") | Some("false") | Some("FALSE") => false,
             Some(value) => {
@@ -308,9 +308,7 @@ pub fn sampling_family_for_model(model_name: &str) -> &'static str {
         "gemma-4"
     } else if compact.contains("qwen38") {
         "qwen-3.8"
-    } else if compact.contains("qwen36")
-        && (compact.contains("a3b") || compact.contains("moe"))
-    {
+    } else if compact.contains("qwen36") && (compact.contains("a3b") || compact.contains("moe")) {
         "qwen-3.6-moe"
     } else if compact.contains("qwen36") {
         "qwen-3.6"
@@ -410,14 +408,17 @@ pub fn default_presets() -> SamplingPresets {
     default_presets_for_model("")
 }
 
-/// QWEN36_PRESETS: legacy global override.
-/// QWEN36_MODEL_PRESETS: {family: {mode: values}} — model-specific override.
+/// PRESETS: legacy global override.
+/// MODEL_PRESETS: {family: {mode: values}} — model-specific override.
 pub fn presets_from_env(model_path: &Path) -> Result<SamplingPresets> {
-    let model_name = model_path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
+    let model_name = model_path
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_default();
     let mut presets = default_presets_for_model(&model_name);
     if let Some(raw) = get_env_var("PRESETS") {
-        let overrides: SamplingPresets = serde_json::from_str(&raw)
-            .map_err(|e| anyhow!("PRESETS: невалидный JSON: {e}"))?;
+        let overrides: SamplingPresets =
+            serde_json::from_str(&raw).map_err(|e| anyhow!("PRESETS: невалидный JSON: {e}"))?;
         presets.extend(overrides);
     }
     if let Some(raw) = get_env_var("MODEL_PRESETS") {
@@ -494,8 +495,9 @@ impl Config {
     }
 
     fn from_env_with_path(env_file: PathBuf) -> Result<Self> {
-        let api_keys_raw = get_env_var("API_KEYS")
-            .ok_or_else(|| anyhow!("API_KEYS (или QWEN36_API_KEYS) обязателен: JSON-массив объектов key/name"))?;
+        let api_keys_raw = get_env_var("API_KEYS").ok_or_else(|| {
+            anyhow!("API_KEYS (или API_KEYS) обязателен: JSON-массив объектов key/name")
+        })?;
         let api_keys = parse_api_keys(&api_keys_raw)?;
         let prefix_cache_mib = parse_env("PREFIX_CACHE_MIB", 0usize)?;
         let profile = get_env_var("PROFILE").map(PathBuf::from);
@@ -552,13 +554,12 @@ impl Config {
             max_queue: parse_env("MAX_QUEUE", 64usize)?,
             req_timeout: parse_env("REQ_TIMEOUT", 600u64)?,
             flash_attn: parse_env("FLASH_ATTN", 1u8)? != 0,
-            studio_url: get_env_var("STUDIO_URL")
-                .unwrap_or_else(|| "http://127.0.0.1:8888".into()),
+            studio_url: get_env_var("STUDIO_URL").unwrap_or_else(|| "http://127.0.0.1:8888".into()),
         };
         cfg.apply_vram_plan()?;
-        // Движок читает голое CTX, а сервер принимает ещё и QWEN36_CTX/YTTRI_CTX.
+        // Движок читает голое CTX, а сервер принимает ещё и CTX/YTTRI_CTX.
         // Без проброса окно страничного пула упиралось в собственный потолок
-        // 32768: при QWEN36_CTX=131072 движок молча скользил окном вместо
+        // 32768: при CTX=131072 движок молча скользил окном вместо
         // длинного контекста. Кладём значение уже после apply_vram_plan — оно
         // может оказаться меньше запрошенного.
         std::env::set_var("CTX", cfg.ctx.to_string());
@@ -568,9 +569,9 @@ impl Config {
     /// FR-002 + dynamic KV (vLLM-style): ctx НЕ режется под worst-case
     /// (только до native модели); общий KV-бюджет enforce'ится движком
     /// (admission + очередь + force-finish самого длинного слота).
-    /// Отключается QWEN36_NO_VRAM_PLAN=1. На macOS/CPU — без лимита.
+    /// Отключается NO_VRAM_PLAN=1. На macOS/CPU — без лимита.
     fn apply_vram_plan(&mut self) -> Result<()> {
-        if std::env::var_os("QWEN36_NO_VRAM_PLAN").is_some() {
+        if std::env::var_os("NO_VRAM_PLAN").is_some() {
             return Ok(());
         }
         let Some(total) = vram_plan::total_vram_mib() else {
@@ -588,27 +589,25 @@ impl Config {
 }
 
 fn parse_api_keys(raw: &str) -> Result<Vec<ApiKey>> {
-    let keys: Vec<ApiKey> = serde_json::from_str(raw)
-        .context("QWEN36_API_KEYS: ожидается JSON-массив объектов key/name")?;
+    let keys: Vec<ApiKey> =
+        serde_json::from_str(raw).context("API_KEYS: ожидается JSON-массив объектов key/name")?;
     if keys.is_empty() {
-        anyhow::bail!("QWEN36_API_KEYS: нужен хотя бы один ключ");
+        anyhow::bail!("API_KEYS: нужен хотя бы один ключ");
     }
     let mut names = std::collections::HashSet::new();
     let mut values = std::collections::HashSet::new();
     for entry in &keys {
         if entry.name.trim().is_empty() || entry.key.trim().is_empty() {
-            anyhow::bail!("QWEN36_API_KEYS: key и name не могут быть пустыми");
+            anyhow::bail!("API_KEYS: key и name не могут быть пустыми");
         }
         if entry.name.trim() != entry.name || entry.key.trim() != entry.key {
-            anyhow::bail!(
-                "QWEN36_API_KEYS: key и name не должны начинаться/заканчиваться пробелами"
-            );
+            anyhow::bail!("API_KEYS: key и name не должны начинаться/заканчиваться пробелами");
         }
         if !names.insert(entry.name.as_str()) {
-            anyhow::bail!("QWEN36_API_KEYS: повтор name {:?}", entry.name);
+            anyhow::bail!("API_KEYS: повтор name {:?}", entry.name);
         }
         if !values.insert(entry.key.as_str()) {
-            anyhow::bail!("QWEN36_API_KEYS: ключ {:?} указан повторно", entry.name);
+            anyhow::bail!("API_KEYS: ключ {:?} указан повторно", entry.name);
         }
     }
     Ok(keys)
@@ -659,11 +658,10 @@ fn valid_env_name(name: &str) -> bool {
         && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
+/// Имя переменной без префикса. Единственная форма — сервер и движок читают
+/// одно и то же имя.
 fn get_env_var(name: &str) -> Option<String> {
-    std::env::var(name)
-        .or_else(|_| std::env::var(format!("QWEN36_{name}")))
-        .or_else(|_| std::env::var(format!("YTTRI_{name}")))
-        .ok()
+    std::env::var(name).ok()
 }
 
 fn num_cpus() -> usize {
@@ -697,7 +695,15 @@ mod tests {
         top_k: usize,
         presence_penalty: f32,
     ) {
-        assert_preset_rp(presets, name, temperature, top_p, top_k, presence_penalty, 1.0)
+        assert_preset_rp(
+            presets,
+            name,
+            temperature,
+            top_p,
+            top_k,
+            presence_penalty,
+            1.0,
+        )
     }
 
     /// Ornith 1.5 намеренно идёт со штрафом 1.05: карточка его не задаёт, а без
@@ -712,12 +718,17 @@ mod tests {
         presence_penalty: f32,
         repetition_penalty: f32,
     ) {
-        let value = presets.get(name).unwrap_or_else(|| panic!("missing preset {name}"));
+        let value = presets
+            .get(name)
+            .unwrap_or_else(|| panic!("missing preset {name}"));
         assert_eq!(value.temperature, temperature, "{name}.temperature");
         assert_eq!(value.top_p, top_p, "{name}.top_p");
         assert_eq!(value.top_k, top_k, "{name}.top_k");
         assert_eq!(value.min_p, 0.0, "{name}.min_p");
-        assert_eq!(value.presence_penalty, presence_penalty, "{name}.presence_penalty");
+        assert_eq!(
+            value.presence_penalty, presence_penalty,
+            "{name}.presence_penalty"
+        );
         assert_eq!(
             value.repetition_penalty, repetition_penalty,
             "{name}.repetition_penalty"
@@ -731,7 +742,7 @@ mod tests {
             "gemma-4"
         );
         assert_eq!(
-            sampling_family_for_model("Ornith_1.5_9B_Q6_K.gguf"),
+            sampling_family_for_model("Ornith_1.5_9B_Q4_K_M.gguf"),
             "ornith-1.5"
         );
         assert_eq!(
@@ -751,11 +762,16 @@ mod tests {
     #[test]
     fn model_sampling_presets_match_official_recommendations() {
         let gemma = default_presets_for_model("gemma-4-E4B-it-Q8_0.gguf");
-        for mode in ["thinking", "thinking-coding", "instruct", "instruct-reasoning"] {
+        for mode in [
+            "thinking",
+            "thinking-coding",
+            "instruct",
+            "instruct-reasoning",
+        ] {
             assert_preset(&gemma, mode, 1.0, 0.95, 64, 0.0);
         }
 
-        let ornith = default_presets_for_model("Ornith-1.5-9B-Q6_K.gguf");
+        let ornith = default_presets_for_model("Ornith-1.5-9B-Q4_K_M.gguf");
         // repetition_penalty строго 1.0 как в карточке: 1.05 ломал shell-код.
         assert_preset(&ornith, "thinking", 1.0, 0.95, 20, 1.5);
         assert_preset(&ornith, "thinking-coding", 0.6, 0.95, 20, 0.0);
@@ -785,31 +801,35 @@ mod tests {
     // Тесты гоняют env процесса — сериализуем вручную через один тест.
     #[test]
     fn from_env_defaults_and_required_keys() {
-        // get_env_var читает сперва чистое имя, потом QWEN36_*/YTTRI_*.
-        // С появлением CLI чистые имена стали основными, поэтому чистить
-        // надо обе формы: иначе API_KEYS из окружения запуска отменяет
-        // проверку «без ключей старт запрещён».
+        // Чистим окружение запуска: иначе API_KEYS оттуда отменяет проверку
+        // «без ключей старт запрещён».
         for name in [
-            "API_KEYS", "PROFILE", "MODEL", "HOST", "PORT", "CTX", "SLOTS",
-            "MEDIA_TEMP", "PREFIX_CACHE_MIB",
+            "API_KEYS",
+            "PROFILE",
+            "MODEL",
+            "HOST",
+            "PORT",
+            "CTX",
+            "SLOTS",
+            "MEDIA_TEMP",
+            "PREFIX_CACHE_MIB",
         ] {
             env::remove_var(name);
-            env::remove_var(format!("YTTRI_{name}"));
         }
-        env::remove_var("QWEN36_API_KEYS");
+        env::remove_var("API_KEYS");
         assert!(Config::from_env().is_err(), "без API keys старт запрещён");
 
         env::set_var(
-            "QWEN36_API_KEYS",
+            "API_KEYS",
             r#"[{"key":"k1","name":"primary"},{"key":"k2","name":"backup"}]"#,
         );
-        env::remove_var("QWEN36_PROFILE");
-        env::remove_var("QWEN36_MODEL");
-        env::remove_var("QWEN36_HOST");
-        env::remove_var("QWEN36_PORT");
-        env::remove_var("QWEN36_CTX");
-        env::remove_var("QWEN36_SLOTS");
-        env::remove_var("QWEN36_MEDIA_TEMP");
+        env::remove_var("PROFILE");
+        env::remove_var("MODEL");
+        env::remove_var("HOST");
+        env::remove_var("PORT");
+        env::remove_var("CTX");
+        env::remove_var("SLOTS");
+        env::remove_var("MEDIA_TEMP");
         let c = Config::from_env().unwrap();
         assert!(c.profile.is_none());
         assert!(c.resolved_profile.is_none());
@@ -821,12 +841,8 @@ mod tests {
         assert_eq!(c.ctx, 131072);
         assert_eq!(c.slots, 4);
 
-        env::set_var("QWEN36_PORT", "9000");
-        env::set_var("QWEN36_CTX", "4096");
-        // from_env пробрасывает значения в голые CTX/PORT (d2283f6) — без
-        // очистки голые имена перебивают QWEN36_* (get_env_var читает их первыми).
-        env::remove_var("CTX");
-        env::remove_var("PORT");
+        env::set_var("PORT", "9000");
+        env::set_var("CTX", "4096");
         let c = Config::from_env().unwrap();
         assert_eq!(c.port, 9000);
         assert_eq!(c.ctx, 4096);
@@ -838,44 +854,44 @@ mod tests {
             r#"[{"key":"a","name":"same"},{"key":"b","name":"same"}]"#,
             r#"[{"key":" spaced","name":"bad"}]"#,
         ] {
-            env::set_var("QWEN36_API_KEYS", invalid);
+            env::set_var("API_KEYS", invalid);
             assert!(Config::from_env().is_err(), "{invalid}");
         }
-        env::set_var("QWEN36_API_KEYS", r#"[{"key":"k1","name":"primary"}]"#);
-        env::set_var("QWEN36_PORT", "x");
+        env::set_var("API_KEYS", r#"[{"key":"k1","name":"primary"}]"#);
+        env::set_var("PORT", "x");
         assert!(Config::from_env().is_err());
-        env::set_var("QWEN36_PORT", "8080");
-        env::set_var("QWEN36_PREFIX_CACHE_MIB", "1");
+        env::set_var("PORT", "8080");
+        env::set_var("PREFIX_CACHE_MIB", "1");
         let c = Config::from_env().unwrap();
         assert_eq!(c.prefix_cache_mib, 1);
-        env::remove_var("QWEN36_PREFIX_CACHE_MIB");
+        env::remove_var("PREFIX_CACHE_MIB");
 
         let path = std::env::temp_dir().join(format!("qwen36-env-{}.tmp", std::process::id()));
         std::fs::write(
             &path,
-            "# comment\nQWEN36_API_KEYS='[{\"key\":\"file-key\",\"name\":\"file\"}]'\nQWEN36_PORT=9001\n",
+            "# comment\nAPI_KEYS='[{\"key\":\"file-key\",\"name\":\"file\"}]'\nPORT=9001\n",
         )
         .unwrap();
-        env::remove_var("QWEN36_API_KEYS");
-        env::set_var("QWEN36_PORT", "9002");
+        env::remove_var("API_KEYS");
+        env::set_var("PORT", "9002");
         load_env_file(&path).unwrap();
-        assert_eq!(env::var("QWEN36_PORT").unwrap(), "9002");
+        assert_eq!(env::var("PORT").unwrap(), "9002");
         assert_eq!(
-            parse_api_keys(&env::var("QWEN36_API_KEYS").unwrap()).unwrap()[0].name,
+            parse_api_keys(&env::var("API_KEYS").unwrap()).unwrap()[0].name,
             "file"
         );
-        env::remove_var("QWEN36_API_KEYS");
-        env::remove_var("QWEN36_PORT");
+        env::remove_var("API_KEYS");
+        env::remove_var("PORT");
 
-        env::set_var("QWEN36_ENV_FILE", &path);
-        env::set_var("QWEN36_NO_VRAM_PLAN", "1");
+        env::set_var("ENV_FILE", &path);
+        env::set_var("NO_VRAM_PLAN", "1");
         let c = Config::load().unwrap();
         assert_eq!(c.api_keys[0].name, "file");
         assert_eq!(c.port, 9001);
-        env::remove_var("QWEN36_ENV_FILE");
-        env::remove_var("QWEN36_NO_VRAM_PLAN");
-        env::remove_var("QWEN36_API_KEYS");
-        env::remove_var("QWEN36_PORT");
+        env::remove_var("ENV_FILE");
+        env::remove_var("NO_VRAM_PLAN");
+        env::remove_var("API_KEYS");
+        env::remove_var("PORT");
         std::fs::remove_file(path).unwrap();
     }
 }

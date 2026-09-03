@@ -28,7 +28,7 @@ if (-not $server.StartsWith($release + '\', [StringComparison]::OrdinalIgnoreCas
 }
 $serverHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $server).Hash
 if ($serverHash -ine $profile.runtime.server.sha256) { throw 'runtime.server SHA-256 mismatch' }
-$env:QWEN36_PROFILE = $currentPath
-if ($EnvFile) { $env:QWEN36_ENV_FILE = [IO.Path]::GetFullPath($EnvFile) }
+$env:PROFILE = $currentPath
+if ($EnvFile) { $env:ENV_FILE = [IO.Path]::GetFullPath($EnvFile) }
 & $server
 exit $LASTEXITCODE

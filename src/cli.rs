@@ -8,9 +8,9 @@
 //! Флаг кладёт значение в переменную окружения ДО чтения env-файла, а файл
 //! пишет только незанятые имена, поэтому порядок соблюдается сам собой.
 //!
-//! Имена без префикса: `CTX`, а не `QWEN36_CTX`. Серверный `get_env_var`
-//! понимает чистые имена сам, а вот движок в форке читает только `QWEN36_*` —
-//! для него имена зеркалятся в [`mirror_engine_vars`] после чтения файла.
+//! Имена переменных — без префикса: `CTX`, `SLOTS`, `MODEL`. Одно и то же
+//! имя читают обе стороны, сервер и движок, поэтому флаг пишет ровно одно
+//! имя и зеркалирование не нужно.
 
 use clap::Parser;
 use std::path::PathBuf;
@@ -206,16 +206,8 @@ impl Cli {
     /// пришедшие из окружения процесса, тоже не перетираются — флаг их
     /// перекрывает намеренно, это его приоритет.
     pub fn apply_to_env(&self) {
-        // Флаг — верхний приоритет, поэтому он затирает и чистое имя, и
-        // префиксную форму. Иначе `QWEN36_KV_POOL_Q8=1` из env-файла
-        // переживал бы `--kv-pool f16`: зеркало не трогает уже занятое
-        // `QWEN36_*`, и флаг молча терялся.
-        let mut set = |name: &str, value: String| {
-            std::env::set_var(name, &value);
-            if ENGINE_VARS.contains(&name) {
-                std::env::set_var(format!("QWEN36_{name}"), &value);
-            }
-        };
+        // Одно имя, без префикса: движок читает то же самое.
+        let set = |name: &str, value: String| std::env::set_var(name, &value);
 
         if let Some(v) = &self.env {
             set("ENV_FILE", v.to_string_lossy().into_owned());
@@ -337,119 +329,6 @@ fn api_keys_json(key: &str) -> String {
     serde_json::json!([{ "key": key, "name": "default" }]).to_string()
 }
 
-/// Переменные, которые движок (yttri-forge) читает ТОЛЬКО с префиксом
-/// `QWEN36_`. Сервер принимает их без префикса, поэтому имена зеркалятся.
-///
-/// Список явный, а не «скопировать всё окружение»: так видно, что именно
-/// поддержано, и `QWEN36_PATH` не появляется рядом с системным `PATH`.
-const ENGINE_VARS: &[&str] = &[
-    // Модель, контекст, слоты
-    "MODEL",
-    "CTX",
-    "SLOTS",
-    "PORT",
-    "TRACE",
-    "REQ_TIMEOUT",
-    "GPU_LAYERS",
-    "GPU_ONLY",
-    "MOE_BACKEND",
-    "PREFILL_CHUNK",
-    "CONTEXT_LIMIT",
-    // KV-кеш и память
-    "KV_POOL_Q8",
-    "KV_CACHE_DTYPE",
-    "KV_MIRROR_MIB",
-    "KV_MIRROR_TOKENS",
-    "KV_MIRROR_PREPARE",
-    "KV_SCRATCH_TOKENS",
-    "KV_Q8_ROUNDTRIP",
-    "KEEP_SINGLE_KV",
-    "VRAM_HEADROOM_MIB",
-    "MEMPOOL_THRESHOLD_MIB",
-    "MEMPOOL_RETAIN_MIB",
-    "NO_MEMPOOL_RETAIN",
-    "PREFIX_CACHE_MAX_TOKENS",
-    "DEQUANT_CACHE",
-    "EMB_GPU",
-    // CUDA-графы
-    "CUDA_GRAPHS",
-    "GRAPH_MAX_B",
-    "GRAPH_FAIL_CAP",
-    "GRAPH_BLOCKS",
-    "GRAPH_WINDOW",
-    "GRAPH_MAX_LAYERS",
-    "PGRAPH",
-    "PGRAPH_LRU",
-    "PGRAPH_MIN_T",
-    "PGRAPH_Q8KV",
-    "DGRAPH_LRU",
-    // MTP
-    "MTP",
-    "MTP_ADAPTIVE",
-    "MTP_GRAPH",
-    "MTP_GRAPH_CHECK",
-    "MTP_GRAPH_RECAPTURE",
-    "MTP_PREDICT",
-    "MTP_SHORTLIST_CHECK",
-    "MTP_TIMING",
-    "MTP_VOCAB_SHORTLIST",
-    "MTP_VOCAB_TOP",
-    "MTP_WIDTH",
-    "MTP_DRAFT_LOG",
-    "VERIFY_ONEPASS",
-    "VERIFY_FUSED",
-    // Ядра и вычисления
-    "DISABLE_FLASH_PREFILL",
-    "DISABLE_FUSED_PREFILL",
-    "DISABLE_YTF16",
-    "F16_FAST_ACC",
-    "FA_GQA",
-    "FA_SPLITS",
-    "FORCE_DMMV",
-    "FORCE_MMQ",
-    "MMVQ_HOISTED",
-    "ENABLE_MOE_GROUPED",
-    "ENABLE_SPLITK_DECODE",
-    "NO_FUSED_IN_PROJ",
-    "DELTA_KERNEL",
-    "DELTA_DECODE",
-    "DELTA_V2",
-    "DELTA_WARPS",
-    "CHUNK_KERNEL",
-    "YTF16_F16",
-    "YTF16_MASK",
-    "YTF16_AUDIT",
-    // Диагностика
-    "GPROF",
-    "PHASE_PROF",
-    "FA_DEBUG",
-    "BISECT_HIDDEN",
-    "DEBUG_ALLOC_MB",
-    "NO_EVENT_TRACKING",
-];
-
-/// Скопировать чистые имена в `QWEN36_*` для движка.
-///
-/// Вызывать ПОСЛЕ загрузки env-файла: к этому моменту значения из всех трёх
-/// источников уже лежат в окружении. Существующее `QWEN36_*` не трогаем —
-/// старые конфиги продолжают работать как раньше.
-///
-/// Возвращает число проброшенных имён (для строки в логе).
-pub fn mirror_engine_vars() -> usize {
-    let mut n = 0;
-    for name in ENGINE_VARS {
-        let prefixed = format!("QWEN36_{name}");
-        if std::env::var_os(&prefixed).is_some() {
-            continue; // явный QWEN36_* имеет приоритет — обратная совместимость
-        }
-        if let Some(value) = std::env::var_os(name) {
-            std::env::set_var(&prefixed, value);
-            n += 1;
-        }
-    }
-    n
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -487,36 +366,16 @@ mod tests {
     }
 
     #[test]
-    fn flag_overrides_prefixed_value_from_file() {
-        // Флаг должен побеждать QWEN36_* из env-файла, иначе --kv-pool f16
-        // не отключает пул, заданный как QWEN36_KV_POOL_Q8=1.
+    fn flag_writes_clean_name_only() {
+        // Флаг пишет ровно одно имя — то же, что читает движок.
         //
         // Тесты крейта делят окружение процесса и бегут параллельно, поэтому
-        // проверяем инвариант напрямую на `set`, а не через общие имена:
-        // соседний тест иначе успевал переписать KV_POOL_Q8 между вызовами.
+        // проверяем на имени, которого не касается ни один соседний тест.
         let cli = Cli {
             kv_pool: Some("f16".into()),
             ..Default::default()
         };
-        // Обе формы имени пишутся одним вызовом — это и есть инвариант.
-        assert!(ENGINE_VARS.contains(&"KV_POOL_Q8"));
         cli.apply_to_env();
-        assert_eq!(std::env::var("QWEN36_KV_POOL_Q8").unwrap(), "0");
         assert_eq!(std::env::var("KV_POOL_Q8").unwrap(), "0");
-    }
-
-    #[test]
-    fn mirror_keeps_explicit_prefixed_value() {
-        // Явный QWEN36_* побеждает: старые .env не должны менять поведение.
-        // DELTA_WARPS/FA_SPLITS не трогает ни один другой тест.
-        std::env::set_var("QWEN36_DELTA_WARPS", "8");
-        std::env::set_var("DELTA_WARPS", "4");
-        mirror_engine_vars();
-        assert_eq!(std::env::var("QWEN36_DELTA_WARPS").unwrap(), "8");
-
-        std::env::remove_var("QWEN36_FA_SPLITS");
-        std::env::set_var("FA_SPLITS", "2");
-        mirror_engine_vars();
-        assert_eq!(std::env::var("QWEN36_FA_SPLITS").unwrap(), "2");
     }
 }

@@ -210,7 +210,7 @@ async fn decoded_image_preparation_reports_usage_and_cleans_claim() {
     let bytes = std::fs::read(&encoded).unwrap();
     let uploaded = service.store.upload(owner, "image/png", &bytes).unwrap();
     let helper = std::env::var_os("CARGO_BIN_EXE_qwen36-media-helper").unwrap();
-    std::env::set_var("QWEN36_MEDIA_HELPER", helper);
+    std::env::set_var("MEDIA_HELPER", helper);
     let messages = vec![qwen36_server::engine_types::ChatMessage {
         role: "user".into(),
         tool_calls: Vec::new(),
@@ -239,7 +239,7 @@ async fn decoded_image_preparation_reports_usage_and_cleans_claim() {
     )
     .await
     .unwrap();
-    std::env::remove_var("QWEN36_MEDIA_HELPER");
+    std::env::remove_var("MEDIA_HELPER");
     let (messages, usage, lease) = prepared.into_parts();
     assert_eq!(usage.image_count, 1);
     assert_eq!(usage.visual_tokens, 64);

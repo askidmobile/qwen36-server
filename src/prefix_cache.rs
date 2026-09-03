@@ -97,7 +97,11 @@ impl PrefixCache {
     /// Промпты короче блока не кэшируются — попадание с них невозможно.
     /// Возвращает true, если запись сохранена.
     pub fn put(&mut self, tokens: Vec<u32>, snap: StateSnapshot) -> bool {
-        debug_assert_eq!(snap.position, tokens.len(), "снимок не совпадает с токенами");
+        debug_assert_eq!(
+            snap.position,
+            tokens.len(),
+            "снимок не совпадает с токенами"
+        );
         if tokens.len() < BLOCK_TOKENS {
             return false;
         }
@@ -131,7 +135,8 @@ impl PrefixCache {
                 return false;
             }
         };
-        while self.total_bytes.saturating_add(size_bytes) > self.budget_bytes && !self.lru.is_empty()
+        while self.total_bytes.saturating_add(size_bytes) > self.budget_bytes
+            && !self.lru.is_empty()
         {
             self.evict_one();
         }
@@ -168,7 +173,9 @@ impl PrefixCache {
             let mut best: Option<u64> = None;
             let mut best_len = 0usize;
             for &id in ids {
-                let Some(e) = self.by_id.get(&id) else { continue };
+                let Some(e) = self.by_id.get(&id) else {
+                    continue;
+                };
                 if e.tokens.len() > best_len
                     && e.tokens.len() < tokens.len()
                     && e.tokens.as_slice() == &tokens[..e.tokens.len()]
@@ -201,7 +208,13 @@ impl PrefixCache {
         if let Some(best) = self
             .by_id
             .values()
-            .map(|e| e.tokens.iter().zip(tokens).take_while(|(a, b)| a == b).count())
+            .map(|e| {
+                e.tokens
+                    .iter()
+                    .zip(tokens)
+                    .take_while(|(a, b)| a == b)
+                    .count()
+            })
             .max()
         {
             eprintln!(
@@ -330,8 +343,12 @@ mod tests {
         other.extend(tokens_from(7777, BLOCK_TOKENS));
         assert!(c.find(&other, &Device::Cpu).is_none());
         // Расхождение в первом блоке.
-        assert!(c.find(&tokens_from(500, 4 * BLOCK_TOKENS), &Device::Cpu).is_none());
-        assert!(c.find(&tokens_from(1, BLOCK_TOKENS), &Device::Cpu).is_none());
+        assert!(c
+            .find(&tokens_from(500, 4 * BLOCK_TOKENS), &Device::Cpu)
+            .is_none());
+        assert!(c
+            .find(&tokens_from(1, BLOCK_TOKENS), &Device::Cpu)
+            .is_none());
     }
 
     #[test]
@@ -345,11 +362,17 @@ mod tests {
         // Ход продолжается третьим блоком → попадает длинная запись.
         let mut next = long.clone();
         next.extend(tokens_from(800, BLOCK_TOKENS));
-        assert_eq!(c.find(&next, &Device::Cpu).unwrap().prefix_len, 3 * BLOCK_TOKENS);
+        assert_eq!(
+            c.find(&next, &Device::Cpu).unwrap().prefix_len,
+            3 * BLOCK_TOKENS
+        );
         // Третий блок другой → отпадает длинная, остаётся короткая.
         let mut next2 = short.clone();
         next2.extend(tokens_from(999, BLOCK_TOKENS));
-        assert_eq!(c.find(&next2, &Device::Cpu).unwrap().prefix_len, 2 * BLOCK_TOKENS);
+        assert_eq!(
+            c.find(&next2, &Device::Cpu).unwrap().prefix_len,
+            2 * BLOCK_TOKENS
+        );
     }
 
     #[test]
@@ -364,7 +387,9 @@ mod tests {
         c.put_forced(key, stranger.clone(), snap_for(&stranger, 4096));
         let mut next = cached.clone();
         next.extend(tokens_from(9000, 10));
-        let hit = c.find(&next, &Device::Cpu).expect("настоящая запись находится");
+        let hit = c
+            .find(&next, &Device::Cpu)
+            .expect("настоящая запись находится");
         assert_eq!(hit.snap.position, 2 * BLOCK_TOKENS);
         assert_eq!(hit.prefix_len, 2 * BLOCK_TOKENS);
         // Промпт «чужой» записи не получает её состояние (общий хеш, разное

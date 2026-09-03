@@ -104,11 +104,11 @@ async fn server_wrapper_validates_helper_result() {
     image::RgbaImage::from_pixel(2, 2, image::Rgba([0, 255, 0, 255]))
         .save(&input)
         .unwrap();
-    std::env::set_var("QWEN36_MEDIA_HELPER", helper());
+    std::env::set_var("MEDIA_HELPER", helper());
     let result = qwen36_server::media::helper::decode(&request(&input, &output))
         .await
         .unwrap();
-    std::env::remove_var("QWEN36_MEDIA_HELPER");
+    std::env::remove_var("MEDIA_HELPER");
     assert_eq!(result.frames[0].bytes, 12);
     assert!(result.frames[0].path.starts_with(&output));
     let _ = std::fs::remove_dir_all(root);

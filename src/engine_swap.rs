@@ -77,13 +77,28 @@ impl Engine for SwappableEngine {
     }
 
     fn supports_vision(&self) -> bool {
-        self.inner.read().expect("engine lock").as_ref().map(|e| e.supports_vision()).unwrap_or(false)
+        self.inner
+            .read()
+            .expect("engine lock")
+            .as_ref()
+            .map(|e| e.supports_vision())
+            .unwrap_or(false)
     }
     fn supports_video(&self) -> bool {
-        self.inner.read().expect("engine lock").as_ref().map(|e| e.supports_video()).unwrap_or(false)
+        self.inner
+            .read()
+            .expect("engine lock")
+            .as_ref()
+            .map(|e| e.supports_video())
+            .unwrap_or(false)
     }
     fn supports_mtp(&self) -> bool {
-        self.inner.read().expect("engine lock").as_ref().map(|e| e.supports_mtp()).unwrap_or(false)
+        self.inner
+            .read()
+            .expect("engine lock")
+            .as_ref()
+            .map(|e| e.supports_mtp())
+            .unwrap_or(false)
     }
     fn model_info(&self) -> ModelInfo {
         let (path, ctx, slots) = self.current.read().expect("current lock").clone();
@@ -95,15 +110,13 @@ impl Engine for SwappableEngine {
                 info.slots = slots;
                 info
             }
-            None => {
-                ModelInfo {
-                    id: format!("loading: {}", crate::engine::model_id_from_filename(&path)),
-                    context_length: ctx,
-                    quant: crate::engine::quant_from_filename(&path),
-                    slots,
-                    modes: vec![],
-                }
-            }
+            None => ModelInfo {
+                id: format!("loading: {}", crate::engine::model_id_from_filename(&path)),
+                context_length: ctx,
+                quant: crate::engine::quant_from_filename(&path),
+                slots,
+                modes: vec![],
+            },
         }
     }
 }

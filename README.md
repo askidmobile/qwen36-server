@@ -12,13 +12,15 @@
 
 ```bash
 # минимум: модель и ключ
-yforge --model /models/Ornith-1.5-9B-Q6_K.gguf --api-key my-secret-key
+yforge --model /models/Ornith-1.5-9B-Q4_K_M.gguf --api-key my-secret-key
 
-# рабочая конфигурация на 12 ГБ VRAM
-yforge --model /models/Ornith-1.5-9B-MTP-Q6_K.gguf \
+# рабочая конфигурация на 12 ГБ VRAM, без MTP
+yforge --model /models/Ornith-1.5-9B-Q4_K_M.gguf \
        --api-key my-secret-key \
        --ctx 131072 --slots 1 \
-       --kv-pool q8 --cuda-graphs 1 --prefix-cache 8192
+       --kv-pool q8 --cuda-graphs 1 --prefix-cache 8192 --mtp 0
+# PGRAPH не задаётся: paged/graph-prefill fail-closed выключен;
+# CUDA graphs остаются включены для decode.
 
 # всё то же самое из файла
 yforge --env prod.env
@@ -37,7 +39,7 @@ yforge.exe --env prod.env > server.log 2>&1    # Windows
 yforge: === конфигурация ===
 yforge: build                  = 0.1.0 (CUDA)
 yforge: env file               = prod.env
-yforge: model                  = D:\Models\Ornith-1.5-9B-MTP-Q6_K.gguf
+yforge: model                  = D:\Models\Ornith-1.5-9B-Q4_K_M.gguf
 yforge: listen                 = 0.0.0.0:18099
 yforge: n_ctx                  = 131072
 yforge: n_slots                = 1
@@ -45,8 +47,8 @@ yforge: kv_pool                = q8 (int8, вдвое меньше VRAM)
 yforge: cuda_graphs            = включены
 ...
 yforge: === модель загружена ===
-yforge: id                     = ornith-1.5-9b-mtp
-yforge: quant                  = Q6_K
+yforge: id                     = ornith-1.5-9b
+yforge: quant                  = Q4_K_M
 yforge: === сервер запущен ===
 yforge: OpenAI API             = http://0.0.0.0:18099/v1
 yforge: готов принимать запросы
@@ -78,11 +80,11 @@ yforge --env prod.env                          # победит значение
 yforge --env prod.env --dry-run
 ```
 
-### Про префикс `QWEN36_`
+### Имена переменных
 
-Имена переменных **без префикса**: `CTX`, `SLOTS`, `MODEL`. Устаревшие
-`QWEN36_CTX` и `YTTRI_CTX` по-прежнему принимаются, и явно заданное имя с
-префиксом имеет приоритет над чистым — старые конфиги работают без правок.
+Без префикса: `CTX`, `SLOTS`, `MODEL`. Одно имя читают обе стороны — сервер и
+движок. Прежние формы `QWEN36_*` и `YTTRI_*` больше не поддерживаются: если в
+вашем `.env` они остались, уберите префикс.
 
 ---
 
@@ -183,7 +185,7 @@ HOST=0.0.0.0
 PORT=18099
 
 # ── Модель ────────────────────────────────────────────────────────────
-MODEL=D:\Models\deepreinforce-ai\Ornith-1.5-9B-GGUF\Ornith-1.5-9B-MTP-Q6_K.gguf
+MODEL=D:\Models\deepreinforce-ai\Ornith-1.5-9B-GGUF\Ornith-1.5-9B-Q4_K_M.gguf
 MODELS_DIR=D:\Models
 
 # ── Контекст и слоты ──────────────────────────────────────────────────
@@ -197,15 +199,13 @@ GPU_ONLY=1
 GPU_LAYERS=999
 KV_POOL_Q8=1              # int8-пул: вдвое меньше VRAM
 KV_CACHE_DTYPE=q8         # временный batched-KV без F16-дубля
-CUDA_GRAPHS=1             # KV пишется прямо в пул, без двойного расхода
+CUDA_GRAPHS=1             # ускоряет decode
+PGRAPH=off                # paged-prefill экспериментален: нарушает logits parity
 VRAM_HEADROOM_MIB=1536    # резерв под транзиенты
 PREFIX_CACHE_MIB=8192     # кеш префикса в системной памяти
 
-# ── MTP (спекулятивное декодирование) ─────────────────────────────────
-MTP=1
-MTP_PATH=D:\Models\deepreinforce-ai\Ornith-1.5-9B-GGUF\mtp-Ornith-1.5-9B-head-Q8_0.gguf
-MTP_VOCAB_SHORTLIST=D:\Projects\shortlist_ru_en40k.txt
-VERIFY_ONEPASS=1
+# ── MTP (production Ornith Q4_K_M работает без него) ──────────────────
+MTP=0
 
 # ── Политика сэмплинга ────────────────────────────────────────────────
 # По умолчанию клиентские temperature/top_p/top_k/min_p/penalties
@@ -217,8 +217,9 @@ THINKING=true
 # TOP_K=20
 ```
 
-`MAX_TOKENS` — только умолчание: клиентский `max_tokens` в запросе всегда
-имеет приоритет, `SAMPLING_LOCK` его не затрагивает.
+`MAX_TOKENS` — только умолчание: клиентские `max_tokens` и
+`max_completion_tokens` в запросе имеют приоритет, `SAMPLING_LOCK` их не
+затрагивает. Если присланы оба поля, их значения должны совпадать.
 
 ---
 
@@ -365,7 +366,7 @@ cargo build --release --bin yforge
 Пул выделяется на **полное окно сразу при старте**, поэтому занятость
 видеопамяти не зависит от того, насколько контекст заполнен.
 
-Пример на RTX 3060 12 ГБ, Ornith-1.5-9B Q6_K + MTP Q8_0, 128K, 1 слот:
+Исторический замер на RTX 3060 12 ГБ, Ornith-1.5-9B Q6_K + MTP Q8_0, 128K, 1 слот (не текущая production-модель):
 
 | Конфигурация | Idle VRAM | Пик | Выгрузка в RAM | Декод |
 |---|---|---|---|---|
@@ -451,8 +452,8 @@ yforge --help                            # full flag list
 
 Precedence: **CLI flags > process environment > env file**. Variable names
 carry no prefix (`CTX`, `SLOTS`, `MODEL`); the legacy `QWEN36_*` and `YTTRI_*`
-spellings are still accepted for backward compatibility. Logs go to
-stdout/stderr in `llama.cpp` style.
+spellings are no longer accepted. Logs go to stdout/stderr in `llama.cpp`
+style.
 
 Build: `--features cuda` (Windows/Linux), `--features metal` (macOS), no
 feature flag for CPU-only.

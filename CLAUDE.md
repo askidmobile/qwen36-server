@@ -25,7 +25,7 @@ Rust-сервер инференса Qwen3.6-27B (GGUF 2-bit) на собств�
 
 - Модель: unsloth/Qwen3.6-27B-GGUF → старт UD-Q2_K_XL (11.8 GB); фаза 2 — IQ2 (BD-003).
 - Контекст: 81 920 токенов (BD-009). Sliding window: system сохраняется, `truncated: true` (BD-017).
-- Auth: именованные ключи `QWEN36_API_KEYS`, одинаковые права (BD-021 overrides BD-005). LAN-only, HTTP (BD-006).
+- Auth: именованные ключи `API_KEYS`, одинаковые права (BD-021 overrides BD-005). LAN-only, HTTP (BD-006).
 - Сэмплинг-пресеты из model card Qwen3.6 (BD-016).
 
 ## Пайплайн работы

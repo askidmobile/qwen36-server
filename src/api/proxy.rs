@@ -27,10 +27,7 @@ pub struct ProxyState {
 
 /// Catch-all handler: проксирует запрос на Studio backend.
 /// При ошибке соединения и `GET /` — отдаёт fallback HTML.
-pub async fn proxy_handler(
-    State(state): State<Arc<ProxyState>>,
-    req: Request,
-) -> Response {
+pub async fn proxy_handler(State(state): State<Arc<ProxyState>>, req: Request) -> Response {
     // to_bytes отдаёт только тело, поэтому запрос сначала разбирается на
     // части: из них берутся путь, строка запроса и метод.
     let (parts, body) = req.into_parts();
@@ -39,16 +36,17 @@ pub async fn proxy_handler(
         Err(_) => return (StatusCode::BAD_REQUEST, "body read error").into_response(),
     };
     let path = parts.uri.path().trim_start_matches('/');
-    let query = parts.uri.query().map(|q| format!("?{q}")).unwrap_or_default();
+    let query = parts
+        .uri
+        .query()
+        .map(|q| format!("?{q}"))
+        .unwrap_or_default();
     let url = format!("{}/{path}{query}", state.studio_url);
 
     let method = reqwest::Method::from_bytes(parts.method.as_str().as_bytes())
         .unwrap_or(reqwest::Method::GET);
 
-    let mut fwd = state
-        .client
-        .request(method, &url)
-        .body(body_bytes.to_vec());
+    let mut fwd = state.client.request(method, &url).body(body_bytes.to_vec());
 
     // Копируем заголовки кроме host — Studio backend его отвергает.
     for (name, value) in parts.headers.iter() {
@@ -72,11 +70,9 @@ pub async fn proxy_handler(
                 }
                 builder = builder.header(name, value);
             }
-            builder
-                .body(Body::from(bytes))
-                .unwrap_or_else(|_| {
-                    (StatusCode::INTERNAL_SERVER_ERROR, "proxy build error").into_response()
-                })
+            builder.body(Body::from(bytes)).unwrap_or_else(|_| {
+                (StatusCode::INTERNAL_SERVER_ERROR, "proxy build error").into_response()
+            })
         }
         Err(_) => {
             // Studio недоступен — fallback на встроенный чат для GET /.
@@ -88,7 +84,11 @@ pub async fn proxy_handler(
                 )
                     .into_response()
             } else {
-                (StatusCode::BAD_GATEWAY, "Unsloth Studio backend unavailable").into_response()
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "Unsloth Studio backend unavailable",
+                )
+                    .into_response()
             }
         }
     }
@@ -101,9 +101,7 @@ pub fn proxy_router(studio_url: String) -> Router {
         .build()
         .expect("proxy client build");
     let state = Arc::new(ProxyState { client, studio_url });
-    Router::new()
-        .fallback(proxy_handler)
-        .with_state(state)
+    Router::new().fallback(proxy_handler).with_state(state)
 }
 
 // ponytail: proxy не ходит в engine — ProxyState без api_keys.

@@ -65,7 +65,12 @@ fn input_to_messages(input: &Value) -> Result<Vec<ChatMessage>, Response> {
                         .collect::<Result<Vec<ContentBlock>, Response>>()?,
                     _ => vec![],
                 };
-                Ok(ChatMessage { role, content, tool_calls: Vec::new(), reasoning_content: None })
+                Ok(ChatMessage {
+                    role,
+                    content,
+                    tool_calls: Vec::new(),
+                    reasoning_content: None,
+                })
             })
             .collect(),
         _ => Err(bad_request(
@@ -124,7 +129,11 @@ pub async fn responses(
         .read()
         .expect("sampling policy lock")
         .clone();
-    let preset_name = if defaults.thinking { "thinking" } else { "instruct" };
+    let preset_name = if defaults.thinking {
+        "thinking"
+    } else {
+        "instruct"
+    };
     let pv = crate::api::resolve_sampling(
         &state.presets.read().expect("presets lock"),
         preset_name,
@@ -160,10 +169,11 @@ pub async fn responses(
     let id = format!("resp_{}", uuid::Uuid::new_v4().simple());
     let model = state.engine.model_info().id;
 
-    let request = match prepare_inference_request(&state, messages, params, &owner, None, None).await {
-        Ok(request) => request,
-        Err(response) => return response,
-    };
+    let request =
+        match prepare_inference_request(&state, messages, params, &owner, None, None).await {
+            Ok(request) => request,
+            Err(response) => return response,
+        };
     if !req.stream {
         let out = match generate_collect(state.engine.as_ref(), request).await {
             Ok(o) => o,

@@ -1,12 +1,12 @@
 pub mod admin;
 pub mod anthropic;
-pub mod hf;
-pub mod proxy;
-pub mod tools;
 pub(crate) mod content;
+pub mod hf;
 pub mod media;
 pub mod openai;
+pub mod proxy;
 pub mod responses;
+pub mod tools;
 
 use axum::{
     body::Body,
@@ -32,9 +32,9 @@ pub struct AppState {
     pub api_keys: Arc<[crate::config::ApiKey]>,
     /// Тот же engine, но конкретный тип — для admin switch.
     pub switcher: Arc<crate::engine_swap::SwappableEngine>,
-    /// Корень сканирования GGUF (QWEN36_MODELS_DIR или директория модели).
+    /// Корень сканирования GGUF (MODELS_DIR или директория модели).
     pub models_dir: std::path::PathBuf,
-    /// Validated profile metadata; None для legacy `QWEN36_MODEL`.
+    /// Validated profile metadata; None для legacy `MODEL`.
     pub profile: Option<Arc<crate::profile::ResolvedProfile>>,
     /// CUDA device handle (для mempool trim при switch; None на macOS/CPU).
     /// Мутабельно: unload_model обнуляет, чтобы CUDA context разрушился и VRAM
@@ -257,10 +257,16 @@ pub async fn prepare_inference_request(
     tools: Option<serde_json::Value>,
     reasoning_effort: Option<String>,
 ) -> Result<crate::engine_types::InferenceRequest, Response> {
-    Ok(inference_request(messages, params, owner, tools, reasoning_effort))
+    Ok(inference_request(
+        messages,
+        params,
+        owner,
+        tools,
+        reasoning_effort,
+    ))
 }
 
-/// Запись запроса целиком (QWEN36_REQ_DEBUG=путь к файлу).
+/// Запись запроса целиком (REQ_DEBUG=путь к файлу).
 ///
 /// Нужна, когда дефект воспроизводится только в живой сессии агента и не
 /// воспроизводится синтетическим запросом. Без самого запроса — истории,
@@ -272,7 +278,7 @@ fn dump_request(
     tools: &Option<serde_json::Value>,
 ) {
     static PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    let Some(path) = PATH.get_or_init(|| std::env::var("QWEN36_REQ_DEBUG").ok()) else {
+    let Some(path) = PATH.get_or_init(|| std::env::var("REQ_DEBUG").ok()) else {
         return;
     };
     let msgs: Vec<serde_json::Value> = messages
@@ -310,7 +316,11 @@ fn dump_request(
         "tools_count": tools.as_ref().and_then(|t| t.as_array()).map(|a| a.len()),
         "messages": msgs,
     });
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         use std::io::Write;
         let _ = writeln!(f, "{dump}");
     }
@@ -366,7 +376,10 @@ pub async fn generate_collect(
     let mut logprobs: Option<Vec<crate::engine_types::TokenLogprob>> = None;
     while let Some(ev) = rx.recv().await {
         match ev {
-            crate::engine_types::StreamEvent::Delta { text: d, logprobs: lp } => {
+            crate::engine_types::StreamEvent::Delta {
+                text: d,
+                logprobs: lp,
+            } => {
                 text.push_str(&d);
                 if let Some(lp) = lp {
                     logprobs.get_or_insert_with(Vec::new).extend(lp);
@@ -440,16 +453,17 @@ pub fn resolve_sampling(
     defaults: &crate::config::SamplingDefaults,
     policy: &crate::config::SamplingPolicy,
 ) -> crate::config::SamplingPresetValues {
-    let mut v = presets.get(preset_name).cloned().unwrap_or(
-        crate::config::SamplingPresetValues {
+    let mut v = presets
+        .get(preset_name)
+        .cloned()
+        .unwrap_or(crate::config::SamplingPresetValues {
             temperature: defaults.temperature,
             top_p: defaults.top_p,
             top_k: defaults.top_k,
             min_p: defaults.min_p,
             presence_penalty: defaults.presence_penalty,
             repetition_penalty: defaults.repetition_penalty,
-        },
-    );
+        });
     policy.apply(&mut v);
     v
 }

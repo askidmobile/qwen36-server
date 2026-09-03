@@ -1,6 +1,6 @@
 //! Admin-эндпоинты: список локальных GGUF + горячая замена модели.
 //!
-//! - GET  /v1/available_models — *.gguf в QWEN36_MODELS_DIR (recursive ≤3 ур.)
+//! - GET  /v1/available_models — *.gguf в MODELS_DIR (recursive ≤3 ур.)
 //! - POST /v1/switch_model {path, ctx?, slots?} — выгрузить текущий движок,
 //!   дождаться освобождения VRAM, загрузить новый, swap. Во время загрузки
 //!   generate → 503. Ответ сразу (202), прогресс — через GET /v1/models.
@@ -145,9 +145,13 @@ pub fn scan_gguf_cached(dir: &Path, depth: usize, out: &mut Vec<Value>, use_cach
             // Capability registry: только архитектуры с реальным runtime route
             // получают supported=true. Прочие честно помечаются unsupported с reason.
             let size_mib = e.metadata().map(|m| m.len() / 1024 / 1024).unwrap_or(0);
-            let mtime = e.metadata().and_then(|m| m.modified()).ok()
+            let mtime = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs()).unwrap_or(0);
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
             let file_size = e.metadata().map(|m| m.len()).unwrap_or(0);
             let arch = cached_architecture(&p, mtime, file_size);
             let (supported, backend, reason) = crate::engine::architecture_capability(&arch);
@@ -302,7 +306,7 @@ pub async fn available_models(State(state): State<AppState>) -> Json<Value> {
 /// потока → trim CUDA mempool. Dispatch обязан выйти (break 'outer, poll 50мс) —
 /// тогда adapter drop вызывает cudaFree и VRAM реально возвращается ОС.
 /// Сохранить дефолты сэмплинга: обновить runtime + записать в .env.
-/// WebUI «Сохранить по умолчанию». .env переписывается по ключам QWEN36_*
+/// WebUI «Сохранить по умолчанию». .env переписывается по чистым ключам
 /// сэмплинга — остальное (секреты, модель) не трогается.
 pub async fn sampling_defaults(
     State(state): State<AppState>,
@@ -336,10 +340,7 @@ pub async fn sampling_defaults(
         .read()
         .expect("sampling policy lock")
         .lock;
-    *state
-        .sampling_policy
-        .write()
-        .expect("sampling policy lock") =
+    *state.sampling_policy.write().expect("sampling policy lock") =
         crate::config::SamplingPolicy::from_defaults(&req, lock);
     Json(json!({"status": "saved"})).into_response()
 }
@@ -367,8 +368,12 @@ fn persist_sampling(
         .lines()
         .map(|line| {
             let name = line.split('=').next().unwrap_or("").trim();
-            // Очищаем и старый префикс QWEN36_ если встречаем
-            let pure_name = name.strip_prefix("QWEN36_").unwrap_or(name);
+            // Старый префикс в .env срезаем: строка перезапишется чистым
+            // именем, и файл постепенно мигрирует сам.
+            let pure_name = name
+                .strip_prefix("QWEN36_")
+                .or_else(|| name.strip_prefix("YTTRI_"))
+                .unwrap_or(name);
             if let Some((k, v)) = keys.iter().find(|(k, _)| k == pure_name) {
                 seen.insert(k.to_string());
                 format!("{k}={v}")
@@ -387,7 +392,7 @@ fn persist_sampling(
 }
 
 /// Сохранить пресет режима для семейства активной модели в .env
-/// (QWEN36_MODEL_PRESETS JSON) + runtime. WebUI «Сохранить как пресет».
+/// (MODEL_PRESETS JSON) + runtime. WebUI «Сохранить как пресет».
 pub async fn sampling_preset(
     State(state): State<AppState>,
     Json(req): Json<PresetRequest>,
@@ -419,12 +424,7 @@ pub async fn sampling_preset(
         .map(|name| name.to_string_lossy())
         .unwrap_or_default();
     let family = crate::config::sampling_family_for_model(&model_name);
-    if let Err(e) = persist_model_preset(
-        &state.env_file,
-        family,
-        &req.name,
-        &req.values,
-    ) {
+    if let Err(e) = persist_model_preset(&state.env_file, family, &req.name, &req.values) {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "api_error",
@@ -459,13 +459,12 @@ fn persist_model_preset(
     let existing = std::fs::read_to_string(path).unwrap_or_default();
     let existing_json = existing.lines().find_map(|line| {
         let trimmed = line.trim_start();
-        ["MODEL_PRESETS=", "QWEN36_MODEL_PRESETS=", "YTTRI_MODEL_PRESETS="]
+        ["MODEL_PRESETS=", "MODEL_PRESETS=", "YTTRI_MODEL_PRESETS="]
             .iter()
             .find_map(|prefix| trimmed.strip_prefix(prefix))
             .map(|raw| raw.trim().trim_matches(['\'', '"']))
     });
     let inherited_json = std::env::var("MODEL_PRESETS")
-        .or_else(|_| std::env::var("QWEN36_MODEL_PRESETS"))
         .or_else(|_| std::env::var("YTTRI_MODEL_PRESETS"))
         .ok();
     let raw = existing_json.or(inherited_json.as_deref());
@@ -478,7 +477,7 @@ fn persist_model_preset(
         .map(|line| {
             let trimmed = line.trim_start();
             if trimmed.starts_with("MODEL_PRESETS=")
-                || trimmed.starts_with("QWEN36_MODEL_PRESETS=")
+                || trimmed.starts_with("MODEL_PRESETS=")
                 || trimmed.starts_with("YTTRI_MODEL_PRESETS=")
             {
                 replaced = true;
@@ -872,13 +871,7 @@ mod tests {
         })
         .to_string();
         let gemma = values(1.0, 64);
-        let updated = updated_model_presets(
-            Some(&initial),
-            "gemma-4",
-            "thinking",
-            &gemma,
-        )
-        .unwrap();
+        let updated = updated_model_presets(Some(&initial), "gemma-4", "thinking", &gemma).unwrap();
 
         assert_eq!(updated["gemma-4"]["thinking"], gemma);
         assert_eq!(updated["qwen-3.8"]["thinking-coding"], qwen);

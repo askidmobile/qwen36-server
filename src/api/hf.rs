@@ -74,7 +74,11 @@ pub struct SearchQuery {
 pub async fn hf_search(Query(q): Query<SearchQuery>) -> Response {
     let q = q.q.trim();
     if q.len() < 2 {
-        return api_error(StatusCode::BAD_REQUEST, "invalid_request_error", "q too short");
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "q too short",
+        );
     }
     let url = format!("{HF}/api/models?search={q}&filter=gguf&full=true&limit=15");
     let resp = match client().get(&url).send().await {
@@ -117,7 +121,12 @@ pub async fn hf_search(Query(q): Query<SearchQuery>) -> Response {
                 "gguf_files": files,
             })
         })
-        .filter(|m| !m["gguf_files"].as_array().map(|f| f.is_empty()).unwrap_or(true))
+        .filter(|m| {
+            !m["gguf_files"]
+                .as_array()
+                .map(|f| f.is_empty())
+                .unwrap_or(true)
+        })
         .collect();
     Json(json!({ "results": out })).into_response()
 }
@@ -184,7 +193,11 @@ pub struct ProbeQuery {
 /// совместимости с текущей VRAM (влезет ли с весами + минимальный KV).
 pub async fn hf_probe(Query(q): Query<ProbeQuery>) -> Response {
     if !valid_repo(&q.repo) || !valid_file(&q.file) {
-        return api_error(StatusCode::BAD_REQUEST, "invalid_request_error", "bad repo/file");
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "bad repo/file",
+        );
     }
     let url = format!("{HF}/{}/resolve/main/{}", q.repo, q.file);
     let resp = match client()
@@ -292,7 +305,11 @@ pub async fn hf_download(
     Json(req): Json<DownloadRequest>,
 ) -> Response {
     if !valid_repo(&req.repo) || !valid_file(&req.file) {
-        return api_error(StatusCode::BAD_REQUEST, "invalid_request_error", "bad repo/file");
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "bad repo/file",
+        );
     }
     let key = format!("{}/{}", req.repo, req.file);
     {
@@ -341,7 +358,11 @@ pub async fn hf_download(
         };
     });
 
-    (StatusCode::ACCEPTED, Json(json!({"status": "downloading", "key": key}))).into_response()
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({"status": "downloading", "key": key})),
+    )
+        .into_response()
 }
 
 async fn download_file(
@@ -383,7 +404,11 @@ async fn download_file(
                 }
                 ds.total.store(total, AOrd::Relaxed);
             }
-        } else if let Some(cr) = resp.headers().get("content-range").and_then(|v| v.to_str().ok()) {
+        } else if let Some(cr) = resp
+            .headers()
+            .get("content-range")
+            .and_then(|v| v.to_str().ok())
+        {
             if let Some(t) = cr.rsplit('/').next().and_then(|v| v.parse::<u64>().ok()) {
                 ds.total.store(t, AOrd::Relaxed);
             }
@@ -397,8 +422,10 @@ async fn download_file(
                 }
                 Ok(None) => break,
                 Err(e) => {
-                    eprintln!("[hf-dl] attempt {attempt} stream broke at {} bytes: {e}",
-                        ds.done.load(AOrd::Relaxed));
+                    eprintln!(
+                        "[hf-dl] attempt {attempt} stream broke at {} bytes: {e}",
+                        ds.done.load(AOrd::Relaxed)
+                    );
                     stream_failed = true;
                     break;
                 }

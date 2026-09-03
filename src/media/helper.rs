@@ -126,7 +126,7 @@ fn validate_result(request: &DecodeRequest, result: &DecodeResult) -> Result<(),
 }
 
 fn sibling_helper() -> Result<PathBuf, MediaError> {
-    if let Some(path) = std::env::var_os("QWEN36_MEDIA_HELPER") {
+    if let Some(path) = std::env::var_os("MEDIA_HELPER") {
         return Ok(PathBuf::from(path));
     }
     let executable = std::env::current_exe().map_err(|_| {

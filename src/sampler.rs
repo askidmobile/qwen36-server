@@ -115,7 +115,9 @@ pub fn sample_with_seen(
     let logits: &[f32] = if penalties {
         let mut l = logits.to_vec();
         for &t in seen {
-            let Some(v) = l.get_mut(t as usize) else { continue };
+            let Some(v) = l.get_mut(t as usize) else {
+                continue;
+            };
             if presence_penalty != 0.0 {
                 *v -= presence_penalty;
             }
@@ -175,7 +177,12 @@ pub fn sample_with_seen(
     // сортировки. idx[0] — глобальный максимум в обоих случаях.
     let max_l = logits[idx[0] as usize];
     let full_denom: Option<f32> = if top_k == 0 && idx.len() < logits.len() {
-        Some(logits.iter().map(|&l| ((l - max_l) / temperature).exp()).sum())
+        Some(
+            logits
+                .iter()
+                .map(|&l| ((l - max_l) / temperature).exp())
+                .sum(),
+        )
     } else {
         None
     };
@@ -192,15 +199,15 @@ pub fn sample_with_seen(
     };
     let mut probs = softmax(&idx, full_denom);
 
-    // top_p (nucleus): оставляем префикс с кумулятивной вероятностью <= top_p,
-    // но минимум один токен.
+    // top_p (nucleus): оставляем минимальный префикс, чья кумулятивная
+    // вероятность >= top_p, включая пересёкший порог токен (llama.cpp/HF).
     if top_p < 1.0 {
         let nucleus = |probs: &[f32]| -> Option<usize> {
             let mut cum = 0.0;
             for (i, &p) in probs.iter().enumerate() {
                 cum += p;
-                if cum > top_p && i > 0 {
-                    return Some(i);
+                if cum >= top_p {
+                    return Some(i + 1);
                 }
             }
             None
@@ -411,8 +418,7 @@ mod tests {
             x = x
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
-            *v = ((x >> 33) as f32 / (1u64 << 31) as f32) * 24.0 - 12.0
-                + (i % 7) as f32 * 0.1;
+            *v = ((x >> 33) as f32 / (1u64 << 31) as f32) * 24.0 - 12.0 + (i % 7) as f32 * 0.1;
         }
         logits[777] = 30.0;
         logits[778] = 29.7;
@@ -439,7 +445,10 @@ mod tests {
 
         // Сумма вероятностей подмножества не может превышать единицу.
         let s: f64 = got.top.iter().map(|&(_, lp)| (lp as f64).exp()).sum();
-        assert!(s <= 1.0 + 1e-6, "сумма вероятностей топа больше единицы: {s}");
+        assert!(
+            s <= 1.0 + 1e-6,
+            "сумма вероятностей топа больше единицы: {s}"
+        );
 
         // Топ отсортирован по убыванию и начинается с глобального максимума.
         assert_eq!(got.top.len(), 20);
@@ -477,14 +486,26 @@ mod tests {
                     &logits, temp, 20, 0.95, 0.0, pres, rep, &seen, &mut a,
                 ));
                 let (t, lp) = sample_with_seen_logprobs(
-                    &logits, temp, 20, 0.95, 0.0, pres, rep, &seen, &mut b, Some(5),
+                    &logits,
+                    temp,
+                    20,
+                    0.95,
+                    0.0,
+                    pres,
+                    rep,
+                    &seen,
+                    &mut b,
+                    Some(5),
                 );
                 with.push(t);
                 let lp = lp.expect("logprobs запрошены, но не вернулись");
                 assert_eq!(lp.token, t, "logprob приписан не тому токену");
                 assert_eq!(lp.top.len(), 5);
             }
-            assert_eq!(plain, with, "включение logprobs изменило выбор при temp={temp}");
+            assert_eq!(
+                plain, with,
+                "включение logprobs изменило выбор при temp={temp}"
+            );
         }
     }
 
@@ -524,6 +545,21 @@ mod tests {
             let t = sample(&logits, 1.0, 0, 1.0, 0.5, 0.0, 1.0, &[], &mut rng);
             assert_eq!(t, 0);
         }
+    }
+
+    #[test]
+    fn top_p_includes_threshold_crossing_token() {
+        // probs после softmax: ~0.50, 0.30, 0.20. При top_p=0.6 нуклеус
+        // обязан содержать первые два токена, а не только первый.
+        let logits = vec![0.916_290_76, 0.405_465_1, 0.0];
+        let mut saw_second = false;
+        for seed in 1..100u64 {
+            let mut rng = Rng::new(seed);
+            let token = sample(&logits, 1.0, 0, 0.6, 0.0, 0.0, 1.0, &[], &mut rng);
+            assert_ne!(token, 2);
+            saw_second |= token == 1;
+        }
+        assert!(saw_second, "пересёкший top_p токен был ошибочно исключён");
     }
 
     #[test]

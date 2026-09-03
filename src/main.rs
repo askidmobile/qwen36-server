@@ -15,7 +15,7 @@ use anyhow::Result;
 use clap::Parser;
 use qwen36_server::{
     api::{build_router, AppState},
-    cli::{mirror_engine_vars, Cli},
+    cli::Cli,
     config::Config,
     engine::{CandleEngine, Engine},
     engine_batched::{BatchConfig, BatchedEngine},
@@ -45,9 +45,6 @@ async fn main() -> Result<()> {
     #[cfg(feature = "cuda")]
     qwen36_server::engine::cuda_prefer_blocking_sync();
     let cfg = Config::load()?;
-    // Движок в форке читает только QWEN36_*; чистые имена зеркалим после
-    // загрузки файла, когда все три источника уже слиты в окружение.
-    let mirrored = mirror_engine_vars();
     let profile = cfg.resolved_profile.clone();
     let media = Arc::new(qwen36_server::media::MediaService::new(
         qwen36_server::media::MediaConfig {
@@ -60,11 +57,13 @@ async fn main() -> Result<()> {
         std::time::Duration::from_secs(60),
     );
     log_section("конфигурация");
-    log_kv!("build", "{} ({})", env!("CARGO_PKG_VERSION"), backend_name());
+    log_kv!(
+        "build",
+        "{} ({})",
+        env!("CARGO_PKG_VERSION"),
+        backend_name()
+    );
     log_kv!("env file", "{}", cfg.env_file.display());
-    if mirrored > 0 {
-        log_kv!("engine vars", "{mirrored} проброшено как QWEN36_*");
-    }
     log_kv!("model", "{}", cfg.model.display());
     if let Some(profile) = &cfg.profile {
         log_kv!("profile", "{}", profile.display());
@@ -89,7 +88,7 @@ async fn main() -> Result<()> {
     log_kv!(
         "kv_pool",
         "{}",
-        match std::env::var("QWEN36_KV_POOL_Q8").as_deref() {
+        match std::env::var("KV_POOL_Q8").as_deref() {
             Ok("1") => "q8 (int8, вдвое меньше VRAM)",
             _ => "f16",
         }
@@ -97,7 +96,7 @@ async fn main() -> Result<()> {
     log_kv!(
         "cuda_graphs",
         "{}",
-        match std::env::var("QWEN36_CUDA_GRAPHS").as_deref() {
+        match std::env::var("CUDA_GRAPHS").as_deref() {
             Ok("1") => "включены",
             _ => "выключены",
         }
@@ -133,11 +132,8 @@ async fn main() -> Result<()> {
     // (capacity_b x max_blocks), поэтому SLOTS=1 вдвое дешевле по VRAM и на
     // 12 ГБ это прямо удваивает достижимый контекст. Раньше одиночный слот
     // уходил на CandleEngine и терял CUDA-графы вместе со скоростью декода.
-    // QWEN36_FORCE_CANDLE_ENGINE=1 возвращает прежний путь для отладки.
-    let force_candle = std::env::var("FORCE_CANDLE_ENGINE")
-        .or_else(|_| std::env::var("QWEN36_FORCE_CANDLE_ENGINE"))
-        .as_deref()
-        == Ok("1");
+    // FORCE_CANDLE_ENGINE=1 возвращает прежний путь для отладки.
+    let force_candle = std::env::var("FORCE_CANDLE_ENGINE").as_deref() == Ok("1");
     let engine: Arc<dyn Engine> = if qwen35 && !force_candle {
         let bcfg = BatchConfig {
             model_path: cfg.model.to_string_lossy().into_owned(),
@@ -153,10 +149,7 @@ async fn main() -> Result<()> {
             qwen36_server::profile::ComponentArtifact::Available { path } => Some(path.clone()),
             _ => None,
         });
-        let mtp_enabled = match std::env::var("MTP")
-            .or_else(|_| std::env::var("QWEN36_MTP"))
-            .as_deref()
-        {
+        let mtp_enabled = match std::env::var("MTP").as_deref() {
             Ok("1") => true,
             Ok("0") | Err(_) => false,
             Ok(value) => anyhow::bail!("MTP must be 0 or 1, got {value:?}"),
@@ -164,7 +157,7 @@ async fn main() -> Result<()> {
         // Env-фолбэк должен быть ВНУТРИ проверки mtp_enabled, а не после неё.
         // Раньше он висел на .or_else(), который срабатывает ровно тогда, когда
         // предыдущее звено дало None — то есть при MTP=0. Выключатель включал:
-        // при заданном QWEN36_MTP_PATH спекуляция работала и с MTP=0
+        // при заданном MTP_PATH спекуляция работала и с MTP=0
         // (замер: drafted=316, accepted=130 при MTP=0).
         let mtp_path = if mtp_enabled {
             profile
@@ -179,7 +172,6 @@ async fn main() -> Result<()> {
                 // модели, для которых манифест ещё не собран.
                 .or_else(|| {
                     std::env::var("MTP_PATH")
-                        .or_else(|_| std::env::var("QWEN36_MTP_PATH"))
                         .ok()
                         .filter(|p| !p.is_empty())
                         .map(std::path::PathBuf::from)
@@ -204,10 +196,9 @@ async fn main() -> Result<()> {
     log_kv!("n_ctx (факт)", "{}", info.context_length);
     log_kv!("n_slots (факт)", "{}", info.slots);
 
-    // Корень сканирования моделей: MODELS_DIR (или QWEN36_MODELS_DIR) или родитель директории
+    // Корень сканирования моделей: MODELS_DIR (или MODELS_DIR) или родитель директории
     // модели (D:\Models\org\repo\model.gguf → D:\Models).
     let models_dir = std::env::var("MODELS_DIR")
-        .or_else(|_| std::env::var("QWEN36_MODELS_DIR"))
         .map(std::path::PathBuf::from)
         .ok()
         .or_else(|| {
@@ -233,19 +224,23 @@ async fn main() -> Result<()> {
         cuda_device,
         hf_downloads: Default::default(),
         sampling: std::sync::Arc::new(std::sync::RwLock::new(cfg.sampling.clone())),
-        sampling_policy: std::sync::Arc::new(std::sync::RwLock::new(
-            cfg.sampling_policy.clone(),
-        )),
+        sampling_policy: std::sync::Arc::new(std::sync::RwLock::new(cfg.sampling_policy.clone())),
         presets: std::sync::Arc::new(std::sync::RwLock::new(cfg.presets.clone())),
         env_file: cfg.env_file.clone(),
     };
-    let app = build_router(state)
-        .merge(qwen36_server::api::proxy::proxy_router(cfg.studio_url.clone()));
+    let app = build_router(state).merge(qwen36_server::api::proxy::proxy_router(
+        cfg.studio_url.clone(),
+    ));
     let listener = tokio::net::TcpListener::bind(format!("{}:{}", cfg.host, cfg.port)).await?;
     log_section("сервер запущен");
     log_kv!("studio proxy", "{}", cfg.studio_url);
     log_kv!("OpenAI API", "http://{}:{}/v1", cfg.host, cfg.port);
-    log_kv!("Anthropic API", "http://{}:{}/v1/messages", cfg.host, cfg.port);
+    log_kv!(
+        "Anthropic API",
+        "http://{}:{}/v1/messages",
+        cfg.host,
+        cfg.port
+    );
     log_kv!("WebUI", "http://{}:{}/", cfg.host, cfg.port);
     println!("\nyforge: готов принимать запросы");
     axum::serve(listener, app).await?;

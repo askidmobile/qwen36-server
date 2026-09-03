@@ -9,7 +9,7 @@
 //! - TODO-F5 (форк): `Sampler::sample_indexed(slot, generated, logits)` — per-request params.
 //! - TODO-F6 (форк): `BatchScheduler::slots_mut()` — сбор Finished.
 
-use std::collections::{HashSet, HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -31,8 +31,8 @@ use crate::engine_types::{
     ChatMessage, Engine, GenParams, GenerationUsage, InferenceRequest, MediaUsage, ModelInfo,
     StreamEvent, TokenLogprob,
 };
-use crate::prefix_cache::PrefixCache;
 use crate::media::prepare::{PreparedContentBlock, PreparedLease};
+use crate::prefix_cache::PrefixCache;
 use crate::sampler::{self, Rng};
 
 /// Макс. слотов = DECODE_BATCH_CAPACITY форка.
@@ -59,11 +59,7 @@ pub struct BatchConfig {
 
 impl BatchConfig {
     pub fn from_env() -> Self {
-        let get = |k: &str| {
-            std::env::var(k)
-                .or_else(|_| std::env::var(format!("QWEN36_{k}")))
-                .ok()
-        };
+        let get = |k: &str| std::env::var(k).ok();
         let num = |k: &str, d: usize| get(k).and_then(|v| v.parse().ok()).unwrap_or(d);
         let mut slots = num("SLOTS", 4);
         if slots > MAX_SLOTS {
@@ -103,7 +99,7 @@ enum IngestMsg {
     Admit(AdmitReq),
 }
 
-/// Хостовые фазы шага (QWEN36_HOST_TIMING=1): сэмплер и drain отдельно от
+/// Хостовые фазы шага (HOST_TIMING=1): сэмплер и drain отдельно от
 /// ожидания GPU. CPU-время процесса здесь бесполезно — при spin-wait драйвера
 /// оно тождественно времени на стене.
 static HOST_SAMPLE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -213,7 +209,7 @@ impl BatchedEngine {
                 MAX_SLOTS
             );
         }
-        // Prefix cache: включается по QWEN36_PREFIX_CACHE_MIB>0 (default 0 =
+        // Prefix cache: включается по PREFIX_CACHE_MIB>0 (default 0 =
         // выключен). Int8-пул KV снимками теперь покрыт: снимок переносит
         // байты вместе с масштабами постранично, без де/реквантования.
         let cfg = Arc::new(cfg);
@@ -221,13 +217,13 @@ impl BatchedEngine {
         // большим запасом VRAM или при одном активном длинном запросе.
         // По умолчанию ВЫКЛЮЧЕНЫ: на 12 GB полное покрытие 24K x 2 слота
         // (~960 MiB) оставляет <100 MiB на транзиенты префилла → регрессия
-        // (урок 2026-08-23). Включать явно через QWEN36_KV_MIRROR_TOKENS.
+        // (урок 2026-08-23). Включать явно через KV_MIRROR_TOKENS.
         #[cfg(feature = "cuda")]
-        if let Some(mirror_tokens) = std::env::var("QWEN36_KV_MIRROR_TOKENS")
+        if let Some(mirror_tokens) = std::env::var("KV_MIRROR_TOKENS")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
         {
-            std::env::set_var("QWEN36_KV_MIRROR_PREPARE", mirror_tokens.to_string());
+            std::env::set_var("KV_MIRROR_PREPARE", mirror_tokens.to_string());
         }
         let (tx_ingest, rx_ingest) = mpsc::channel(cfg.max_queue);
 
@@ -313,15 +309,10 @@ impl BatchedEngine {
             adapter.set_prefix_capture(cfg2.prefix_cache_mib > 0);
             let scheduler = BatchScheduler::new(adapter, cfg2.slots, eos, vocab);
             ready.store(true, Ordering::Relaxed);
-            let cache = (cfg2.prefix_cache_mib > 0).then(|| PrefixCache::new(cfg2.prefix_cache_mib));
+            let cache =
+                (cfg2.prefix_cache_mib > 0).then(|| PrefixCache::new(cfg2.prefix_cache_mib));
             dispatch_loop(
-                scheduler,
-                rx_ingest,
-                cfg2,
-                in_flight,
-                tokenizer,
-                shutdown2,
-                cache,
+                scheduler, rx_ingest, cfg2, in_flight, tokenizer, shutdown2, cache,
             );
         });
         *engine.dispatch_handle.lock().expect("dispatch lock") = Some(handle);
@@ -375,7 +366,7 @@ impl Engine for BatchedEngine {
             .into());
         }
         if self.in_flight.load(Ordering::Relaxed) >= self.max_queue + MAX_SLOTS {
-            bail!("queue full (QWEN36_MAX_QUEUE)");
+            bail!("queue full (MAX_QUEUE)");
         }
 
         let prepared = if has_media {
@@ -559,11 +550,17 @@ impl Engine for BatchedEngine {
         Ok(out_rx)
     }
 
-    fn supports_vision(&self) -> bool { self.vision_path.is_some() }
-    fn supports_video(&self) -> bool { self.vision_path.is_some() }
+    fn supports_vision(&self) -> bool {
+        self.vision_path.is_some()
+    }
+    fn supports_video(&self) -> bool {
+        self.vision_path.is_some()
+    }
     // Веса MTP заданы И загрузились: при провале load_error непуст и движок
     // до готовности не доходит, поэтому одного пути достаточно.
-    fn supports_mtp(&self) -> bool { self.mtp_path.is_some() }
+    fn supports_mtp(&self) -> bool {
+        self.mtp_path.is_some()
+    }
     fn model_info(&self) -> ModelInfo {
         self.info.clone()
     }
@@ -610,11 +607,11 @@ fn dispatch_loop(
     // Копим промежуток ТОЛЬКО после шага, который реально работал: иначе в
     // сумму попадает ожидание запросов, и число раздувается в разы.
     let mut last_step_busy = false;
-    let host_timing_on = std::env::var("QWEN36_HOST_TIMING")
+    let host_timing_on = std::env::var("HOST_TIMING")
         .map(|v| v == "1")
         .unwrap_or(false);
     let (mut host_steps, mut host_step_ns) = (0u64, 0u64);
-    let timing_on = std::env::var("QWEN36_MTP_TIMING")
+    let timing_on = std::env::var("MTP_TIMING")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     let mut since_print = 0u64;
@@ -735,7 +732,11 @@ fn dispatch_loop(
                 eprintln!(
                     "[host] steps=48 step={:.2}ms sample={:.3}ms/call x{} drain={:.3}ms/step",
                     host_step_ns as f64 / 48e6,
-                    if s_n > 0 { s_ns as f64 / s_n as f64 / 1e6 } else { 0.0 },
+                    if s_n > 0 {
+                        s_ns as f64 / s_n as f64 / 1e6
+                    } else {
+                        0.0
+                    },
                     s_n,
                     d_ns as f64 / 48e6,
                 );
@@ -813,9 +814,7 @@ fn dispatch_loop(
                             pc.len(),
                         );
                     } else {
-                        eprintln!(
-                            "[pcache] put rejected: {prompt_len} tok, snap {snap_mib} MiB"
-                        );
+                        eprintln!("[pcache] put rejected: {prompt_len} tok, snap {snap_mib} MiB");
                     }
                 } else {
                     eprintln!("[pcache] no boundary snapshot for slot {idx}");
@@ -877,7 +876,12 @@ fn dispatch_loop(
                 .as_ref()
                 .map(|c| format!("{} ent/{}MiB", c.len(), c.total_bytes() / (1024 * 1024)))
                 .unwrap_or_else(|| "off".into());
-            eprintln!("[hb] pending={} slots={} pcache={}", pending.len(), st.join(" "), pc);
+            eprintln!(
+                "[hb] pending={} slots={} pcache={}",
+                pending.len(),
+                st.join(" "),
+                pc
+            );
             last_hb = Instant::now();
         }
 
@@ -1035,8 +1039,8 @@ fn drain_after_step(
         // (U+FFFD на конце) мы не останавливаемся. Раньше decode шёл по всей
         // generated на каждом шаге и emitted_text копировался целиком:
         // O(n) на токен, O(n²) на запрос.
-        let tail_text = tokenizer::decode_text(tokenizer, &generated[b.stable_toks..])
-            .unwrap_or_default();
+        let tail_text =
+            tokenizer::decode_text(tokenizer, &generated[b.stable_toks..]).unwrap_or_default();
         let emitted_tail_len = b.emitted_text.len() - b.stable_len;
 
         // Stop-строки: ищем в хвосте длиной max_stop_len + последний кусок.
@@ -1135,12 +1139,7 @@ const LOOP_MIN_SPAN: usize = 96;
 /// Сторож зацикливания. `LOOP_GUARD=0` выключает.
 fn loop_guard_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        std::env::var("LOOP_GUARD")
-            .or_else(|_| std::env::var("QWEN36_LOOP_GUARD"))
-            .as_deref()
-            != Ok("0")
-    })
+    *ON.get_or_init(|| std::env::var("LOOP_GUARD").as_deref() != Ok("0"))
 }
 
 /// Период повторяющегося хвоста, если генерация зациклилась.
@@ -1214,9 +1213,15 @@ fn admit(
     cache: &mut Option<PrefixCache>,
 ) {
     match bindings.iter().position(|b| b.is_none()) {
-        Some(idx) if kv_fits(sched, bindings, cfg, req.prompt_tokens) => {
-            seed_slot(idx, req, sched, bindings, slot_samplers, slot_truncated, cache)
-        }
+        Some(idx) if kv_fits(sched, bindings, cfg, req.prompt_tokens) => seed_slot(
+            idx,
+            req,
+            sched,
+            bindings,
+            slot_samplers,
+            slot_truncated,
+            cache,
+        ),
         _ => pending.push_back(req),
     }
 }
@@ -1244,7 +1249,15 @@ fn admit_from_pending(
             break;
         }
         let req = pending.pop_front().unwrap();
-        seed_slot(idx, req, sched, bindings, slot_samplers, slot_truncated, cache);
+        seed_slot(
+            idx,
+            req,
+            sched,
+            bindings,
+            slot_samplers,
+            slot_truncated,
+            cache,
+        );
     }
 }
 
@@ -1275,7 +1288,11 @@ fn seed_slot(
     // Медиа-запросы мимо кеша: снимок не покрывает vision-фичи.
     let cacheable = cache.is_some() && req.media.is_none();
     // Промпт нужен в binding только для записи в кеш после префила.
-    let prompt_for_cache = if cacheable { req.prompt.clone() } else { Vec::new() };
+    let prompt_for_cache = if cacheable {
+        req.prompt.clone()
+    } else {
+        Vec::new()
+    };
     let hit = match cache.as_mut() {
         Some(pc) if req.media.is_none() => {
             let device = sched.model_mut().device().clone();
@@ -1376,7 +1393,10 @@ fn finish_slot(
         };
         if text.starts_with(&b.emitted_text) && text.len() > b.emitted_text.len() {
             let tail = text[b.emitted_text.len()..].to_string();
-            let _ = b.out.try_send(StreamEvent::Delta { text: tail, logprobs: None });
+            let _ = b.out.try_send(StreamEvent::Delta {
+                text: tail,
+                logprobs: None,
+            });
         }
     }
     if !b.cancelled {
@@ -1596,10 +1616,10 @@ mod tests {
 
     #[test]
     fn batchconfig_clamps_slots() {
-        std::env::set_var("QWEN36_SLOTS", "8");
+        std::env::set_var("SLOTS", "8");
         let c = BatchConfig::from_env();
         assert_eq!(c.slots, MAX_SLOTS);
-        std::env::remove_var("QWEN36_SLOTS");
+        std::env::remove_var("SLOTS");
     }
 
     fn test_config(slots: usize, prefix_cache_mib: usize) -> BatchConfig {
