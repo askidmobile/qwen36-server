@@ -121,7 +121,7 @@ impl PrefixCache {
             ids.iter().copied().find(|&id| {
                 self.by_id
                     .get(&id)
-                    .map_or(false, |e| e.tokens.as_slice() == tokens.as_slice())
+                    .is_some_and(|e| e.tokens.as_slice() == tokens.as_slice())
             })
         }) {
             self.touch(id);

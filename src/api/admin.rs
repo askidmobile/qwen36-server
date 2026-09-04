@@ -205,7 +205,7 @@ pub async fn ctx_matrix(
         let fp = vram_plan::footprint_from_gguf_cached(&p)?;
         let (kv_budget_mib, kv_per_tok_mib) = match total {
             Some(t) => {
-                let plan = vram_plan::compute_dynamic(t, &fp, 262144, 4)?;
+                let plan = vram_plan::compute_dynamic(t, &fp, 262144, 4, &crate::config::moe_placement_from_env())?;
                 (plan.kv_budget_mib, plan.kv_per_tok_mib)
             }
             None => (0.0, 0.0),
@@ -696,7 +696,7 @@ pub async fn do_switch(
     let fp = vram_plan::footprint_from_gguf_cached(&path)?;
     let (ctx, slots, kv_budget_mib, kv_per_tok_mib) = match vram_plan::total_vram_mib() {
         Some(total) => {
-            let plan = vram_plan::compute_dynamic(total, &fp, req_ctx, req_slots)?;
+            let plan = vram_plan::compute_dynamic(total, &fp, req_ctx, req_slots, &crate::config::moe_placement_from_env())?;
             eprintln!("[switch] {}", plan.report);
             (
                 plan.ctx,
@@ -734,7 +734,7 @@ pub async fn do_switch(
         let mut last_free = 0usize;
         let mut stagnant = 0u8;
         loop {
-            let free = vram_plan::free_vram_mib().unwrap_or(0) as usize;
+            let free = vram_plan::free_vram_mib().unwrap_or(0);
             if free >= fp.weights_mib {
                 break;
             }
@@ -796,6 +796,7 @@ pub async fn do_switch(
             slots,
             kv_budget_mib,
             kv_per_tok_mib,
+            moe_experts: "auto".to_string(),
             prefix_cache_mib: 0,
             media_temp: std::env::temp_dir().join("yttri-media"),
             sampling: crate::config::SamplingDefaults::default(),

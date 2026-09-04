@@ -22,7 +22,7 @@ yforge.exe --env D:\configs\prod.env --dry-run
 ## Раскладка
 
 | ОС | Скрипт | Что делает |
-|---|---|---|
+| --- | --- | --- |
 | Windows (yttri-win, продакшен) | `windows/inference-run.bat` | экзешник + `.env` + лог в `logs\server.log` |
 | Windows (профильная схема) | `windows/run_windows.bat` → `qwen35_run_current.ps1` | запуск релиза через `current`-указатель с проверкой SHA-256 профиля |
 | macOS (разработка) | `macos/run-metal.sh` | `cargo run --release --features metal` |
@@ -108,6 +108,20 @@ curl.exe -s -m 180 http://127.0.0.1:18099/v1/chat/completions `
 любой валидный chat-completions JSON.
 
 ### Синхронизация кода с yttri-win (аудит 2026-08-31)
+
+### Выгрузка экспертов MoE (2026-09-04, план moe-expert-offload)
+
+- **Требование к RAM при `MOE_EXPERTS=ram`**: свободной физической памяти ≥
+  эксперты (~8.6 ГиБ на 35B IQ2_XXS) + PREFIX_CACHE_MIB + 2 ГиБ (на стенде
+  ≈29 ГиБ из 64). Pinned-память не свопится — параллельная сборка другого
+  агента обязана это учитывать (упрётесь в 64 ГиБ — pinned-аллокация падает
+  fail-closed при старте).
+- **PGRAPH при выгрузке**: графовый префил выключается автоматически (WARN
+  `[pg] disabled: experts in ram`), префил идёт пейджед-прогревом (KV сразу
+  в пул), графы декода захватываются — `[graphs] captured` в логе.
+- Переменные: `MOE_EXPERTS=vram|ram|auto` (default auto), `EXPERT_CACHE_MIB`
+  и `EXPERT_PROMOTE_PER_STEP` — фаза 4 (кэш горячих экспертов).
+- Откат — `.env.bak-ornith-pgraph-on` + задача `\qwen36-inference`.
 
 ### Runtime-заметки (2026-08-31, Qwen3.8)
 

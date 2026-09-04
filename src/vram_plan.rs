@@ -19,8 +19,15 @@ pub struct Plan {
 /// Параметры модели, нужные для расчёта (из GGUF metadata).
 #[derive(Debug, Clone)]
 pub struct ModelFootprint {
-    /// Байты весов, грузящихся в VRAM (оценка = file_size × 0.95).
+    /// Веса ствола+output на GPU (без экспертов и nextn, FR-010).
     pub weights_mib: usize,
+    /// Веса при резидентных экспертах (ствол+эксперты, без nextn при MTP=0).
+    pub weights_all_mib: usize,
+    /// Маршрутизируемые эксперты (ffn_*_exps) — VRAM при vram, pinned RAM при ram.
+    pub experts_mib: usize,
+    /// Размещение по умолчанию из MOE_EXPERTS ("vram"|"ram" — решение auto
+    /// принимает compute_dynamic от KV-бюджета).
+    pub moe_placement: &'static str,
     /// Блоков всего / полно-Attention блоков / DeltaNet блоков.
     pub attn_blocks: usize,
     pub delta_blocks: usize,
@@ -62,8 +69,14 @@ pub fn footprint_from_gguf_cached(path: &Path) -> Result<ModelFootprint> {
 }
 
 /// Чтение footprint из GGUF (только metadata + tensor_infos, без данных).
+/// FR-010: веса на GPU считаются по именам тензоров — `ffn_*_exps` при
+/// размещении в RAM исключаются (pinned host), nextn-блок исключается при
+/// MTP=0; `output` и ствол считаются как есть.
 pub fn footprint_from_gguf(path: &Path) -> Result<ModelFootprint> {
-    let file_size = std::fs::metadata(path)?.len();
+    footprint_from_gguf_with(path, &crate::config::moe_placement_from_env())
+}
+
+pub fn footprint_from_gguf_with(path: &Path, moe_experts: &str) -> Result<ModelFootprint> {
     let (ct, _mmap) = qwen35_batch::real::ytf16::content_any_path(path)?;
     let md = &ct.metadata;
 
@@ -71,14 +84,7 @@ pub fn footprint_from_gguf(path: &Path) -> Result<ModelFootprint> {
         Some(candle_core::quantized::gguf_file::Value::String(s)) => s.clone(),
         _ => return Err(anyhow!("no general.architecture")),
     };
-    let prefix = match arch.as_str() {
-        "qwen35" => "qwen35",
-        "qwen35moe" => "qwen35moe",
-        // Стандартные трансформеры (Gemma, Llama, Mistral, Qwen2, Phi и др.):
-        // KV = 2 × n_layers × n_kv_heads × head_dim × ctx × dtype_bytes.
-        // Нет DeltaNet (delta_blocks=0, ssm_state=0). Префикс в GGUF = arch.
-        other => other,
-    };
+    let prefix = arch.as_str();
     let g = |k: &str| -> Option<usize> {
         md.get(&format!("{prefix}.{k}"))
             .and_then(|v| v.to_u32().ok())
@@ -101,8 +107,70 @@ pub fn footprint_from_gguf(path: &Path) -> Result<ModelFootprint> {
 
     let native_ctx = g("context_length").unwrap_or(0);
 
+    // FR-010: раскладка весов по именам тензоров. Прежняя оценка
+    // «file_size × 0.95» для 35B-A3B завышала VRAM на ~8.6 ГиБ экспертов
+    // и отказывала планеру до загрузки (приходился NO_VRAM_PLAN=1).
+    let mtp_on = std::env::var("MTP").as_deref() == Ok("1");
+    let mut gpu_bytes: u64 = 0;
+    let mut experts_bytes: u64 = 0;
+    for (name, info) in ct.tensor_infos.iter() {
+        let size = (info.shape.elem_count() / info.ggml_dtype.block_size()
+            * info.ggml_dtype.type_size()) as u64;
+        let layer = name
+            .strip_prefix("blk.")
+            .and_then(|r| r.split('.').next())
+            .and_then(|i| i.parse::<usize>().ok());
+        let is_exps = name.contains(".ffn_gate_exps.")
+            || name.contains(".ffn_up_exps.")
+            || name.contains(".ffn_down_exps.");
+        let is_nextn = layer.map(|l| l >= block_count).unwrap_or(false);
+        if is_nextn && !mtp_on {
+            continue; // nextn не грузится при MTP=0
+        }
+        if is_exps {
+            experts_bytes += size;
+            if moe_experts != "ram" {
+                gpu_bytes += size; // резидентные эксперты — VRAM
+            }
+        } else if !name.starts_with("token_embd") {
+            gpu_bytes += size; // ствол/output — VRAM (token_embd живёт в RAM)
+        }
+    }
+    let mib = |b: u64| (b as f64 / 1024.0 / 1024.0) as usize;
+    let (moe_placement, placement_note) = if experts_bytes == 0 {
+        ("vram", "модель без маршрутизируемых экспертов")
+    } else {
+        match moe_experts {
+            "ram" => ("ram", "запрошено ram"),
+            "vram" => ("vram", "запрошено vram"),
+            _ => {
+                // auto: та же логика, что у движка (expert_store::resolve_auto)
+                let need_all = gpu_bytes;
+                let trunk = gpu_bytes - experts_bytes;
+                let free = free_vram_mib().map(|f| (f * 1024 * 1024) as u64).unwrap_or(0);
+                if free >= need_all && need_all > 0 {
+                    ("vram", "auto: ствол+эксперты помещаются в свободную VRAM")
+                } else if free >= trunk {
+                    ("ram", "auto: ствол+эксперты не помещаются, ствол помещается — эксперты в RAM")
+                } else {
+                    ("ram", "auto: тесно и без экспертов — эксперты в RAM")
+                }
+            }
+        }
+    };
+    eprintln!(
+        "[vram] moe: requested={} → эксперты {:.0} МиБ ({}) — решение в плане от KV-бюджета; {}",
+        moe_experts,
+        experts_bytes as f64 / 1024.0 / 1024.0,
+        if moe_placement == "ram" { "pinned RAM" } else { "VRAM" },
+        placement_note,
+    );
+
     Ok(ModelFootprint {
-        weights_mib: (file_size as f64 * 0.95 / 1024.0 / 1024.0) as usize,
+        weights_mib: mib(gpu_bytes - experts_bytes),
+        weights_all_mib: mib(gpu_bytes),
+        experts_mib: mib(experts_bytes),
+        moe_placement,
         attn_blocks,
         delta_blocks,
         kv_heads,
@@ -163,8 +231,14 @@ pub const MTP_COMPONENT_ESTIMATE_MIB: usize = 160;
 const BUDGET_FRAC: f64 = 0.89;
 
 fn kv_mib_per_slot(fp: &ModelFootprint, ctx: usize) -> f64 {
-    // 2 = K+V; 2B = F16.
-    fp.attn_blocks as f64 * 2.0 * fp.kv_heads as f64 * fp.head_dim as f64 * ctx as f64 * 2.0
+    // 2 = K+V. Производственный пул — int8 (KV_POOL_Q8=1): hd+2 байта на
+    // строку (байты + масштаб); иначе F16 = 2 байта.
+    let kv_bytes_per_head = if std::env::var("KV_POOL_Q8").as_deref() == Ok("1") {
+        (fp.head_dim + 2) as f64
+    } else {
+        fp.head_dim as f64 * 2.0
+    };
+    fp.attn_blocks as f64 * 2.0 * fp.kv_heads as f64 * kv_bytes_per_head * ctx as f64
         / 1024.0
         / 1024.0
 }
@@ -191,15 +265,43 @@ pub fn compute_dynamic(
     fp: &ModelFootprint,
     req_ctx: usize,
     req_slots: usize,
+    moe_experts: &str,
 ) -> Result<DynPlan> {
     let budget = total_mib as f64 * BUDGET_FRAC;
     let state = state_mib_per_slot(fp);
     let kv_per_tok = kv_mib_per_slot(fp, 1);
-    let kv_budget =
-        budget - fp.weights_mib as f64 - WORKSPACE_MIB as f64 - req_slots as f64 * state;
+    // FR-021: решение auto принимает KV-бюджет, а не «влезают ли веса».
+    // При vram-весах на KV остаётся меньше: если там KV на 2048 ток/слот
+    // не влезает, а при ram-весах влезает — эксперты уходят в pinned RAM.
+    let (weights_mib, placement) = if fp.experts_mib == 0 || moe_experts == "vram" {
+        (fp.weights_all_mib, "vram")
+    } else if moe_experts == "ram" {
+        (fp.weights_mib, "ram")
+    } else {
+        // auto: пробуем резидент, при нехватке KV — выгрузку.
+        let kv_resident = budget - fp.weights_all_mib as f64 - WORKSPACE_MIB as f64
+            - req_slots as f64 * state;
+        let kv_ram = budget - fp.weights_mib as f64 - WORKSPACE_MIB as f64
+            - req_slots as f64 * state;
+        if kv_resident >= kv_per_tok * req_ctx as f64 {
+            (fp.weights_all_mib, "vram")
+        } else if kv_ram >= kv_per_tok * req_ctx as f64 {
+            (fp.weights_mib, "ram")
+        } else if kv_resident >= kv_per_tok * 2048.0 {
+            (fp.weights_all_mib, "vram")
+        } else if kv_ram >= kv_per_tok * 2048.0 {
+            (fp.weights_mib, "ram")
+        } else {
+            return Err(anyhow!(
+                "VRAM не хватает при любом размещении: KV после весов {:.0}MiB (vram) / {:.0}MiB (ram) < 2K ток/слот",
+                kv_resident, kv_ram
+            ));
+        }
+    };
+    let kv_budget = budget - weights_mib as f64 - WORKSPACE_MIB as f64 - req_slots as f64 * state;
     if kv_budget < kv_per_tok * 2048.0 {
         return Err(anyhow!(
-            "VRAM не хватает: после весов и workspace на KV остаётся {kv_budget:.0}MiB (<2K токенов на слот)"
+            "VRAM не хватает: после весов ({placement}) и workspace на KV остаётся {kv_budget:.0}MiB (<2K токенов на слот)"
         ));
     }
     let ctx = req_ctx.min(if fp.native_ctx > 0 {
@@ -215,10 +317,11 @@ pub fn compute_dynamic(
     // полного ctx» при 131072, а движок выделил окно 129728 и всё работало.
     // Без этой оговорки строка читается как «не влезет», хотя это не так.
     let report = format!(
-        "[vram] total={total_mib}MiB weights={}MiB kv_budget={kv_budget:.0}MiB state={state:.0}MiB/slot\n\
+        "[vram] total={total_mib}MiB weights={}MiB (experts={}, kv_budget={kv_budget:.0}MiB state={state:.0}MiB/slot)\n\
          [vram] plan(dynamic): ctx={ctx} slots={req_slots} — ~{full_concurrent} слот(а) полного ctx одновременно, очередь FIFO\n\
          [vram] оценка справочная: окно пула движок считает сам от свободной VRAM — фактическое смотри в строке [kv] paged pool",
-        fp.weights_mib,
+        weights_mib,
+        placement,
     );
     Ok(DynPlan {
         ctx,
@@ -294,6 +397,9 @@ mod tests {
         // weights ≈ реальный UD-IQ2_XXS (9745 MiB по GGUF metadata).
         ModelFootprint {
             weights_mib: 9745,
+            weights_all_mib: 9745,
+            experts_mib: 0,
+            moe_placement: "vram",
             attn_blocks: 10,
             delta_blocks: 30,
             kv_heads: 2,

@@ -444,6 +444,9 @@ pub struct Config {
     pub slots: usize,
     pub kv_budget_mib: f64,
     pub kv_per_tok_mib: f64,
+    /// Размещение маршрутизируемых экспертов (`MOE_EXPERTS`, FR-009):
+    /// "vram" | "ram" | "auto" — та же переменная, что читает движок.
+    pub moe_experts: String,
     pub prefix_cache_mib: usize,
     pub media_temp: PathBuf,
     pub sampling: SamplingDefaults,
@@ -522,6 +525,7 @@ impl Config {
                 .unwrap_or_else(|| PathBuf::from("models/qwen36-27b-q2_k_xl.gguf")),
         };
         let presets = presets_from_env(&model)?;
+        let moe_experts = parse_moe_experts(std::env::var("MOE_EXPERTS").ok().as_deref())?;
         let mut cfg = Self {
             profile,
             resolved_profile,
@@ -533,6 +537,7 @@ impl Config {
             slots: parse_env("SLOTS", 4usize)?,
             kv_budget_mib: 0.0,
             kv_per_tok_mib: 0.0,
+            moe_experts,
             prefix_cache_mib,
             media_temp: get_env_var("MEDIA_TEMP")
                 .map(PathBuf::from)
@@ -577,8 +582,8 @@ impl Config {
         let Some(total) = vram_plan::total_vram_mib() else {
             return Ok(());
         };
-        let fp = vram_plan::footprint_from_gguf(&self.model)?;
-        let plan = vram_plan::compute_dynamic(total, &fp, self.ctx, self.slots)?;
+        let fp = vram_plan::footprint_from_gguf_with(&self.model, &self.moe_experts)?;
+        let plan = vram_plan::compute_dynamic(total, &fp, self.ctx, self.slots, &self.moe_experts)?;
         eprintln!("{}", plan.report);
         self.ctx = plan.ctx;
         self.slots = plan.slots;
@@ -611,6 +616,25 @@ fn parse_api_keys(raw: &str) -> Result<Vec<ApiKey>> {
         }
     }
     Ok(keys)
+}
+
+/// Разобрать MOE_EXPERTS (FR-009): vram|ram|auto, default "auto".
+/// Мусорное значение — ошибка старта (fail-closed, FR-008).
+pub fn parse_moe_experts(raw: Option<&str>) -> Result<String> {
+    match raw {
+        None | Some("") => Ok("auto".to_string()),
+        Some(v @ ("vram" | "ram" | "auto")) => Ok(v.to_string()),
+        Some(other) => Err(anyhow::anyhow!(
+            "MOE_EXPERTS={other:?} не разобрать: ожидается vram|ram|auto (default auto)"
+        )),
+    }
+}
+
+/// Размещение из окружения для планера/диагностики (паникует на мусоре —
+/// мусор ловится валидацией в Config::from_env раньше).
+pub fn moe_placement_from_env() -> String {
+    parse_moe_experts(std::env::var("MOE_EXPERTS").ok().as_deref())
+        .expect("MOE_EXPERTS валидирован в Config::from_env")
 }
 
 fn load_env_file(path: &Path) -> Result<()> {

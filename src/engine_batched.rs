@@ -200,6 +200,9 @@ pub struct BatchedEngine {
     mtp_path: Option<std::path::PathBuf>,
     /// Shutdown-флаг dispatch thread: выставляется при drop engine (unload).
     shutdown: Arc<AtomicBool>,
+    /// FR-020: состояние выгрузки экспертов MoE — заполняет dispatch thread
+    /// после загрузки адаптера; /v1/models читает для capabilities.moe.
+    moe: Arc<std::sync::OnceLock<crate::engine::MoeInfo>>,
     /// JoinHandle dispatch thread — join в Drop гарантирует, что adapter
     /// (GPU-память) освобождён до возврата из drop (иначе trim mempool идёт
     /// по живому adapter и VRAM не возвращается ОС).
@@ -268,6 +271,8 @@ impl BatchedEngine {
             modes: vec!["thinking".into(), "instruct".into()],
         };
 
+        let moe = Arc::new(std::sync::OnceLock::new());
+        let _moe2 = Arc::clone(&moe);
         let engine = Arc::new(Self {
             tx_ingest,
             info,
@@ -279,6 +284,7 @@ impl BatchedEngine {
             media,
             vision_path,
             mtp_path: mtp_path.clone(),
+            moe,
             shutdown: Arc::new(AtomicBool::new(false)),
             dispatch_handle: Mutex::new(None),
             ready: Arc::new(AtomicBool::new(false)),
@@ -328,6 +334,15 @@ impl BatchedEngine {
                         format!("MTP запрошен, но не загрузился: {e:#}");
                     return;
                 }
+            }
+            // FR-020: сводка выгрузки → /v1/models.
+            #[cfg(feature = "cuda")]
+            if let Some(mi) = adapter.moe_summary() {
+                let _ = _moe2.set(crate::engine::MoeInfo {
+                    experts: "ram",
+                    pinned_mib: mi.pinned_bytes / 1024 / 1024,
+                    staging_mib: mi.staging_bytes / 1024 / 1024,
+                });
             }
             #[cfg(feature = "cuda")]
             crate::engine::maybe_retain_mempool(&device);
@@ -594,6 +609,9 @@ impl Engine for BatchedEngine {
     // до готовности не доходит, поэтому одного пути достаточно.
     fn supports_mtp(&self) -> bool {
         self.mtp_path.is_some()
+    }
+    fn moe_info(&self) -> Option<crate::engine::MoeInfo> {
+        self.moe.get().cloned()
     }
     fn model_info(&self) -> ModelInfo {
         self.info.clone()

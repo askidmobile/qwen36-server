@@ -195,6 +195,13 @@ async fn main() -> Result<()> {
     log_kv!("quant", "{}", info.quant);
     log_kv!("n_ctx (факт)", "{}", info.context_length);
     log_kv!("n_slots (факт)", "{}", info.slots);
+    // FR-007: эффективные значения, а не содержимое .env.
+    log_kv!("moe_experts", "{}", cfg.moe_experts);
+    log_kv!("pgraph", "{}", std::env::var("PGRAPH").unwrap_or_else(|_| "off".into()));
+    log_kv!("prefill_chunk", "{}", qwen35_batch::scheduler::prefill_chunk_size());
+    if let Some(moe) = engine.moe_info() {
+        log_kv!("moe (факт)", "experts={} pinned={} МиБ staging={} МиБ", moe.experts, moe.pinned_mib, moe.staging_mib);
+    }
 
     // Корень сканирования моделей: MODELS_DIR (или MODELS_DIR) или родитель директории
     // модели (D:\Models\org\repo\model.gguf → D:\Models).

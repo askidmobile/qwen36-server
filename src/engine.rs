@@ -315,6 +315,19 @@ pub struct ModelInfo {
     pub modes: Vec<String>,    // ["thinking", "instruct"]
 }
 
+/// Состояние выгрузки экспертов MoE (план 2026-09-04-moe-expert-offload,
+/// FR-020): публикуется в /v1/models → capabilities.moe. None — модель без
+/// маршрутизируемых экспертов или ещё грузится.
+#[derive(Debug, Clone)]
+pub struct MoeInfo {
+    /// "ram" — эксперты в pinned host-памяти; "vram" — резидентно.
+    pub experts: &'static str,
+    /// Объём pinned-хранилища (MiB; 0 при vram).
+    pub pinned_mib: u64,
+    /// Стейджинг префила (MiB; 0 при vram).
+    pub staging_mib: u64,
+}
+
 #[async_trait::async_trait]
 pub trait Engine: Send + Sync {
     /// Стриминговая генерация по chat-сообщениям. sliding window внутри (BD-017).
@@ -329,6 +342,10 @@ pub trait Engine: Send + Sync {
     }
     fn supports_mtp(&self) -> bool {
         false
+    }
+    /// Выгрузка экспертов MoE (FR-020): None — не применимо.
+    fn moe_info(&self) -> Option<MoeInfo> {
+        None
     }
     /// Остановить фоновые потоки движка (dispatch thread). Вызывается при unload.
     /// Default no-op — single-slot CandleEngine ничего не держит в фоне.
@@ -811,7 +828,7 @@ pub fn floor_char_boundary(s: &str, mut i: usize) -> usize {
 /// EOS из metadata `tokenizer.ggml.eos_token_id` (default 151645, как в адаптере).
 pub fn gguf_architecture(path: &Path) -> Result<String> {
     use anyhow::anyhow;
-    use candle_core::quantized::gguf_file::{Content, Value};
+    use candle_core::quantized::gguf_file::Value;
 
     let (content, _mmap) = qwen35_batch::real::ytf16::content_any_path(path)
         .map_err(|e| anyhow!("read model {path:?}: {e}"))?;

@@ -6,7 +6,6 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::sync::atomic::Ordering;
 
 use crate::api::{
     bad_request, engine_error, generate_collect, parse_tool_calls_for_response,
@@ -933,7 +932,7 @@ async fn stream_chat(
             let content_part = content_owned.as_str();
             if !content_part.is_empty() {
                 acc.push_str(content_part);
-                let mut emit_content = |text: String, out: &mut Vec<Event>| {
+                let emit_content = |text: String, out: &mut Vec<Event>| {
                     if !text.is_empty() {
                         out.push(Event::default().data(chunk(
                             &id,
@@ -1234,6 +1233,14 @@ pub async fn list_models(State(state): State<AppState>) -> Response {
                 "vision": capabilities.vision,
                 "video": capabilities.video,
                 "mtp": {"available": capabilities.mtp, "default_enabled": false},
+                // FR-020: выгрузка экспертов MoE (None — плотная модель/грузится).
+                "moe": state.engine.moe_info().map(|moe| {
+                    json!({
+                        "experts": moe.experts,
+                        "pinned_mib": moe.pinned_mib,
+                        "staging_mib": moe.staging_mib,
+                    })
+                }),
                 "thinking": true,
                 "apis": ["chat_completions", "responses", "messages"],
             },
