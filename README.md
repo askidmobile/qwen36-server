@@ -19,8 +19,8 @@ yforge --model /models/Ornith-1.5-9B-Q4_K_M.gguf \
        --api-key my-secret-key \
        --ctx 131072 --slots 1 \
        --kv-pool q8 --cuda-graphs 1 --prefix-cache 8192 --mtp 0
-# PGRAPH не задаётся: paged/graph-prefill fail-closed выключен;
-# CUDA graphs остаются включены для decode.
+# PGRAPH=on: paged/graph-prefill включён (после починки токенизатора чист);
+# при off на int8-пуле раньше ломался prefix cache — тоже починено.
 
 # всё то же самое из файла
 yforge --env prod.env
@@ -200,7 +200,7 @@ GPU_LAYERS=999
 KV_POOL_Q8=1              # int8-пул: вдвое меньше VRAM
 KV_CACHE_DTYPE=q8         # временный batched-KV без F16-дубля
 CUDA_GRAPHS=1             # ускоряет decode
-PGRAPH=off                # paged-prefill экспериментален: нарушает logits parity
+PGRAPH=on                 # paged-prefill: KV сразу в пул, декод ~3x; «порча состояния» была дефектом токенизатора
 VRAM_HEADROOM_MIB=1536    # резерв под транзиенты
 PREFIX_CACHE_MIB=8192     # кеш префикса в системной памяти
 
