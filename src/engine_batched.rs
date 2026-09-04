@@ -99,6 +99,22 @@ enum IngestMsg {
     Admit(AdmitReq),
 }
 
+/// Готовый промпт после Jinja-шаблона (PROMPT_DEBUG=путь к файлу).
+///
+/// `REQ_DEBUG` пишет то, что прислал клиент, а модель видит результат рендера —
+/// и расходятся именно они. Сверка 2026-09-04 с llama.cpp на одном и том же
+/// наборе сообщений дала 25281 токен у нас против 23869 у эталона; без текста
+/// промпта такую разницу локализовать нечем.
+///
+/// Файл перезаписывается на каждом запросе: нужен последний, а не история.
+fn dump_prompt(text: &str) {
+    static PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let Some(path) = PATH.get_or_init(|| std::env::var("PROMPT_DEBUG").ok()) else {
+        return;
+    };
+    let _ = std::fs::write(path, text);
+}
+
 /// Хостовые фазы шага (HOST_TIMING=1): сэмплер и drain отдельно от
 /// ожидания GPU. CPU-время процесса здесь бесполезно — при spin-wait драйвера
 /// оно тождественно времени на стене.
@@ -504,10 +520,12 @@ impl Engine for BatchedEngine {
                 })
                 .transpose()?;
             let ids = match rendered {
-                Some(text) => tok
-                    .encode(text.as_str(), false)
-                    .map(|e| e.get_ids().to_vec())
-                    .map_err(|e| anyhow!("encode prompt: {e}"))?,
+                Some(text) => {
+                    dump_prompt(&text);
+                    tok.encode(text.as_str(), false)
+                        .map(|e| e.get_ids().to_vec())
+                        .map_err(|e| anyhow!("encode prompt: {e}"))?
+                }
                 None => {
                     let text = tokenizer::build_chatml_text_with_tools(&msgs, tools.as_ref());
                     if params.thinking {

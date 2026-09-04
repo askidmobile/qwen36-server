@@ -11,6 +11,67 @@
 use anyhow::{anyhow, Result};
 use minijinja::value::ValueKind;
 use minijinja::{Environment, Error, ErrorKind};
+use serde::Serialize;
+
+/// Разделители как у Python `json.dumps` по умолчанию: `", "` и `": "`.
+/// На них обучены шаблоны HuggingFace, их же выдаёт minja в llama.cpp.
+struct PythonJsonFormat;
+
+impl serde_json::ser::Formatter for PythonJsonFormat {
+    fn begin_array_value<W: ?Sized + std::io::Write>(
+        &mut self,
+        writer: &mut W,
+        first: bool,
+    ) -> std::io::Result<()> {
+        if first {
+            Ok(())
+        } else {
+            writer.write_all(b", ")
+        }
+    }
+
+    fn begin_object_key<W: ?Sized + std::io::Write>(
+        &mut self,
+        writer: &mut W,
+        first: bool,
+    ) -> std::io::Result<()> {
+        if first {
+            Ok(())
+        } else {
+            writer.write_all(b", ")
+        }
+    }
+
+    fn begin_object_value<W: ?Sized + std::io::Write>(
+        &mut self,
+        writer: &mut W,
+    ) -> std::io::Result<()> {
+        writer.write_all(b": ")
+    }
+}
+
+/// Замена встроенного `tojson` из minijinja.
+///
+/// Встроенный экранирует `'`, `<`, `>` и `&` в `\uXXXX` — это безопасность для
+/// вставки в `<script>`, но модель обучена на живых символах. Сверка с
+/// llama.cpp 2026-09-04 на записанной агентской сессии: один и тот же набор
+/// сообщений давал у нас 25281 токен против 23869 у эталона при разнице
+/// текстов в 14 байт. Всё расхождение — в блоке `<tools>` и в аргументах
+/// прошлых вызовов: `doesn't` вместо `doesn't`, `>` вместо `>`.
+///
+/// Шаблон зовёт фильтр без аргументов в обоих местах (`tool | tojson` и
+/// `args_value | tojson | safe`), поэтому аргументы не поддерживаем.
+fn tojson_like_python(value: minijinja::Value) -> Result<minijinja::Value, Error> {
+    let json: serde_json::Value = serde_json::to_value(&value)
+        .map_err(|e| Error::new(ErrorKind::InvalidOperation, format!("tojson: {e}")))?;
+    let mut buf = Vec::new();
+    let mut ser = serde_json::Serializer::with_formatter(&mut buf, PythonJsonFormat);
+    json.serialize(&mut ser)
+        .map_err(|e| Error::new(ErrorKind::InvalidOperation, format!("tojson: {e}")))?;
+    let text = String::from_utf8(buf)
+        .map_err(|e| Error::new(ErrorKind::InvalidOperation, format!("tojson: {e}")))?;
+    Ok(minijinja::Value::from_safe_string(text))
+}
 use serde_json::{json, Value};
 use std::path::Path;
 
@@ -130,6 +191,7 @@ impl ChatTemplate {
             v.starts_with(&prefix)
         });
         env.add_test("endswith", |v: String, suffix: String| v.ends_with(&suffix));
+        env.add_filter("tojson", tojson_like_python);
         env.set_unknown_method_callback(|_, value, method, args| {
             python_method_callback(value, method, args)
         });
@@ -255,5 +317,33 @@ mod tests {
         println!("MULTITURN RENDERED:\n{}", rendered);
         assert!(rendered.contains("Привет! Как дела?"));
         assert!(rendered.contains("Что ты умеешь?"));
+    }
+
+    /// Блок `<tools>` должен совпадать с тем, что рендерит llama.cpp/minja:
+    /// живые `'` и `>`, порядок ключей клиента, разделители `", "` / `": "`.
+    /// Встроенный `tojson` из minijinja экранировал их в `\uXXXX`, из-за чего
+    /// на записанной агентской сессии наш промпт весил 25281 токен против
+    /// 23869 у эталона при разнице текстов в 14 байт.
+    #[test]
+    fn tojson_matches_llama_cpp_rendering() {
+        let tool: serde_json::Value = serde_json::from_str(
+            r#"{"type":"function","function":{"name":"write","description":"doesn't exist, a > b","parameters":{"type":"object","required":["path"],"properties":{"path":{"type":"string"}}}}}"#,
+        )
+        .unwrap();
+        let mut env = Environment::new();
+        env.add_filter("tojson", tojson_like_python);
+        env.add_template("t", "{{ x | tojson }}").unwrap();
+        let out = env
+            .get_template("t")
+            .unwrap()
+            .render(minijinja::context!(x => tool))
+            .unwrap();
+
+        assert_eq!(
+            out,
+            r#"{"type": "function", "function": {"name": "write", "description": "doesn't exist, a > b", "parameters": {"type": "object", "required": ["path"], "properties": {"path": {"type": "string"}}}}}"#
+        );
+        assert!(!out.contains("\\u0027"), "апостроф экранирован: {out}");
+        assert!(!out.contains("\\u003e"), "> экранирован: {out}");
     }
 }

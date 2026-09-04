@@ -22,7 +22,11 @@ anyhow = "1"
 axum = { version = "0.8", features = ["multipart"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order: ключи JSON сохраняют порядок клиента. Без него BTreeMap
+# сортирует их по алфавиту, и блок <tools> уезжает в
+# {"function":{"description":...,"name":...}} вместо обученного
+# {"type":"function","function":{"name":...,"description":...}}.
+serde_json = { version = "1", features = ["preserve_order"] }
 async-trait = "0.1"
 futures = "0.3"
 tokio-stream = "0.1"
@@ -36,7 +40,9 @@ memmap2 = "0.9.3"
 sha2 = "0.10"
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
-minijinja = { version = "2", features = ["json", "adjacent_loop_items", "builtins"] }
+# preserve_order и здесь: minijinja держит свой map, и без флага он
+# пересортирует ключи ещё до нашего фильтра tojson.
+minijinja = { version = "2", features = ["json", "adjacent_loop_items", "builtins", "preserve_order"] }
 url = "2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "bmp", "tiff", "gif"] }
 moxcms = "0.8"
