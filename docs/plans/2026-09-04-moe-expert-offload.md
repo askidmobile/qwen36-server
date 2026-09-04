@@ -1,7 +1,7 @@
 # Plan: Выгрузка экспертов MoE в pinned RAM с кэшем горячих экспертов в VRAM
 
 **Дата:** 2026-09-04
-**Статус:** 🔄 In progress (Фаза 0 выполнена)
+**Статус:** 🔄 In progress (Фазы 0–1 выполнены)
 **Приоритет:** P0
 **Спецификация:** [docs/specs/2026-09-04-moe-expert-offload.md](../specs/2026-09-04-moe-expert-offload.md)
 
@@ -12,6 +12,7 @@ Qwen3.6-35B-A3B IQ2_XXS на RTX 3060 12 ГБ работает с окном 131
 ## Текущее состояние
 
 ### Движок `yttri-forge/engine/qwen35-batch/src/real/`
+
 - `moe.rs` — `PackedExperts { gate, up, down: Arc<QTensor>, n_experts }` (строка 267), `Qwen35MoeBlock { router, routed, shared, backend, cfg }` (329), `forward_ptx_cuda` (~401): роутер → `gpu_softmax_topk` (639, выделяет ids заново на каждый вызов) → `indexed_moe_forward_dual_cuda` → SiLU·up → `indexed_moe_forward_cuda` → взвешенная сумма + shared. `select_backend` (35) — матрица поддерживаемых dtype. Режим `ForwardMode` в PTX-пути не используется.
 - `model_weights.rs` — загрузка MoE-слоя (6633–6694): `load_heavy(ffn_*_exps)` → `Arc<QTensor>` на устройстве модели, `FeedForward::Moe(Qwen35MoeBlock::new(...))`; вызовы форварда `FeedForward::forward*` (1197–1218) — prefill и decode оба идут в `moe.forward(xs, mode)`; `init_paged_decode` (8767) создаёт пул **лениво на первом декоде** (комментарий: транзиенты префила искажают `mem_get_info`), окно = `free − VRAM_HEADROOM_MIB` (8817); `load_heavy` — замыкания 5770/5864.
 - `adapter.rs` — `pgraph_mode()` OnceLock (296–312); декод: `decode_batch_graphed` (2370) одним `cuGraphLaunch`, вызов и откат на eager (1455–1500); захват `[graphs] captured` (~2675); `load_mtp` (757); `PrefillPath` — смена пути внутри промпта запрещена.
@@ -20,17 +21,20 @@ Qwen3.6-35B-A3B IQ2_XXS на RTX 3060 12 ГБ работает с окном 131
 - `model_profile.rs` — `MtpProfile::read_and_validate` (480): принимает только `Architecture::DenseQwen35`, ключи `qwen35.*`, `intermediate` из `feed_forward_length`, список плотных тензоров, проверка «thin = 15 тензоров»; список MoE-тензоров текстового профиля уже есть (680–690).
 
 ### Ядра `yttri-forge/engine/candle-core`, `candle-kernels`
+
 - `candle-kernels/src/quantized.cu` — боевые ядра `indexed_moe_forward<…>(all_weights, all_inputs, indices, all_outputs, n, k, batch, topk, k_padded, input_dim1)` с extern-обёртками `indexed_moe_forward_<dtype>_q8_1` (6983–7075), `indexed_moe_forward_dual(w1_all, w2_all, …)` (7292), f32-варианты `IQ_MOE_F32_EXTERN` (6849–6866) и `_grouped` (выключены). Адрес эксперта везде `all_weights + (expert_id · n + row) · blocks_per_row`.
 - `candle-core/src/quantized/cuda.rs` — `indexed_moe_forward_dispatch` (887): квантование входа в Q8_1, выбор имени ядра по dtype, запуск; методы `QCudaStorage::indexed_moe_forward` (1142) и `_dual` (1039) берут веса как `self.data.inner.slice(0..)`.
 - `candle-core/src/quantized/mod.rs` — `QTensor::indexed_moe_forward_cuda` (921), `_dual_cuda` (944).
 - `cudarc 0.19.7` — `result::malloc_host(bytes, flags)` публичен (`CU_MEMHOSTALLOC_DEVICEMAP = 2`, `WRITECOMBINED = 4`), `sys::cuMemHostGetDevicePointer_v2`, `CudaContext::new_stream`, `CudaStream::record_event`/`wait`, события `new_event`. Штатный `alloc_pinned` даёт только WC без DEVICEMAP — не подходит.
 
 ### Сервер `Qwen3.6 27B/src/`
+
 - `vram_plan.rs` — `footprint_from_gguf`: веса = 0.95 × размер файла; `config.rs::apply_vram_plan` с обходом `NO_VRAM_PLAN`.
 - `engine.rs` — `ModelInfo { id, context_length, quant, slots, modes }` (310); `engine_batched.rs::model_info` (598); `/v1/models` собирает `capabilities` (mtp — через `profile.rs:393` и `engine_batched.rs:596 mtp_available`).
 - `main.rs` — стартовая сводка `log_kv!`.
 
 ### Проверочная база
+
 - Тесты: `qwen35-batch/tests/qwen35moe_reference.rs` (синтетические эксперты, эталонный бэкенд), `tests/model_profile.rs`, `tests/mtp_transaction.rs`; `candle-core/tests/iq_quant_cuda_tests.rs` (`#![cfg(feature = "cuda")]`), пример `candle-core/examples/tensor_parity.rs`.
 - Стенд: `tools/logits_parity.py`, реплей `.tmp-test/ornith_exact_hero_replay.mjs`, `multiturn.ps1`, `qwen35_mtp_gate`, `qwen36_inspect`; сборка `build_windows.bat`, запуск задачей планировщика `qwen36-inference`; бэкап Ornith-конфига `.env.bak-ornith-pgraph-on`.
 
@@ -76,14 +80,15 @@ graph TD
 
 ### Слой A — ядра (`candle-kernels`, `candle-core`)
 
-#### Файлы:
+#### Файлы
+
 - [ ] `candle-kernels/src/quantized.cu` — параметр `all_weights` → `const void* const* expert_ptrs` в шаблоне `indexed_moe_forward`, во всех extern `_q8_1`, в `indexed_moe_forward_dual` (`w1_ptrs`, `w2_ptrs`), в `indexed_moe_forward_iq_f32` и макросе `IQ_MOE_F32_EXTERN` (включая `_grouped`, чтобы не держать два соглашения). Адрес: `(const block_q_t*)expert_ptrs[expert_id] + row * blocks_per_row`.
 - [ ] `candle-core/src/quantized/cuda.rs` — `indexed_moe_forward_dispatch` принимает `table: &CudaView<u64>` вместо `weight`; новые публичные `indexed_moe_forward_table(dev, dtype, w_shape, table, input, ids)` и `indexed_moe_forward_dual_table(...)` без `&self`; методы `QCudaStorage::indexed_moe_forward*` остаются как тонкие обёртки над лениво построенной таблицей `base + id·stride` (`OnceLock<CudaSlice<u64>>`) — для тестов и эталонных путей.
 - [ ] `candle-core/src/quantized/mod.rs` — `QTensor::indexed_moe_forward_cuda`/`_dual_cuda` делегируют обёрткам; экспорт `indexed_moe_forward_table*`.
 - [ ] `candle-core/tests/moe_table_cuda_tests.rs` — бит в бит: одни и те же квантованные данные (а) упакованно, (б) таблица с перестановкой слотов в VRAM, (в) таблица на device-mapped host-памяти → выходы `_q8_1` и `_dual` идентичны байт в байт для IQ2_XXS, IQ3_XXS, IQ2_S, IQ4_XS, Q2_K, Q3_K.
 - [ ] `candle-core/examples/moe_zero_copy_bench.rs` — ворота 0: читает `ffn_*_exps` всех слоёв из GGUF по смещениям, кладёт в pinned DEVICEMAP (с WC и без), прогоняет `indexed_moe_forward` T=1, k=8 по 40 слоям против VRAM-копии, печатает эффективную полосу по времени ядра и проверяет `cuMemHostGetDevicePointer_v2 == host ptr`.
 
-#### Контракт ядра (псевдокод):
+#### Контракт ядра (псевдокод)
 
 ```pseudo
 indexed_moe_forward_<dtype>_q8_1(
@@ -96,7 +101,8 @@ indexed_moe_forward_dual_table(dev, dtype, shape, table1, table2, input, ids) ->
 
 ### Слой B — движок (`qwen35-batch`)
 
-#### Файлы:
+#### Файлы
+
 - [ ] `real/expert_store.rs` (новый) — `ExpertPlacement` (`MOE_EXPERTS=vram|ram|auto`), `ExpertLayerStore`, `PointerTable`, `SlotPool`, `Staging`, `CacheDirectory`, `RouteTrace`, `ExpertCacheController`; проверки fail-closed; статистика и строки лога.
 - [ ] `real/moe.rs` — `PackedExperts` → `enum ExpertWeights { Packed{gate,up,down: Arc<QTensor>} /* Reference */, Store(Arc<ExpertLayerStore>) /* Ptx */ }`; `gpu_softmax_topk` пишет ids в переданный срез `RouteTrace`; `forward_ptx_cuda` вызывает `*_table`; при `ForwardMode::Prefill` — `controller.prefill_prepare_layer` → ядра → `prefill_release_layer`.
 - [ ] `real/model_weights.rs` — загрузка MoE-слоя через `ExpertLayerStore` (pinned из байтов mmap по `tensor_infos`, без промежуточного `QTensor`; в `vram` — VRAM-копия и таблица на неё); `token_embd` в RAM при `ram`; после загрузки при `ram`: `init_paged_decode` → стейджинг → кэш; `auto` по формуле пула; fail-closed по dtype (`select_backend`), host RAM и аллокациям; эффективные значения в лог.
@@ -108,7 +114,7 @@ indexed_moe_forward_dual_table(dev, dtype, shape, table1, table2, input, ids) ->
 - [ ] `tests/model_profile.rs` — MoE-профиль MTP на заголовке 35B-A3B (fixture: метаданные и `tensor_infos` без данных).
 - [ ] `tests/mtp_transaction.rs` — черновик с `FeedForward::Moe` на синтетических экспертах.
 
-#### Структуры (псевдокод):
+#### Структуры (псевдокод)
 
 ```pseudo
 ExpertPlacement = Vram | Ram | Auto        // MOE_EXPERTS, умолчание Auto
@@ -148,7 +154,7 @@ ExpertCacheController {
 }
 ```
 
-#### Бюджет и порядок выделения при `ram`:
+#### Бюджет и порядок выделения при `ram`
 
 ```pseudo
 load trunk без exps, output, MTP-слой → init_paged_decode(CTX) → Staging(max слой)
@@ -159,7 +165,8 @@ log: "[moe] experts: ram … f=… (target …)"; WARN если f < target
 
 ### Слой C — сервер (`qwen36-server`)
 
-#### Файлы:
+#### Файлы
+
 - [ ] `src/vram_plan.rs` — `footprint_from_gguf`: веса на GPU по именам тензоров (`blk.N.*` без `ffn_*_exps` при `ram`, без nextn-блока при `MTP=0`, плюс `output`), а не 0.95 × файл; `NO_VRAM_PLAN` больше не нужен для 35B-A3B.
 - [ ] `src/config.rs` — чтение `MOE_EXPERTS` для планера (та же переменная, что у движка; без префиксов).
 - [ ] `src/engine.rs`, `src/engine_batched.rs` — `ModelInfo.moe: Option<MoeInfo { experts, cache_mib, cache_slots, hit_rate }>` из движка.
@@ -167,7 +174,7 @@ log: "[moe] experts: ram … f=… (target …)"; WARN если f < target
 - [ ] `src/main.rs` — эффективные значения в стартовой сводке.
 - [ ] `README.md`, `.env.example`, `scripts/README.md` — `MOE_EXPERTS`, `EXPERT_CACHE_MIB`, `EXPERT_PROMOTE_PER_STEP`, требование RAM ≈ 29 ГБ, PGRAPH при выгрузке.
 
-#### API:
+#### API
 
 | Endpoint | Вход | Выход | Описание |
 |---|---|---|---|
@@ -178,6 +185,7 @@ log: "[moe] experts: ram … f=… (target …)"; WARN если f < target
 > Каждая фаза заканчивается проверяемым инкрементом на стенде yttri-win (сборка `build_windows.bat`, перезапуск задачей `qwen36-inference`). `[P]` — можно вести параллельно.
 
 ### Фаза 0: Ворота (оценка: 8 ч) — ✅ выполнена 2026-09-04
+
 - [x] `candle-core/examples/moe_zero_copy_bench.rs` — бенч на реальных тензорах GGUF: все 9.6 ГБ pinned DEVICEMAP, `cuMemHostGetDevicePointer_v2` == host ptr, `indexed_moe_forward` T=1 k=8 × 40 слоёв, host-mapped против VRAM, флаги WC/без WC. **Результат: PASS — mapped 10.61 ГБ/с (порог 8), VRAM 77.5 ГБ/с; флаги — DEVICEMAP без WC (WC выигрыша не даёт); UVA dev==host 120/120 без WC, 0/120 с WC; pinned 8644 МиБ × 120 буферов выделились без отказа.**
 - [ ] [P] Ворота 0б (решение пользователя): реплей записанной сессии на нынешнем стенде (IQ2_XXS, окно 20K) — отчёт о качестве.
 - **Независимая проверка:** бенч печатает полосу ≥ 8 ГБ/с и выбранные флаги; иначе — стоп и пересмотр D-005 (стейджинг с синком на слой). — **пройдена.**
@@ -185,13 +193,19 @@ log: "[moe] experts: ram … f=… (target …)"; WARN если f < target
 - deviated: добавлены тайминг по CUDA-событиям и продувка L2 (memset 256 МиБ между итерациями) — без неё повторные запуски подмешивали L2; на результат почти не влияет (10.03 → 10.18 ГБ/с).
 - deviated: реальный объём маршрутизируемых экспертов 8644 МиБ (40 × 256 × 264 КиБ); 9624 МиБ из спеки включали shared-эксперты, которые остаются в VRAM. Из формулы D-014 при 10.6 ГБ/с: f ≥ 0.57 (было 0.60 при 301 МБ/токен; фактически 247 МБ/токен).
 
-### Фаза 1: Ядра с таблицей указателей (оценка: 10 ч)
-- [ ] `quantized.cu` — таблица во всех вариантах `indexed_moe_forward*` (q8_1, f32, dual, grouped).
-- [ ] `candle-core/src/quantized/cuda.rs`, `mod.rs` — `*_table` входы, ленивая таблица в обёртках `QTensor`.
-- [ ] `candle-core/tests/moe_table_cuda_tests.rs` — бит в бит (упаковка / перестановка слотов / host-mapped) для шести dtype.
-- **Независимая проверка:** на стенде `cargo test --features cuda moe_table` зелёный; сервер с 35B-A3B в резидентном режиме (окно 20K) даёт `tools/logits_parity.py` max Δ = 0 против сборки до правки; Ornith не задет (реплей чист, 84 с при `PGRAPH=on`).
+### Фаза 1: Ядра с таблицей указателей (оценка: 10 ч) — ✅ выполнена 2026-09-04
+
+- [x] `quantized.cu` — таблица во всех вариантах `indexed_moe_forward*` (q8_1 ×12 extern, dual ×14, f32, f32_grouped, grouped ×6); адрес `(const block_q_t*)expert_ptrs[expert_id] + row·blocks_per_row`.
+- [x] `candle-core/src/quantized/cuda.rs`, `mod.rs` — диспетчер принимает таблицу; публичные `indexed_moe_forward_table`/`_dual_table` (Tensor-уровень); `QCudaStorage` — ленивая таблица `base + id·stride` (OnceLock), методы `QTensor` идут через неё; реэкспорт из `quantized`.
+- [x] `candle-core/tests/moe_table_cuda_tests.rs` — бит в бит (упаковка / перестановка слотов VRAM / host-mapped DEVICEMAP) для IQ2_XXS, IQ3_XXS, IQ2_S, IQ4_XS, Q2_K, Q3_K, plain + dual — **зелёный на стенде** (`run_moe_table_test.bat`, 1 passed).
+- **Независимая проверка:** на стенде `cargo test --features cuda moe_table` зелёный ✅; сервер 35B-A3B резидентно (окно 20K): A/B старого (15:19) и нового exe — top-10 логпробов первого токена идентичны, **max Δ = 0.0**, greedy 16 токенов бит в бит (PGRAPH=off, чанк 512, FA_SPLITS=1, обе стороны) ✅; Ornith не задет — реплей на новой сборке (PGRAPH=on): unknownProperties/malformedFunctions пусты, реальные маркеры подмен (inline-rc/align-rc/justify-rc/font-clone/radial-grad) — нули ✅.
+- deviated: добавлены отсутствовавшие dual-ядра Q3_K/Q5_K (DUAL_MOE_EXTERN + match arms) — тест плана требует Q3_K dual, поверхность была несимметричной.
+- deviated: тест на синтетических байтах (LCG → QTensor через gguf `tensor_from_slice`): CPU-квантователя IQ-типов в форке нет, а бит-в-бит сравнение требует одинаковых байтов во всех раскладках.
+- deviated: паритет — A/B двух exe на коротком промпте (logprobs + greedy), полный критерий спеки «Δ=0 на промпте 4 096» остаётся на фазу 2.
+- заметка: ворота 0б (реплей 49K-сессии против 35B на окне 20K) невозможны по построению: скользящее окно режет по оценке `text_content()`, которая не видит тул-пейлоад (32 222 точных > 20 480 при оценке ниже бюджета) → `clamp_to_context` даёт 400. Вынесено на решение пользователя (см. отчёт фазы).
 
 ### Фаза 2: Эксперты в RAM, zero-copy декод, стейджинг префила (оценка: 16 ч)
+
 - [ ] `real/expert_store.rs` — `ExpertPlacement`, `ExpertLayerStore`, `PointerTable`, `Staging`, `RouteTrace`; fail-closed по dtype, host RAM, аллокациям.
 - [ ] `real/model_weights.rs` — pinned-загрузка из mmap по смещениям, `token_embd` в RAM, `init_paged_decode` сразу при загрузке, стейджинг; `auto`.
 - [ ] `real/moe.rs` — `ExpertWeights::Store`, `gpu_softmax_topk` в `RouteTrace`, ядра `*_table`; префил: `prefill_prepare_layer` (всё объединение в стейджинг — кэша ещё нет) → ядра → `prefill_release_layer`.
@@ -200,6 +214,7 @@ log: "[moe] experts: ram … f=… (target …)"; WARN если f < target
 - **Независимая проверка:** стенд, `MOE_EXPERTS=ram`, `CTX=131072`, `MTP=0`, `NO_VRAM_PLAN=1` (до фазы 3): `[kv] paged pool: window=131072`; паритет логитов Δ = 0 на 4 096 (обе стороны `PGRAPH=off`, чанк 512, `FA_SPLITS=1`); промпт 120 000 → `finish_reason=stop|length`; Shared Usage ≤ pinned + 100 МиБ; декод ≥ 25 ток/с; реплей чист.
 
 ### Фаза 3: Сервер для ранней выкладки (оценка: 6 ч)
+
 - [ ] `src/vram_plan.rs` — оценка весов по именам тензоров с учётом размещения и MTP.
 - [ ] [P] `src/engine.rs`, `src/engine_batched.rs`, `src/api.rs` — `ModelInfo.moe`, `capabilities.moe`.
 - [ ] [P] `src/main.rs`, `README.md`, `.env.example`, `scripts/README.md` — сводка, переменные, требование RAM.
@@ -207,18 +222,21 @@ log: "[moe] experts: ram … f=… (target …)"; WARN если f < target
 - **Независимая проверка:** старт без `NO_VRAM_PLAN`, планер печатает раскладку с экспертами в RAM; `/v1/models` → `moe.experts = "ram"`; **выкладка сценария 1 на стенд** (PD-005), `.env.bak-ornith-pgraph-on` остаётся путём отката.
 
 ### Фаза 4: Кэш горячих экспертов (оценка: 18 ч)
+
 - [ ] `real/expert_store.rs` — `SlotPool` на слой, `CacheDirectory` (LRU, pending, статистика), `ExpertCacheController::before_step` (D2H следа, LRU, ≤ `EXPERT_PROMOTE_PER_STEP` подъёмов на боковом потоке, трёхшаговый порядок по событиям), `prefill_prepare_layer` со свободными слотами + стейджингом без вытеснения, `after_prefill` по частоте, бюджет `EXPERT_CACHE_MIB`/авто, расчёт f, строки лога.
 - [ ] `real/adapter.rs` — `before_step` перед каждым `decode_batch_graphed`; статистика в `ModelInfo.moe`.
 - [ ] `tests/expert_store.rs` — LRU, лимит подъёмов, «префил не вытесняет», бюджет/f, порядок событий (модель потоков заглушкой).
 - **Независимая проверка:** стенд: декод ≥ 40 ток/с на 4 096 и ≥ 25 на 100 000, доля попаданий ≥ 60 % на 1 000 токенов, префил ≥ 150 ток/с на 32 768, `[graphs] captured`, VRAM за 50 запросов в пределах 64 МиБ, реплей и 8-ходовой прогон с prefix cache на 131K чисты.
 
 ### Фаза 5: MTP на MoE (оценка: 14 ч)
+
 - [ ] `real/model_profile.rs` — `MtpProfile` для `Qwen35Moe`.
 - [ ] `real/mtp.rs` — `FeedForward::Moe`, загрузка nextn-слоя с резидентным `ExpertLayerStore`, адаптивная ширина по умолчанию при `ram`.
 - [ ] [P] `tests/model_profile.rs`, `tests/mtp_transaction.rs` — профиль на заголовке 35B-A3B, черновик с MoE-FFN.
 - **Независимая проверка:** стенд `MTP=1`, `MTP_PATH` = сам GGUF: загрузка без ошибок валидации, `/v1/models` `mtp.available=true`; `qwen35_mtp_gate` на трёх промптах проходит по BD-029; декод с MTP ≥ без MTP на 4 096; доля принятых в логе.
 
 ### Фаза 6: Стабилизация и приёмка (оценка: 10 ч)
+
 - [ ] FR-012: две смены Ornith ↔ 35B-A3B через `/admin/switch`, RAM/VRAM в пределах 256 МиБ, третий запуск отвечает.
 - [ ] `auto` на Ornith даёт `vram`, скорость прежняя.
 - [ ] Прогон всех критериев §13 спеки, отчёт с числами; обновление `docs/brief/decisions.md` (BD о размещении экспертов), памяти проекта, `TASKS.md`.
@@ -229,10 +247,10 @@ log: "[moe] experts: ram … f=… (target …)"; WARN если f < target
 ## Трассируемость: требования → задачи
 
 | Требование | Фаза | Задачи |
-|---|---|---|
+| --- | --- | --- |
 | FR-001 размещение, `token_embd` в RAM | 2 | `expert_store.rs`, `model_weights.rs` |
-| FR-002 таблица указателей в ядрах | 1 | `quantized.cu`, `cuda.rs`, `mod.rs` |
-| FR-003 бит в бит | 1, 2 | `moe_table_cuda_tests.rs`, паритет логитов на стенде |
+| FR-002 таблица указателей в ядрах | 1 ✅ | `quantized.cu`, `cuda.rs`, `mod.rs` |
+| FR-003 бит в бит | 1 ✅, 2 | `moe_table_cuda_tests.rs`, паритет логитов на стенде |
 | FR-004 zero-copy промахи, постоянный след | 2 | `moe.rs` (`gpu_softmax_topk` → `RouteTrace`), `expert_store.rs` |
 | FR-005 префил: стейджинг, без вытеснения, таблица на время слоя, чанк ≥ 256 | 2, 4 | `moe.rs`, `expert_store.rs`, `scheduler.rs` |
 | FR-006 кэш, порядок выделения, лимит подъёмов, лог попаданий и f | 2, 4 | `expert_store.rs`, `model_weights.rs`, `adapter.rs` |
@@ -250,7 +268,7 @@ log: "[moe] experts: ram … f=… (target …)"; WARN если f < target
 ## Сложность и отклонения от принципов
 
 | Отклонение | Принцип / более простой путь | Почему оправдано |
-|---|---|---|
+| --- | --- | --- |
 | Новый модуль `expert_store.rs` и смена сигнатуры всех MoE-ядер | «Минимум кода»; проще было бы добавить второй набор ядер «с таблицей» рядом со старым | Один путь адресации вместо двух: резидентный режим — та же таблица, бит в бит проверяется одним тестом; второй набор ядер удвоил бы поверхность и оставил бы старую упаковку живой навсегда (D-016, FR-002) |
 | Прямые вызовы `cudarc::driver::result::malloc_host` и `sys::cuMemHostGetDevicePointer_v2` | Штатный `alloc_pinned` | Штатный даёт только WRITECOMBINED без DEVICEMAP; флаги выбираются воротами 0 |
 
@@ -259,7 +277,7 @@ log: "[moe] experts: ram … f=… (target …)"; WARN если f < target
 ## Риски и смягчения
 
 | Риск | Вероятность | Влияние | Смягчение |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Полоса zero-copy под WDDM < 8 ГБ/с | Средняя | Высокое | Ворота 0 до основной работы; запасной вариант D-005 — стейджинг с синком на слой (декод без графов на MoE-участках) |
 | Потолок отображаемой host-памяти или отказ pinned-аллокации на 9.6 ГБ | Низкая | Высокое | Ворота 0 отображают весь объём; буферы по (слой, матрица); fail-closed с числами |
 | Рефакторинг ядер ломает бит в бит | Низкая | Высокое | Фаза 1 закрывается CUDA-тестом и паритетом логитов до любых изменений размещения |
@@ -273,9 +291,11 @@ log: "[moe] experts: ram … f=… (target …)"; WARN если f < target
 ## Зависимости
 
 ### Пакеты / библиотеки
+
 - Новых нет. `cudarc 0.19.7` (`malloc_host`, `cuMemHostGetDevicePointer_v2`, потоки, события) уже в дереве форка.
 
 ### Связанные задачи
+
 - Спека многоуровневого KV (`docs/specs/2026-08-27-tiered-kv-cache.md`) — независима: KV и эксперты не пересекаются по буферам.
 - Открытые мелочи сервера (`FLASH_ATTN`-пустышка, `"strict": false`, стартовая сводка `sampling`) — сводка закрывается FR-007 попутно, остальное вне плана.
 
@@ -288,7 +308,7 @@ log: "[moe] experts: ram … f=… (target …)"; WARN если f < target
 ## Решения плана
 
 | # | Вопрос | Решение | Дата |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | PD-001 | Как вводить таблицу в ядра | **Заменить параметр `all_weights` во всех вариантах `indexed_moe_forward*`** (q8_1, f32, dual, grouped) на таблицу; обёртки `QTensor` строят таблицу `base + id·stride` лениво — только для тестов и эталонных путей. Второй набор ядер отвергнут (два соглашения адресации). | 2026-09-04 |
 | PD-002 | Где живёт хранилище экспертов | **`real/expert_store.rs` в движке** (D-016); `PackedExperts` становится `ExpertWeights::{Packed, Store}` — эталонный бэкенд остаётся на `QTensor`, PTX-путь на хранилище. | 2026-09-04 |
 | PD-003 | Как получать след маршрутизации | **`gpu_softmax_topk` пишет ids прямо в постоянный срез `RouteTrace`** (слой × B·T_max × k); отдельного копирующего ядра нет, ids как тензор-вид того же буфера идут в ядра экспертов. | 2026-09-04 |
