@@ -147,11 +147,16 @@ pub fn footprint_from_gguf_with(path: &Path, moe_experts: &str) -> Result<ModelF
                 // auto: та же логика, что у движка (expert_store::resolve_auto)
                 let need_all = gpu_bytes;
                 let trunk = gpu_bytes - experts_bytes;
-                let free = free_vram_mib().map(|f| (f * 1024 * 1024) as u64).unwrap_or(0);
+                let free = free_vram_mib()
+                    .map(|f| (f * 1024 * 1024) as u64)
+                    .unwrap_or(0);
                 if free >= need_all && need_all > 0 {
                     ("vram", "auto: ствол+эксперты помещаются в свободную VRAM")
                 } else if free >= trunk {
-                    ("ram", "auto: ствол+эксперты не помещаются, ствол помещается — эксперты в RAM")
+                    (
+                        "ram",
+                        "auto: ствол+эксперты не помещаются, ствол помещается — эксперты в RAM",
+                    )
                 } else {
                     ("ram", "auto: тесно и без экспертов — эксперты в RAM")
                 }
@@ -162,7 +167,11 @@ pub fn footprint_from_gguf_with(path: &Path, moe_experts: &str) -> Result<ModelF
         "[vram] moe: requested={} → эксперты {:.0} МиБ ({}) — решение в плане от KV-бюджета; {}",
         moe_experts,
         experts_bytes as f64 / 1024.0 / 1024.0,
-        if moe_placement == "ram" { "pinned RAM" } else { "VRAM" },
+        if moe_placement == "ram" {
+            "pinned RAM"
+        } else {
+            "VRAM"
+        },
         placement_note,
     );
 
@@ -279,10 +288,10 @@ pub fn compute_dynamic(
         (fp.weights_mib, "ram")
     } else {
         // auto: пробуем резидент, при нехватке KV — выгрузку.
-        let kv_resident = budget - fp.weights_all_mib as f64 - WORKSPACE_MIB as f64
-            - req_slots as f64 * state;
-        let kv_ram = budget - fp.weights_mib as f64 - WORKSPACE_MIB as f64
-            - req_slots as f64 * state;
+        let kv_resident =
+            budget - fp.weights_all_mib as f64 - WORKSPACE_MIB as f64 - req_slots as f64 * state;
+        let kv_ram =
+            budget - fp.weights_mib as f64 - WORKSPACE_MIB as f64 - req_slots as f64 * state;
         if kv_resident >= kv_per_tok * req_ctx as f64 {
             (fp.weights_all_mib, "vram")
         } else if kv_ram >= kv_per_tok * req_ctx as f64 {

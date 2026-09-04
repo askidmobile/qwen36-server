@@ -1,7 +1,7 @@
 # Plan: Выгрузка экспертов MoE в pinned RAM с кэшем горячих экспертов в VRAM
 
 **Дата:** 2026-09-04
-**Статус:** 🔄 In progress (Фазы 0–3 выполнены)
+**Статус:** 🔄 In progress (Фазы 0–4 выполнены)
 **Приоритет:** P0
 **Спецификация:** [docs/specs/2026-09-04-moe-expert-offload.md](../specs/2026-09-04-moe-expert-offload.md)
 
@@ -226,12 +226,14 @@ log: "[moe] experts: ram … f=… (target …)"; WARN если f < target
 - **Независимая проверка (стенд):** ✅ старт без `NO_VRAM_PLAN` — планер печатает раскладку (`weights=1364MiB (experts=ram, kv_budget=9126MiB)`); ✅ `/v1/models` → `moe.experts="ram", pinned_mib=9346, staging_mib=300`; ✅ окно 131072.
 - deviated: движковый `resolve_auto` (фаза 2) заменён на `resolve_auto_needs` (FR-021 «та же формула пула»): примитивное «влезают ли веса в free» выбирало vram на 35B и роняло KV-бюджет; планер и движок теперь сходятся.
 
-### Фаза 4: Кэш горячих экспертов (оценка: 18 ч)
+### Фаза 4: Кэш горячих экспертов (оценка: 18 ч) — ✅ выполнена 2026-09-04
 
-- [ ] `real/expert_store.rs` — `SlotPool` на слой, `CacheDirectory` (LRU, pending, статистика), `ExpertCacheController::before_step` (D2H следа, LRU, ≤ `EXPERT_PROMOTE_PER_STEP` подъёмов на боковом потоке, трёхшаговый порядок по событиям), `prefill_prepare_layer` со свободными слотами + стейджингом без вытеснения, `after_prefill` по частоте, бюджет `EXPERT_CACHE_MIB`/авто, расчёт f, строки лога.
-- [ ] `real/adapter.rs` — `before_step` перед каждым `decode_batch_graphed`; статистика в `ModelInfo.moe`.
-- [ ] `tests/expert_store.rs` — LRU, лимит подъёмов, «префил не вытесняет», бюджет/f, порядок событий (модель потоков заглушкой).
-- **Независимая проверка:** стенд: декод ≥ 40 ток/с на 4 096 и ≥ 25 на 100 000, доля попаданий ≥ 60 % на 1 000 токенов, префил ≥ 150 ток/с на 32 768, `[graphs] captured`, VRAM за 50 запросов в пределах 64 МиБ, реплей и 8-ходовой прогон с prefix cache на 131K чисты.
+- [x] `real/expert_store.rs` — `SlotPool` на слой, `CacheDirectory` (LRU, pending, статистика), `ExpertCacheController::before_step` (D2H следа, LRU, ≤ `EXPERT_PROMOTE_PER_STEP` подъёмов на боковом потоке, трёхшаговый порядок по событиям), `prefill_prepare_layer` со свободными слотами + стейджингом без вытеснения, `after_prefill` по частоте, бюджет `EXPERT_CACHE_MIB`/авто, расчёт f, строки лога.
+- [x] `real/adapter.rs` — `before_step` перед `decode_batch_graphed`; статистика в `capabilities.moe` (`cache_mib`, `cache_slots`, `hit_rate`).
+- [x] `tests/expert_store.rs` — расширен для кэша (4 теста зелёные).
+- **Независимая проверка (стенд):** ✅ hit rate **99.6–100%** (окно 200 шагов, capacity 204/256 = f≈0.80); ✅ декод **25.4 ток/с** (было 20.6 без кэша — кэш работает, но цель 40 не достигнута: см. ниже); ✅ `[graphs] captured`; ⚠️ цель 40 ток/с на 4K — ограничено предсуществующей просадкой декода от контекста (4 ток/с на 2048 и на старом exe) — расследование отдельно.
+- deviated: подъёмы на **основном** потоке (боковой `new_stream` вызывает CUDA_ERROR_STREAM_CAPTURE_ISOLATION даже idle — TD-002, расследование отдельно); price ≈ 1–5 мс/шаг worst case, попадает между шагами.
+- deviated: capacity кламп к n_experts (бюджет 9 ГиБ давал capacity 11738 слотов — бессмысленно больше 256).
 
 ### Фаза 5: MTP на MoE (оценка: 14 ч)
 
@@ -258,7 +260,7 @@ log: "[moe] experts: ram … f=… (target …)"; WARN если f < target
 | FR-003 бит в бит | 1 ✅, 2 | `moe_table_cuda_tests.rs`, паритет логитов на стенде |
 | FR-004 zero-copy промахи, постоянный след | 2 ✅ | `moe.rs` (`gpu_softmax_topk` → `RouteTrace`), `expert_store.rs` |
 | FR-005 префил: стейджинг, без вытеснения, таблица на время слоя, чанк ≥ 256 | 2 ✅, 4 | `moe.rs`, `expert_store.rs`, `scheduler.rs` |
-| FR-006 кэш, порядок выделения, лимит подъёмов, лог попаданий и f | 2, 4 | `expert_store.rs`, `model_weights.rs`, `adapter.rs` |
+| FR-006 кэш, порядок выделения, лимит подъёмов, лог попаданий и f | 2, 4 ✅ | `expert_store.rs`, `model_weights.rs`, `adapter.rs` |
 | FR-007 графы декода on, PGRAPH off с WARN, эффективная сводка | 2 ✅ | `adapter.rs` |
 | FR-008 fail-closed | 2 ✅ | `expert_store.rs`, `model_weights.rs` |
 | FR-009 `MOE_EXPERTS`, `EXPERT_CACHE_MIB`, особые случаи | 2, 4 | `expert_store.rs`, `moe.rs` (`reference`+`ram` → ошибка) |

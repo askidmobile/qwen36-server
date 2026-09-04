@@ -342,6 +342,9 @@ impl BatchedEngine {
                     experts: "ram",
                     pinned_mib: mi.pinned_bytes / 1024 / 1024,
                     staging_mib: mi.staging_bytes / 1024 / 1024,
+                    cache_mib: mi.cache_mib,
+                    cache_slots: mi.cache_slots,
+                    hit_rate: mi.hit_rate,
                 });
             }
             #[cfg(feature = "cuda")]

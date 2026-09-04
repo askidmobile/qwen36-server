@@ -1239,6 +1239,9 @@ pub async fn list_models(State(state): State<AppState>) -> Response {
                         "experts": moe.experts,
                         "pinned_mib": moe.pinned_mib,
                         "staging_mib": moe.staging_mib,
+                        "cache_mib": moe.cache_mib,
+                        "cache_slots": moe.cache_slots,
+                        "hit_rate": moe.hit_rate,
                     })
                 }),
                 "thinking": true,

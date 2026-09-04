@@ -326,6 +326,10 @@ pub struct MoeInfo {
     pub pinned_mib: u64,
     /// Стейджинг префила (MiB; 0 при vram).
     pub staging_mib: u64,
+    /// Кэш горячих экспертов (фаза 4): МиБ, слотов/слой, доля попаданий.
+    pub cache_mib: usize,
+    pub cache_slots: usize,
+    pub hit_rate: f32,
 }
 
 #[async_trait::async_trait]
