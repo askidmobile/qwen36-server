@@ -266,6 +266,21 @@ pub async fn prepare_inference_request(
     ))
 }
 
+/// f32 в JSON без хвоста расширения.
+///
+/// `serde_json::Value` хранит только f64, поэтому и `json!`, и `to_value`
+/// печатают `0.95f32` как `0.949999988079071`. Число то же самое — это и есть
+/// точное значение `0.95f32`, — но в дампе оно читается как чужое: разбор
+/// 2026-09-04 ушёл в проверку гипотезы «параметры выставлены неточно».
+/// Кратчайшая запись f32 (`Display`) даёт `0.95` и парсится в тот же f64.
+fn f32_json(v: f32) -> serde_json::Value {
+    v.to_string()
+        .parse::<f64>()
+        .ok()
+        .and_then(serde_json::Number::from_f64)
+        .map_or(serde_json::Value::Null, serde_json::Value::Number)
+}
+
 /// Запись запроса целиком (REQ_DEBUG=путь к файлу).
 ///
 /// Нужна, когда дефект воспроизводится только в живой сессии агента и не
@@ -306,11 +321,11 @@ fn dump_request(
         })
         .collect();
     let dump = serde_json::json!({
-        "temperature": params.temperature,
-        "top_p": params.top_p,
+        "temperature": f32_json(params.temperature),
+        "top_p": f32_json(params.top_p),
         "top_k": params.top_k,
-        "presence_penalty": params.presence_penalty,
-        "repetition_penalty": params.repetition_penalty,
+        "presence_penalty": f32_json(params.presence_penalty),
+        "repetition_penalty": f32_json(params.repetition_penalty),
         "max_tokens": params.max_tokens,
         "thinking": params.thinking,
         "tools_count": tools.as_ref().and_then(|t| t.as_array()).map(|a| a.len()),
@@ -491,5 +506,28 @@ pub fn warn_unknown_tool_calls(calls: &[(String, String)], tools: Option<&serde_
         if !known.iter().any(|k| k == name) {
             eprintln!("[tools] модель позвала инструмент вне списка запроса: {name:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::f32_json;
+
+    /// Дамп должен показывать то же число, что видит сэмплер, а не его
+    /// расширение до f64: `0.95` вместо `0.949999988079071`.
+    #[test]
+    fn dump_prints_f32_without_widening_tail() {
+        for (v, want) in [
+            (0.95f32, "0.95"),
+            (0.6, "0.6"),
+            (1.05, "1.05"),
+            (1.0, "1.0"),
+            (0.0, "0.0"),
+        ] {
+            assert_eq!(f32_json(v).to_string(), want, "значение {v}");
+        }
+        // Значение обязано остаться тем же f32 после обратного разбора.
+        assert_eq!(f32_json(0.95).as_f64().unwrap() as f32, 0.95f32);
+        assert!(f32_json(f32::NAN).is_null());
     }
 }
