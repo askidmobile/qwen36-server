@@ -1,7 +1,7 @@
 # Plan: Выгрузка экспертов MoE в pinned RAM с кэшем горячих экспертов в VRAM
 
 **Дата:** 2026-09-04
-**Статус:** 🔄 In progress (Фазы 0–2 выполнены)
+**Статус:** 🔄 In progress (Фазы 0–3 выполнены)
 **Приоритет:** P0
 **Спецификация:** [docs/specs/2026-09-04-moe-expert-offload.md](../specs/2026-09-04-moe-expert-offload.md)
 
@@ -216,13 +216,15 @@ log: "[moe] experts: ram … f=… (target …)"; WARN если f < target
 - deviated: след маршрутизации пока только пишется (d2d в графе); D2H-чтение хостом — фаза 4 (before_step).
 - deviated: обнаружено предсуществующее (есть на сборке ДО фазы 1: 4.4 против 3.6 ток/с): просадка декода на контексте ~2048 токенов у резидентного режима — отдельное расследование, вне рамок фазы (у обеих сборок графы захвачены).
 
-### Фаза 3: Сервер для ранней выкладки (оценка: 6 ч)
+### Фаза 3: Сервер для ранней выкладки (оценка: 6 ч) — ✅ выполнена 2026-09-04
 
-- [ ] `src/vram_plan.rs` — оценка весов по именам тензоров с учётом размещения и MTP.
-- [ ] [P] `src/engine.rs`, `src/engine_batched.rs`, `src/api.rs` — `ModelInfo.moe`, `capabilities.moe`.
-- [ ] [P] `src/main.rs`, `README.md`, `.env.example`, `scripts/README.md` — сводка, переменные, требование RAM.
-- [ ] Боевой `.env` стенда: `MOE_EXPERTS=auto`, `CTX=CONTEXT_LIMIT=131072`, `PREFILL_CHUNK=512`, без `NO_VRAM_PLAN`.
-- **Независимая проверка:** старт без `NO_VRAM_PLAN`, планер печатает раскладку с экспертами в RAM; `/v1/models` → `moe.experts = "ram"`; **выкладка сценария 1 на стенд** (PD-005), `.env.bak-ornith-pgraph-on` остаётся путём отката.
+- [x] `src/vram_plan.rs` — оценка весов по именам тензоров (`footprint_from_gguf_with`): ffn_*_exps при ram в pinned, nextn при MTP=0 исключён; q8-формула KV; `compute_dynamic` решает auto от KV-бюджета; отчёт с размещением.
+- [x] [P] `src/engine.rs` (`MoeInfo` + trait fn), `src/engine_batched.rs` (dispatch заполняет из адаптера), `src/engine_swap.rs` (проброс), `src/api/openai.rs` — `/v1/models` → `capabilities.moe {experts, pinned_mib, staging_mib}` (FR-020).
+- [x] [P] `src/main.rs` (эффективные MOE_EXPERTS/PGRAPH/PREFILL_CHUNK — FR-007), `README.md`, `.env.example`, `scripts/README.md` (требование RAM ≈29 ГиБ, PGRAPH при выгрузке).
+- [x] Боевой `.env` стенда: `MOE_EXPERTS=auto`, `CTX=CONTEXT_LIMIT=131072`, `PREFILL_CHUNK=512`, без `NO_VRAM_PLAN`.
+- [x] `src/config.rs` — `MOE_EXPERTS` (vram|ram|auto, fail-closed FR-009).
+- **Независимая проверка (стенд):** ✅ старт без `NO_VRAM_PLAN` — планер печатает раскладку (`weights=1364MiB (experts=ram, kv_budget=9126MiB)`); ✅ `/v1/models` → `moe.experts="ram", pinned_mib=9346, staging_mib=300`; ✅ окно 131072.
+- deviated: движковый `resolve_auto` (фаза 2) заменён на `resolve_auto_needs` (FR-021 «та же формула пула»): примитивное «влезают ли веса в free» выбирало vram на 35B и роняло KV-бюджет; планер и движок теперь сходятся.
 
 ### Фаза 4: Кэш горячих экспертов (оценка: 18 ч)
 
@@ -260,11 +262,11 @@ log: "[moe] experts: ram … f=… (target …)"; WARN если f < target
 | FR-007 графы декода on, PGRAPH off с WARN, эффективная сводка | 2 ✅ | `adapter.rs` |
 | FR-008 fail-closed | 2 ✅ | `expert_store.rs`, `model_weights.rs` |
 | FR-009 `MOE_EXPERTS`, `EXPERT_CACHE_MIB`, особые случаи | 2, 4 | `expert_store.rs`, `moe.rs` (`reference`+`ram` → ошибка) |
-| FR-010 планер по именам тензоров | 3 | `vram_plan.rs`, `config.rs` |
+| FR-010 планер по именам тензоров | 3 ✅ | `vram_plan.rs`, `config.rs` |
 | FR-011 MTP на MoE | 5 | `model_profile.rs`, `mtp.rs` |
 | FR-012 выгрузка и смена модели | 2, 6 | `adapter.rs` (`unload`), проверка на стенде |
-| FR-020 наблюдаемость | 3, 4 | `engine.rs`, `engine_batched.rs`, `api.rs` |
-| FR-021 автовыбор с f и WARN | 2, 4 | `model_weights.rs`, `expert_store.rs` |
+| FR-020 наблюдаемость | 3 ✅, 4 | `engine.rs`, `engine_batched.rs`, `api.rs` |
+| FR-021 автовыбор с f и WARN | 2, 3 ✅, 4 | `model_weights.rs`, `expert_store.rs` |
 | FR-030 прогрев по профилю | — | вне плана (P2, после приёмки) |
 | FR-031 `SLOTS>1` корректно, f в логе | 4 | `expert_store.rs` (след на B слотов уже в FR-004) |
 
