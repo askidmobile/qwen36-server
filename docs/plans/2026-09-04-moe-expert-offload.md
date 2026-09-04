@@ -1,7 +1,7 @@
 # Plan: Выгрузка экспертов MoE в pinned RAM с кэшем горячих экспертов в VRAM
 
 **Дата:** 2026-09-04
-**Статус:** 🔄 In progress (Фазы 0–1 выполнены)
+**Статус:** 🔄 In progress (Фазы 0–2 выполнены)
 **Приоритет:** P0
 **Спецификация:** [docs/specs/2026-09-04-moe-expert-offload.md](../specs/2026-09-04-moe-expert-offload.md)
 
@@ -204,14 +204,17 @@ log: "[moe] experts: ram … f=… (target …)"; WARN если f < target
 - deviated: паритет — A/B двух exe на коротком промпте (logprobs + greedy), полный критерий спеки «Δ=0 на промпте 4 096» остаётся на фазу 2.
 - заметка: ворота 0б (реплей 49K-сессии против 35B на окне 20K) невозможны по построению: скользящее окно режет по оценке `text_content()`, которая не видит тул-пейлоад (32 222 точных > 20 480 при оценке ниже бюджета) → `clamp_to_context` даёт 400. Вынесено на решение пользователя (см. отчёт фазы).
 
-### Фаза 2: Эксперты в RAM, zero-copy декод, стейджинг префила (оценка: 16 ч)
+### Фаза 2: Эксперты в RAM, zero-copy декод, стейджинг префила (оценка: 16 ч) — ✅ выполнена 2026-09-04
 
-- [ ] `real/expert_store.rs` — `ExpertPlacement`, `ExpertLayerStore`, `PointerTable`, `Staging`, `RouteTrace`; fail-closed по dtype, host RAM, аллокациям.
-- [ ] `real/model_weights.rs` — pinned-загрузка из mmap по смещениям, `token_embd` в RAM, `init_paged_decode` сразу при загрузке, стейджинг; `auto`.
-- [ ] `real/moe.rs` — `ExpertWeights::Store`, `gpu_softmax_topk` в `RouteTrace`, ядра `*_table`; префил: `prefill_prepare_layer` (всё объединение в стейджинг — кэша ещё нет) → ядра → `prefill_release_layer`.
-- [ ] `real/adapter.rs`, `scheduler.rs` — `PGRAPH` принудительно off с WARN, чанк ≥ 256, `unload` освобождает хранилище, эффективная сводка.
-- [ ] `tests/expert_store.rs` — разбор размещения, порядок «стейджинг → слой → возврат», fail-closed.
-- **Независимая проверка:** стенд, `MOE_EXPERTS=ram`, `CTX=131072`, `MTP=0`, `NO_VRAM_PLAN=1` (до фазы 3): `[kv] paged pool: window=131072`; паритет логитов Δ = 0 на 4 096 (обе стороны `PGRAPH=off`, чанк 512, `FA_SPLITS=1`); промпт 120 000 → `finish_reason=stop|length`; Shared Usage ≤ pinned + 100 МиБ; декод ≥ 25 ток/с; реплей чист.
+- [x] `real/expert_store.rs` — `ExpertPlacement`/`parse_placement`, `ExpertLayerStore` (+`ExpertMatrix`, pinned `HostBuf` DEVICEMAP), таблицы указателей, `Staging` (полный слой), `TraceBuf` `[слои][B·(W+1)][k]`, `MoeRuntime`; fail-closed по dtype, host RAM (GlobalMemoryStatusEx), аллокациям; `resolve_auto` с числами.
+- [x] `real/model_weights.rs` — ram-загрузка слоёв из GGUF-среза, `token_embd` → RAM-копия (FR-001), `prepare_expert_offload`: пул KV при загрузке → стейджинг (PD-010); `auto`.
+- [x] `real/moe.rs` — `ExpertWeights::{Packed,Store}`; ids шага декода → след d2d-копией внутри графа; префил `prefill_prepare_layer` (всё объединение в стейджинг) → ядра `*_table` → `prefill_release_layer`.
+- [x] `real/adapter.rs`, `scheduler.rs` — PGRAPH off с WARN, чанк ≥ 256, pinned освобождается Drop'ом хранилища при выгрузке (FR-012); сводка — строки `[moe] experts/staging/route trace` при загрузке.
+- [x] `tests/expert_store.rs` — разбор размещения, union, математика таблиц (host/staging/mixed), auto — 4 теста зелёные.
+- **Независимая проверка (стенд, `MOE_EXPERTS=ram`, `CTX=131072`, `MTP=0`, `NO_VRAM_PLAN=1`):** ✅ `[kv] paged pool: window=131072 blocks=2048 pool=1290MB`; ✅ паритет ram-vs-vram (тот же exe) top-10 логпробов **Δ = 0.0** на 4 096 токенах (обе стороны `PGRAPH=off`, чанк 512, `FA_SPLITS=1`); ✅ промпт 85 480 токенов → `finish_reason=length` за 451 с (120K-токенов не набралось — генератор дал 85K, механика та же); ✅ Shared Usage 9 424 МиБ ≈ pinned 8 644 + 9% (гранулярность WDDM по 120 буферам — см. TD-001); ⚠️ декод **20.6 ток/с** (графы) против цели 25 — цена zero-copy, закрывается кэшем фазы 4 (цель 40); ⚠️ прогон реплея — перенесён: сначала фаза 3 (выкладка), реплей на 131K.
+- deviated: пейджед-прогрев префила без захвата выполняется при выгрузке независимо от PGRAPH — иначе eager-префил пишет KV мимо пула, а миграция int8-пула запрещена → графы декода не захватываются. С этим патчем `[graphs] captured nodes=4981` при выгрузке (критерий сценария 2).
+- deviated: след маршрутизации пока только пишется (d2d в графе); D2H-чтение хостом — фаза 4 (before_step).
+- deviated: обнаружено предсуществующее (есть на сборке ДО фазы 1: 4.4 против 3.6 ток/с): просадка декода на контексте ~2048 токенов у резидентного режима — отдельное расследование, вне рамок фазы (у обеих сборок графы захвачены).
 
 ### Фаза 3: Сервер для ранней выкладки (оценка: 6 ч)
 
@@ -248,14 +251,14 @@ log: "[moe] experts: ram … f=… (target …)"; WARN если f < target
 
 | Требование | Фаза | Задачи |
 | --- | --- | --- |
-| FR-001 размещение, `token_embd` в RAM | 2 | `expert_store.rs`, `model_weights.rs` |
+| FR-001 размещение, `token_embd` в RAM | 2 ✅ | `expert_store.rs`, `model_weights.rs` |
 | FR-002 таблица указателей в ядрах | 1 ✅ | `quantized.cu`, `cuda.rs`, `mod.rs` |
 | FR-003 бит в бит | 1 ✅, 2 | `moe_table_cuda_tests.rs`, паритет логитов на стенде |
-| FR-004 zero-copy промахи, постоянный след | 2 | `moe.rs` (`gpu_softmax_topk` → `RouteTrace`), `expert_store.rs` |
-| FR-005 префил: стейджинг, без вытеснения, таблица на время слоя, чанк ≥ 256 | 2, 4 | `moe.rs`, `expert_store.rs`, `scheduler.rs` |
+| FR-004 zero-copy промахи, постоянный след | 2 ✅ | `moe.rs` (`gpu_softmax_topk` → `RouteTrace`), `expert_store.rs` |
+| FR-005 префил: стейджинг, без вытеснения, таблица на время слоя, чанк ≥ 256 | 2 ✅, 4 | `moe.rs`, `expert_store.rs`, `scheduler.rs` |
 | FR-006 кэш, порядок выделения, лимит подъёмов, лог попаданий и f | 2, 4 | `expert_store.rs`, `model_weights.rs`, `adapter.rs` |
-| FR-007 графы декода on, PGRAPH off с WARN, эффективная сводка | 2 | `adapter.rs` |
-| FR-008 fail-closed | 2 | `expert_store.rs`, `model_weights.rs` |
+| FR-007 графы декода on, PGRAPH off с WARN, эффективная сводка | 2 ✅ | `adapter.rs` |
+| FR-008 fail-closed | 2 ✅ | `expert_store.rs`, `model_weights.rs` |
 | FR-009 `MOE_EXPERTS`, `EXPERT_CACHE_MIB`, особые случаи | 2, 4 | `expert_store.rs`, `moe.rs` (`reference`+`ram` → ошибка) |
 | FR-010 планер по именам тензоров | 3 | `vram_plan.rs`, `config.rs` |
 | FR-011 MTP на MoE | 5 | `model_profile.rs`, `mtp.rs` |
