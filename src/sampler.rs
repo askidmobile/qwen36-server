@@ -246,11 +246,19 @@ pub fn sample_with_seen(
     }
 
     // Рулетка по probs (ненормированным — сумма константна для всех кандидатов).
-    let total: f32 = probs.iter().sum();
-    let mut r = rng.next_f32() * total;
+    //
+    // Накопление вперёд в f64 против цели `sum * u`, как в llama.cpp
+    // (`llama_sampler_dist_apply`: `double sum_cum`, `sum_tgt = sum_cum*rnd`,
+    // `sum_run += p`). Прежнее вычитание в f32 (`r -= p; r <= 0`) теряет
+    // точность по мере убывания остатка и на 0.003% розыгрышей выбирало
+    // соседа по границе. Всё остальное в сэмплере уже совпадает с эталоном:
+    // параметры f32, top_k целый, кандидаты f32, softmax и нуклеус f32.
+    let sum: f64 = probs.iter().map(|&p| p as f64).sum();
+    let target = sum * rng.next_f32() as f64;
+    let mut run = 0.0f64;
     for (i, &p) in probs.iter().enumerate() {
-        r -= p;
-        if r <= 0.0 {
+        run += p as f64;
+        if run >= target {
             return idx[i];
         }
     }
