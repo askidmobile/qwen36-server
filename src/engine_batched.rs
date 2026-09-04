@@ -115,6 +115,19 @@ fn dump_prompt(text: &str) {
     let _ = std::fs::write(path, text);
 }
 
+/// Идентификаторы токенов того же промпта (PROMPT_DEBUG + суффикс `.ids.json`).
+/// Текст промпта совпадал с llama.cpp байт в байт, а число токенов — нет
+/// (4452 против 4208 на 18 КБ, 2026-09-04): расходится сам токенизатор, и
+/// сравнивать надо разбиения, а не текст.
+fn dump_prompt_ids(ids: &[u32]) {
+    static PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let Some(path) = PATH.get_or_init(|| std::env::var("PROMPT_DEBUG").ok()) else {
+        return;
+    };
+    let body: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
+    let _ = std::fs::write(format!("{path}.ids.json"), format!("[{}]", body.join(",")));
+}
+
 /// Хостовые фазы шага (HOST_TIMING=1): сэмплер и drain отдельно от
 /// ожидания GPU. CPU-время процесса здесь бесполезно — при spin-wait драйвера
 /// оно тождественно времени на стене.
@@ -522,9 +535,12 @@ impl Engine for BatchedEngine {
             let ids = match rendered {
                 Some(text) => {
                     dump_prompt(&text);
-                    tok.encode(text.as_str(), false)
+                    let ids = tok
+                        .encode(text.as_str(), false)
                         .map(|e| e.get_ids().to_vec())
-                        .map_err(|e| anyhow!("encode prompt: {e}"))?
+                        .map_err(|e| anyhow!("encode prompt: {e}"))?;
+                    dump_prompt_ids(&ids);
+                    ids
                 }
                 None => {
                     let text = tokenizer::build_chatml_text_with_tools(&msgs, tools.as_ref());

@@ -19,8 +19,10 @@ GGUF, порт 18098 закрыт файрволом -> ssh -L 18098:127.0.0.1:1
 import json, sys, urllib.request
 
 KEY = json.load(open('/Users/askid/.pi/agent/models.json'))['providers']['local-qwen']['apiKey']
-OURS  = "http://192.168.2.89:18099/v1/chat/completions"
-REF   = "http://127.0.0.1:18098/v1/chat/completions"
+import os
+# A/B — любые два сервера с OpenAI chat API; по умолчанию наш стенд и llama.cpp через туннель.
+OURS  = os.environ.get("PARITY_A", "http://192.168.2.89:18099") + "/v1/chat/completions"
+REF   = os.environ.get("PARITY_B", "http://127.0.0.1:18098") + "/v1/chat/completions"
 
 def ask(url, body, key=None):
     req = urllib.request.Request(url, data=json.dumps(body).encode(),
@@ -43,7 +45,7 @@ body = {"model": "ornith-1.5-9b", "max_tokens": 1, "max_completion_tokens": 1, "
         "chat_template_kwargs": {"enable_thinking": False},
         "messages": [{"role": "user", "content": prompt}]}
 
-a = ask(OURS, body, KEY); b = ask(REF, dict(body, model="ornith"))
+a = ask(OURS, body, KEY); b = ask(REF, dict(body, model="ornith"), KEY)
 ta, tb = top(a, "наш"), top(b, "эталон")
 print("наш   :", ta)
 print("эталон:", tb)
