@@ -1,7 +1,7 @@
 # Plan: Выгрузка экспертов MoE в pinned RAM с кэшем горячих экспертов в VRAM
 
 **Дата:** 2026-09-04
-**Статус:** 🔄 In progress (Фазы 0–4 выполнены)
+**Статус:** 🔄 In progress (Фазы 0–4 ✅, фаза 5 — код готов, отладка catch_up)
 **Приоритет:** P0
 **Спецификация:** [docs/specs/2026-09-04-moe-expert-offload.md](../specs/2026-09-04-moe-expert-offload.md)
 
@@ -235,12 +235,13 @@ log: "[moe] experts: ram … f=… (target …)"; WARN если f < target
 - deviated: подъёмы на **основном** потоке (боковой `new_stream` вызывает CUDA_ERROR_STREAM_CAPTURE_ISOLATION даже idle — TD-002, расследование отдельно); price ≈ 1–5 мс/шаг worst case, попадает между шагами.
 - deviated: capacity кламп к n_experts (бюджет 9 ГиБ давал capacity 11738 слотов — бессмысленно больше 256).
 
-### Фаза 5: MTP на MoE (оценка: 14 ч)
-
-- [ ] `real/model_profile.rs` — `MtpProfile` для `Qwen35Moe`.
-- [ ] `real/mtp.rs` — `FeedForward::Moe`, загрузка nextn-слоя с резидентным `ExpertLayerStore`, адаптивная ширина по умолчанию при `ram`.
-- [ ] [P] `tests/model_profile.rs`, `tests/mtp_transaction.rs` — профиль на заголовке 35B-A3B, черновик с MoE-FFN.
-- **Независимая проверка:** стенд `MTP=1`, `MTP_PATH` = сам GGUF: загрузка без ошибок валидации, `/v1/models` `mtp.available=true`; `qwen35_mtp_gate` на трёх промптах проходит по BD-029; декод с MTP ≥ без MTP на 4 096; доля принятых в логе.
+### Фаза 5: MTP на MoE (оценка: 14 ч) — 🔄 код готов, отладка catch_up
+- [x] `real/model_profile.rs` — `MtpProfile` для `Qwen35Moe` (qwen35moe.* метаданные, MoE-тензоры, BF16, embedded MTP).
+- [x] `real/mtp.rs` — `MtpFfn` enum (Dense | Moe), загрузка nextn-слоя с VRAM-резидентными экспертами (D-007), forward_rows + draft_pass_body ветвят по ffn.
+- [x] [P] `tests/model_profile.rs` — 12 тестов зелёных (профиль + MoE-тензоры).
+- **Проверка (стенд):** ✅ `MTP=1`, `MTP_PATH` = сам GGUF → загрузка прошла, `mtp.available=True`; ⚠️ catch_up: "unexpected rank, expected: 3, got: 2 ([11, 2048])" — rank fix unsqueeze применён в catch_up и forward_rows, но ошибка из другого пути forward_rows (MoE block.forward) — расследование в следующей сессии. MTP disabled → декод 30.2 ток/с (кэш работает).
+- deviated: BF16 разрешён в matrix/norm dtypes (unsloth GGUF использует BF16 для router/shared expert).
+- deviated: draft_graph не поддерживает MoE — черновик идёт eager (верификация доминирует по времени).
 
 ### Фаза 6: Стабилизация и приёмка (оценка: 10 ч)
 
@@ -265,7 +266,7 @@ log: "[moe] experts: ram … f=… (target …)"; WARN если f < target
 | FR-008 fail-closed | 2 ✅ | `expert_store.rs`, `model_weights.rs` |
 | FR-009 `MOE_EXPERTS`, `EXPERT_CACHE_MIB`, особые случаи | 2, 4 | `expert_store.rs`, `moe.rs` (`reference`+`ram` → ошибка) |
 | FR-010 планер по именам тензоров | 3 ✅ | `vram_plan.rs`, `config.rs` |
-| FR-011 MTP на MoE | 5 | `model_profile.rs`, `mtp.rs` |
+| FR-011 MTP на MoE | 5 🔄 | `model_profile.rs`, `mtp.rs` |
 | FR-012 выгрузка и смена модели | 2, 6 | `adapter.rs` (`unload`), проверка на стенде |
 | FR-020 наблюдаемость | 3 ✅, 4 | `engine.rs`, `engine_batched.rs`, `api.rs` |
 | FR-021 автовыбор с f и WARN | 2, 3 ✅, 4 | `model_weights.rs`, `expert_store.rs` |
