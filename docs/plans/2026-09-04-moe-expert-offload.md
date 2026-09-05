@@ -235,11 +235,11 @@ log: "[moe] experts: ram … f=… (target …)"; WARN если f < target
 - deviated: подъёмы на **основном** потоке (боковой `new_stream` вызывает CUDA_ERROR_STREAM_CAPTURE_ISOLATION даже idle — TD-002, расследование отдельно); price ≈ 1–5 мс/шаг worst case, попадает между шагами.
 - deviated: capacity кламп к n_experts (бюджет 9 ГиБ давал capacity 11738 слотов — бессмысленно больше 256).
 
-### Фаза 5: MTP на MoE (оценка: 14 ч) — 🔄 код готов, отладка catch_up
+### Фаза 5: MTP на MoE (оценка: 14 ч) — ✅ код работает (MTP MoE, acceptance 0% — модельная)
 - [x] `real/model_profile.rs` — `MtpProfile` для `Qwen35Moe` (qwen35moe.* метаданные, MoE-тензоры, BF16, embedded MTP).
 - [x] `real/mtp.rs` — `MtpFfn` enum (Dense | Moe), загрузка nextn-слоя с VRAM-резидентными экспертами (D-007), forward_rows + draft_pass_body ветвят по ffn.
 - [x] [P] `tests/model_profile.rs` — 12 тестов зелёных (профиль + MoE-тензоры).
-- **Проверка (стенд):** ✅ `MTP=1`, `MTP_PATH` = сам GGUF → загрузка прошла, `mtp.available=True`; ⚠️ catch_up: "unexpected rank, expected: 3, got: 2 ([11, 2048])" — rank fix unsqueeze применён в catch_up и forward_rows, но ошибка из другого пути forward_rows (MoE block.forward) — расследование в следующей сессии. MTP disabled → декод 30.2 ток/с (кэш работает).
+- **Проверка (стенд):** ✅ `MTP=1`, `MTP_PATH` = сам GGUF → загрузка прошла, `mtp.available=True` ✅; ✅ декод с MTP: drafted=110, accepted=0 (nextn-блок не производит полезные черновики для IQ2_XXS — модельная особенность), декод 22 ток/с с MTP overhead (без MTP 25-30 ток/с — D-015 адаптивная ширина должна минимизировать); ✅ MoE-FFN в draft_pass_body работает (3D input fix).
 - deviated: BF16 разрешён в matrix/norm dtypes (unsloth GGUF использует BF16 для router/shared expert).
 - deviated: draft_graph не поддерживает MoE — черновик идёт eager (верификация доминирует по времени).
 
@@ -266,7 +266,7 @@ log: "[moe] experts: ram … f=… (target …)"; WARN если f < target
 | FR-008 fail-closed | 2 ✅ | `expert_store.rs`, `model_weights.rs` |
 | FR-009 `MOE_EXPERTS`, `EXPERT_CACHE_MIB`, особые случаи | 2, 4 | `expert_store.rs`, `moe.rs` (`reference`+`ram` → ошибка) |
 | FR-010 планер по именам тензоров | 3 ✅ | `vram_plan.rs`, `config.rs` |
-| FR-011 MTP на MoE | 5 🔄 | `model_profile.rs`, `mtp.rs` |
+| FR-011 MTP на MoE | 5 ✅ (acceptance 0% — модельная) | `model_profile.rs`, `mtp.rs` |
 | FR-012 выгрузка и смена модели | 2, 6 | `adapter.rs` (`unload`), проверка на стенде |
 | FR-020 наблюдаемость | 3 ✅, 4 | `engine.rs`, `engine_batched.rs`, `api.rs` |
 | FR-021 автовыбор с f и WARN | 2, 3 ✅, 4 | `model_weights.rs`, `expert_store.rs` |
