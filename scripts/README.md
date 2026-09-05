@@ -70,6 +70,30 @@ netstat -ano | findstr :18099
 2. Правка `.env` (см. ключи ниже), затем перезапуск задачи.
    Горячая смена без рестарта — admin API `POST /admin/switch` (скан `MODELS_DIR`).
 
+### Модель без готового GGUF: загрузка и квантование
+
+Когда на HF лежат только `safetensors` (например `empero-ai/Qwen3.8-9B-Distill`):
+
+```bat
+:: 1. Мелкие файлы (конфиг, токенизатор) — hf.exe из venv llama.cpp
+hf download <org>/<repo> --local-dir D:\Models\source\<repo> --exclude "*.safetensors"
+
+:: 2. Веса — параллельно, N диапазонов (hf.exe на 20 ГБ встаёт, один curl ~1.5 МБ/с)
+powershell -File scripts\windows\parallel-dl.ps1 ^
+  -Url https://huggingface.co/<org>/<repo>/resolve/main/model.safetensors ^
+  -OutFile D:\Models\source\<repo>\model.safetensors
+
+:: 3. F16 + квант (F16 остаётся рядом — следующий квант без повторной конвертации)
+scripts\windows\convert-hf-gguf.bat D:\Models\source\<repo> ^
+  D:\Models\<org>\<repo>-GGUF <basename> Q4_K_M
+```
+
+Проверить перед запуском сервера: `qwen36_inspect.exe <gguf>` — `general.architecture`
+(`qwen35` для семейства Qwen3.5/3.8), `block_count` (включает nextn-слой),
+`tokenizer.ggml.pre`. HF не отдаёт sha256 для xet-файлов, поэтому целостность
+проверяется заголовком safetensors: `8 + header_len + data_end == размер файла`.
+Замер 2026-09-05 на 9B: загрузка 19 ГБ ≈ 20 мин, F16 ≈ 2 мин, квант ≈ 2 мин.
+
 ### Ключи .env, которые трогаем при смене модели
 
 ```env
