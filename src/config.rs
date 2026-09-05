@@ -306,6 +306,10 @@ pub fn sampling_family_for_model(model_name: &str) -> &'static str {
         "ornith"
     } else if compact.contains("gemma4") {
         "gemma-4"
+    } else if compact.contains("qwen38") && compact.contains("distill") {
+        // Дистилляты Qwen3.8 в архитектуру Qwen3.5 (empero-ai/Qwen3.8-9B-Distill):
+        // карточка рекомендует 0.6/0.95/20, а не профиль thinking 1.0 плотного 3.8.
+        "qwen-3.8-distill"
     } else if compact.contains("qwen38") {
         "qwen-3.8"
     } else if compact.contains("qwen36") && (compact.contains("a3b") || compact.contains("moe")) {
@@ -375,6 +379,22 @@ pub fn default_presets_for_model(model_name: &str) -> SamplingPresets {
                 preset(0.6, 0.95, 20, 0.0),
                 preset(0.7, 0.80, 20, 1.5),
                 preset(1.0, 0.95, 20, 1.5),
+            );
+        }
+        "qwen-3.8-distill" => {
+            // Карточка empero-ai/Qwen3.8-9B-Distill: temperature 0.6, top_p 0.95,
+            // top_k 20 для генерации; штрафов карточка не задаёт. При 1.0 без
+            // штрафов на контексте ~90K модель ушла в числовую петлю SVG-path
+            // на все 32K max_tokens (2026-09-05). Штраф повторов не трогаем —
+            // см. урок Ornith 1.5 выше. Instruct — общий профиль Qwen.
+            let thinking = preset(0.6, 0.95, 20, 0.0);
+            let instruct = preset(0.7, 0.80, 20, 1.5);
+            insert_modes(
+                &mut m,
+                thinking.clone(),
+                thinking.clone(),
+                instruct,
+                thinking,
             );
         }
         "qwen-3.8" => {
@@ -772,6 +792,14 @@ mod tests {
         assert_eq!(
             sampling_family_for_model("Qwen3.8-27B-UD-Q4_K_XL.gguf"),
             "qwen-3.8"
+        );
+        assert_eq!(
+            sampling_family_for_model("Qwen3.8-9B-Distill-Q4_K_M.gguf"),
+            "qwen-3.8-distill"
+        );
+        assert_eq!(
+            default_presets_for_model("Qwen3.8-9B-Distill-Q4_K_M.gguf")["thinking"].temperature,
+            0.6
         );
         assert_eq!(
             sampling_family_for_model("Qwen3.5-4B-Q4_K_M.gguf"),
