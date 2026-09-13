@@ -296,8 +296,21 @@ Branch-point cache prototype реализован поверх существу�
 - Откат: `PREFIX_CACHE_CHECKPOINTS=0` возвращает прежнее поведение.
 
 Unit verification: `cargo test --lib prefix_cache` — 11 passed, включая
-`multi_boundary_put_hits_earlier_branch_point`. Runtime probe на yttri-win для
-нового multi-checkpoint пути ещё не повторялся.
+`multi_boundary_put_hits_earlier_branch_point`.
+
+Runtime verification на yttri-win, новая сборка
+SHA-256 `C3BC0BC3D9EB9C4328ED0BDAFBAC0FCD5B7AA4EF4279532336A308B4A55515B8`:
+
+| Run | До branch cache | После branch cache | Cache event |
+|---|---:|---:|---|
+| branch-A-first | 3.673 s | 3.962 s | `snapshots saved: 4/4`, checkpoint на 2048 |
+| branch-B-divergent | 3.176 s (miss) | **1.989 s** | `primed: 2048 из 4490`, досчитать 2442 |
+| branch-A-repeat | 0.613 s | 0.614 s | `primed: 4096 из 4490`, досчитать 394 |
+
+Divergent branch перестал быть полным miss: ранний checkpoint на 2048 токенов
+дал reuse 2048 из 4490 и сократил wall time с 3.176 до 1.989 s (`-37%`).
+Первый прогон стал немного дороже из-за снятия четырёх checkpoint'ов; repeat
+не изменился.
 
 ## Next steps
 

@@ -1,7 +1,7 @@
 # Plan: Branch-point prefix cache
 
 **Date:** 2026-09-13
-**Status:** 👀 In review
+**Status:** ✅ Done (verified on yttri-win)
 **Priority:** P1
 **Source:** [SGLang validation report](../research/2026-09-13-sglang-validation-report.md)
 
@@ -53,8 +53,11 @@ Validation report показал:
 
 - Unit: `cargo test --lib prefix_cache` — 11 passed, включая
   `multi_boundary_put_hits_earlier_branch_point`.
-- Runtime smoke на yttri-win не выполнялся в этом же изменении; следующий шаг —
-  повторить divergent branch probe на изолированном instance.
+- Runtime smoke на yttri-win: release build
+  SHA-256 `C3BC0BC3D9EB9C4328ED0BDAFBAC0FCD5B7AA4EF4279532336A308B4A55515B8`.
+- Divergent branch: `3.176 s → 1.989 s`, `primed: 2048 из 4490`,
+  `[pcache] snapshots saved: 4/4`.
+- Repeat branch: `0.614 s`, без регрессии против прежних `0.613 s`.
 
 ## Design trade-off
 
