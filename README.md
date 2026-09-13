@@ -126,6 +126,8 @@ yforge --env prod.env --dry-run
 | `--kv-cache-type q8\|q8_f16` | `KV_CACHE_DTYPE` | `q8_f16` | Тип **временного** batched-KV |
 | `--vram-headroom MIB` | `VRAM_HEADROOM_MIB` | `1024` | Резерв VRAM под транзиенты |
 | `--prefix-cache MIB` | `PREFIX_CACHE_MIB` | `0` | Кеш префикса промпта (системная память) |
+| — | `PREFIX_CACHE_CHECKPOINTS` | `1` | Дополнительные branch-point checkpoints (степени двойки); `0` = только последняя граница чанка |
+| — | `PREFIX_CACHE_CHECKPOINT_MAX` | `8192` | Верхняя позиция дополнительного checkpoint'а, токенов |
 | `--cuda-graphs 0\|1` | `CUDA_GRAPHS` | `0` | CUDA-графы |
 | `--flash-attn 0\|1`, `--fa` | `FLASH_ATTN` | `1` | Flash Attention |
 | `-t, --threads N` | `THREADS` | ядра CPU | Потоков CPU |
@@ -206,6 +208,8 @@ CUDA_GRAPHS=1             # ускоряет decode
 PGRAPH=on                 # paged-prefill: KV сразу в пул, декод ~3x; «порча состояния» была дефектом токенизатора
 VRAM_HEADROOM_MIB=1536    # резерв под транзиенты
 PREFIX_CACHE_MIB=8192     # кеш префикса в системной памяти
+# PREFIX_CACHE_CHECKPOINTS=0        # отключить branch-point checkpoints
+# PREFIX_CACHE_CHECKPOINT_MAX=8192  # верхняя позиция раннего checkpoint'а
 
 # ── MTP (production Ornith Q4_K_M работает без него) ──────────────────
 MTP=0

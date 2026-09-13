@@ -158,6 +158,25 @@ impl PrefixCache {
         true
     }
 
+    /// Положить несколько checkpoint'ов одного prompt'а.
+    ///
+    /// Это branch-point вариант поверх обычного `put`: один и тот же prompt
+    /// сохраняется в нескольких точках, поэтому divergent ветка может попасть
+    /// в более ранний общий префикс, а не только в последнюю границу чанка.
+    /// Позиции за пределами prompt'а или нулевые отбрасываются.
+    pub fn put_many(&mut self, tokens: &[u32], snapshots: Vec<(usize, StateSnapshot)>) -> usize {
+        let mut saved = 0usize;
+        for (pos, snap) in snapshots {
+            if pos == 0 || pos > tokens.len() {
+                continue;
+            }
+            if self.put(tokens[..pos].to_vec(), snap) {
+                saved += 1;
+            }
+        }
+        saved
+    }
+
     /// Самый длинный закешированный префикс `tokens`. Кандидат — по хешам
     /// блочных границ от старших к младшим, решение — сверка токенов.
     /// Полное совпадение не возвращается: на primed-пути должен остаться
@@ -505,5 +524,27 @@ mod tests {
         let mut q2 = tokens_from(2, BLOCK_TOKENS);
         q2.extend(tokens_from(9000, BLOCK_TOKENS));
         assert!(c.find(&q2, &Device::Cpu).is_none());
+    }
+
+    #[test]
+    fn multi_boundary_put_hits_earlier_branch_point() {
+        let mut c = PrefixCache::new(64);
+        let prefix = tokens_from(1, 3 * BLOCK_TOKENS);
+        let snapshots = vec![
+            (BLOCK_TOKENS, snap_for(&prefix[..BLOCK_TOKENS], 1024)),
+            (
+                2 * BLOCK_TOKENS,
+                snap_for(&prefix[..2 * BLOCK_TOKENS], 2048),
+            ),
+        ];
+        assert_eq!(c.put_many(&prefix, snapshots), 2);
+
+        // Ветка расходится после второго блока: длинный checkpoint не подходит,
+        // а ранний checkpoint на первом блоке остаётся валидным.
+        let mut divergent = tokens_from(1, BLOCK_TOKENS);
+        divergent.extend(tokens_from(7777, 2 * BLOCK_TOKENS));
+        let hit = c.find(&divergent, &Device::Cpu).expect("early hit");
+        assert_eq!(hit.prefix_len, BLOCK_TOKENS);
+        assert_eq!(hit.snap.position, BLOCK_TOKENS);
     }
 }

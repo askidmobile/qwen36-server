@@ -856,23 +856,18 @@ fn dispatch_loop(
                 // префила: хвост промпта (суффикс генерации) на следующем
                 // ходу заменяется ответом ассистента, и запись во всю длину
                 // перестаёт быть его префиксом — попадания не было бы никогда.
-                if let Some((pos, snap)) = sched.model_mut().take_prefix_snapshot(idx) {
-                    let mut prompt = std::mem::take(&mut b.prompt);
-                    prompt.truncate(pos);
-                    let prompt_len = prompt.len();
-                    let snap_mib = snap.size_bytes() / (1024 * 1024);
-                    if pc.put(prompt, snap) {
-                        eprintln!(
-                            "[pcache] snap saved: {} tok ({} MiB), entries {}",
-                            prompt_len,
-                            pc.total_bytes() / (1024 * 1024),
-                            pc.len(),
-                        );
-                    } else {
-                        eprintln!("[pcache] put rejected: {prompt_len} tok, snap {snap_mib} MiB");
-                    }
-                } else {
+                let snapshots = sched.model_mut().take_prefix_snapshots(idx);
+                if snapshots.is_empty() {
                     eprintln!("[pcache] no boundary snapshot for slot {idx}");
+                } else {
+                    let prompt = std::mem::take(&mut b.prompt);
+                    let total = snapshots.len();
+                    let saved = pc.put_many(&prompt, snapshots);
+                    eprintln!(
+                        "[pcache] snapshots saved: {saved}/{total}, entries {}, bytes {} MiB",
+                        pc.len(),
+                        pc.total_bytes() / (1024 * 1024),
+                    );
                 }
             }
         }

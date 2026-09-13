@@ -282,13 +282,30 @@ MTP artifact.
 | Determinism/batch-invariant | Defer | same-shape stable, batch-shape не проверен |
 | MTP/ReplaySSM | Deferred | нет MTP artifact |
 
+## Follow-up implementation
+
+Branch-point cache prototype реализован поверх существующего `StateSnapshot`:
+
+- `src/prefix_cache.rs`: добавлен `put_many` для нескольких checkpoint'ов
+  одного prompt'а.
+- `src/engine_batched.rs`: сервер забирает все checkpoint'ы слота и кладёт их
+  через `put_many`.
+- `yttri-forge/engine/qwen35-batch/src/real/adapter.rs`: adapter хранит набор
+  checkpoint'ов, снимая степени двойки до `PREFIX_CACHE_CHECKPOINT_MAX`
+  (default `8192`) плюс финальную границу.
+- Откат: `PREFIX_CACHE_CHECKPOINTS=0` возвращает прежнее поведение.
+
+Unit verification: `cargo test --lib prefix_cache` — 11 passed, включая
+`multi_boundary_put_hits_earlier_branch_point`. Runtime probe на yttri-win для
+нового multi-checkpoint пути ещё не повторялся.
+
 ## Next steps
 
-1. Спроектировать branch-point cache поверх текущего `StateSnapshot`:
+1. [x] Спроектировать branch-point cache поверх текущего `StateSnapshot`:
    checkpoint на нескольких границах, а не только на последней.
 2. Повторить branch scenario на целевой 27B IQ2_XXS, когда model profile
    валиден.
 3. Отдельно измерить multi-slot host/GPU headroom перед overlap scheduler.
-4. Dеfer piecewise prefill graph до измерения на 27B с реальными 32K+ prefill.
+4. Defer piecewise prefill graph до измерения на 27B с реальными 32K+ prefill.
 5. Исправить production drift: `qwen36-server\.env` указывает на отсутствующий
    MODEL path.
