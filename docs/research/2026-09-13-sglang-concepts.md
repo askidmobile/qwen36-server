@@ -2,6 +2,7 @@
 
 Дата: 2026-09-13
 Статус: research, не обязательное решение.
+Validation report: [2026-09-13-sglang-validation-report.md](2026-09-13-sglang-validation-report.md).
 Scope: изучить концепции SGLang, которые могут дать преимущество над llama.cpp
 на нашем runtime, и отделить переносимые механики от чужого стека.
 
