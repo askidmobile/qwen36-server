@@ -59,6 +59,54 @@ Raw evidence сохранён локально в `/tmp/sglang-probe-evidence/`,
 `/tmp/sglang-branch-probe.log`, `/tmp/sglang-*-probe*.json`, `/tmp/sglang-probe-server.log`
 на машине Codex. Remote probe-каталоги удалены.
 
+Все runtime-числа ниже — однократные probe-прогоны, кроме трёх повторов
+determinism. Это достаточно для выбора следующего шага, но не заменяет
+повторяемый benchmark серию.
+
+### Exact commands
+
+Создать отдельный probe env и launcher:
+
+```powershell
+# ad-hoc remote layout used for this validation
+D:\Projects\yttri-inference\logs\sglang-probe-<timestamp>\probe.env
+D:\Projects\yttri-inference\logs\sglang-probe-<timestamp>\run-probe.bat
+```
+
+Запустить изолированный инстанс:
+
+```powershell
+Register-ScheduledTask -TaskName yforge-sglang-probe -Action $action -Settings $settings
+Start-ScheduledTask -TaskName yforge-sglang-probe
+```
+
+Прогнать сценарии:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File prefix_probe3.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File prefill_probe.ps1 -Tag pgraph-on
+powershell -NoProfile -ExecutionPolicy Bypass -File prefill_probe.ps1 -Tag pgraph-off
+powershell -NoProfile -ExecutionPolicy Bypass -File decode_probe.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File determinism_probe.ps1
+```
+
+Снять decode/VRAM bench:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File qwen36-server\scripts\bench.ps1 ^
+  -BaseUrl "http://127.0.0.1:18100" -ApiKey "probe-key" -Model "qwen3.5-9b" ^
+  -DecodeTokens 64 -Concurrent 1
+```
+
+Очистить probe:
+
+```powershell
+Stop-ScheduledTask -TaskName yforge-sglang-probe
+Get-Process yforge -ErrorAction SilentlyContinue | Stop-Process -Force
+Unregister-ScheduledTask -TaskName yforge-sglang-probe -Confirm:$false
+Remove-Item -Recurse -Force D:\Projects\yttri-inference\logs\sglang-probe-<timestamp>
+```
+
 ## Theory 1 — Prefix cache на линейном продолжении
 
 ### Setup
@@ -167,10 +215,10 @@ cache: текущая схема хранит только последнюю г
 
 ### Result — bench.ps1 at ~2010 prompt tokens
 
-| Variant | TTFT/decode bench | Prefill tok/s | 1-slot aggregate tok/s | VRAM after |
+| Variant | Bench decode parser | Prefill tok/s | 1-slot aggregate tok/s | VRAM after |
 |---|---|---:|---:|---:|
-| PGRAPH off | decode parser 0 (known bench issue) | 1374.6 | 45.1 | 7004 MiB |
-| PGRAPH on | decode parser 0 (known bench issue) | 1317.3 | 46.4 | 7098 MiB |
+| PGRAPH off | parser 0 (не использован как основной metric) | 1374.6 | 45.1 | 7004 MiB |
+| PGRAPH on | parser 0 (не использован как основной metric) | 1317.3 | 46.4 | 7098 MiB |
 
 Logs подтверждают, что PGRAPH path действительно активен:
 
@@ -182,9 +230,9 @@ Logs подтверждают, что PGRAPH path действительно а�
 
 ### Verdict
 
-**Reject as next priority on this workload.** На Qwen3.5-9B Q4_K_M при
-1K–8K prefill `PGRAPH=on` не дал устойчивого выигрыша и был чуть медленнее на
-4K/8K. Это не отменяет PGRAPH-ценность для decode/VRAM на других моделях, но
+**Defer as next priority on this workload.** В однократном A/B на Qwen3.5-9B
+Q4_K_M при 1K–8K prefill `PGRAPH=on` не дал устойчивого выигрыша и был чуть
+медленнее на 4K/8K. Это не отменяет PGRAPH-ценность для decode/VRAM на других моделях, но
 не подтверждает необходимость piecewise prefill graph как следующего шага.
 Повторить на целевой 27B IQ2_XXS можно отдельно, когда будет валидный MTP/model
 profile.

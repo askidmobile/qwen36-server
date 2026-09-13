@@ -1,7 +1,7 @@
 # Plan: Validation of SGLang-inspired serving concepts on yttri-win
 
 **Date:** 2026-09-13
-**Status:** 📝 Planning
+**Status:** 👀 In review (validation executed; reusable harness remains TD-001)
 **Priority:** P1
 **Specification:** [docs/specs/2026-09-13-sglang-serving-concepts-validation.md](../specs/2026-09-13-sglang-serving-concepts-validation.md)
 
@@ -112,58 +112,58 @@ Metric {
 ## Implementation phases
 
 ### Phase 0: Read-only reconnaissance и baseline (estimate: 1 h)
-- [ ] Зафиксировать SHA-256, mtime, размер `yforge.exe` и модель на
+- [x] Зафиксировать SHA-256, mtime, размер `yforge.exe` и модель на
   yttri-win.
-- [ ] Проверить, что `\qwen36-inference` не запущен и `18100`/`18099` свободны.
-- [ ] Снять idle VRAM, shared memory и RAM.
-- [ ] Сохранить production `.env` без изменений.
+- [x] Проверить, что `\qwen36-inference` не запущен и `18100`/`18099` свободны.
+- [x] Снять idle VRAM, shared memory и RAM.
+- [x] Сохранить production `.env` без изменений.
 - **Independent check:** вывести JSON с бинарником, моделью, task state, VRAM;
   production `.env` hash до и после совпадает.
 
 ### Phase 1: Isolated test instance (estimate: 2 h)
-- [ ] Создать `scripts/windows/sglang_probe_env.ps1` → `D:\...`.
-- [ ] Создать `scripts/windows/sglang_probe_run.bat` → `18100`.
-- [ ] Создать test task `\yforge-sglang-probe` на yttri-win.
-- [ ] Поднять `baseline` и дождаться `[vram] total=... plan(dynamic)`.
-- [ ] Проверить `/v1/models`.
+- [x] Создан ad-hoc probe env в `logs\sglang-probe-...` (repo harness — TD-001).
+- [x] Создан ad-hoc launcher на `18100` (repo harness — TD-001).
+- [x] Создан test task `\yforge-sglang-probe` на yttri-win.
+- [x] Поднят `baseline`, проверен `[vram] total=... plan(dynamic)`.
+- [x] Проверен `/v1/models`.
 - **Independent check:** `curl /v1/models` на `18100` отвечает; production
   task и `.env` не изменены.
 
 ### Phase 2: Prefix cache experiment (estimate: 2 h)
-- [ ] Создать `scripts/windows/sglang_probe.ps1` с режимом `prefix`.
-- [ ] Отправить длинный prompt, затем повторный с расширением.
-- [ ] Собрать TTFT, prompt tokens, `[pcache]` строки.
-- [ ] Повторить с `PREFIX_CACHE_MIB=0`.
+- [x] Создан ad-hoc `prefix_probe3.ps1` (repo harness — TD-001).
+- [x] Отправлен длинный prompt, затем повторный с расширением.
+- [x] Собраны TTFT, prompt tokens, `[pcache]` строки.
+- [x] Дополнительно проверен divergent branch против repeat.
 - **Independent check:** hit-run содержит `[pcache] primed`, miss-run — нет;
   в отчёте есть ΔTTFT.
 
 ### Phase 3: Prefill graph A/B (estimate: 3 h)
-- [ ] Прогнать `pgraph-on` на 1K/4K/8K prompts.
-- [ ] Прогнать `pgraph-off` на тех же prompts.
-- [ ] Сравнить TTFT, prefill tok/s, VRAM, строки `[pg]`.
+- [x] Прогнан `pgraph-on` на 1K/4K/8K prompts.
+- [x] Прогнан `pgraph-off` на тех же prompts.
+- [x] Сравнены TTFT, prefill tok/s, VRAM, строки `[pg]`.
 - **Independent check:** одинаковый prompt и модель, различается только
   `PGRAPH`; отчёт содержит A/B таблицу.
 
 ### Phase 4: Host timing / overlap headroom (estimate: 2 h)
-- [ ] Запустить с `HOST_TIMING=1` и `TRACE=1`.
-- [ ] Прогнать длинный prefill + длинный decode.
-- [ ] Собрать `[host]` строки и `stats` по шагам.
-- [ ] Посчитать долю sample+drain от step wall.
+- [x] Запущено с `HOST_TIMING=1` и `TRACE=1`.
+- [x] Прогнан длинный prefill + длинный decode.
+- [x] Собраны `[host]` строки и `stats` по шагам.
+- [x] Посчитана доля sample+drain от step wall.
 - **Independent check:** в логе есть `[host] steps=48 ...`; отчёт содержит
   verdict по overlap.
 
 ### Phase 5: Determinism probe (estimate: 2 h)
-- [ ] Выполнить одинаковый запрос 5 раз при seed>0.
-- [ ] Сравнить token IDs или нормализованный текст.
-- [ ] При возможности повторить при разных batch shapes.
+- [x] Выполнен одинаковый запрос 3 раза при `seed=42` (single-slot).
+- [x] Сравнен нормализованный текст.
+- [ ] Разные batch shapes не проверены: тестовый профиль single-slot.
 - **Independent check:** отчёт содержит stable/different и размер выборки.
 
 ### Phase 6: Cleanup и report (estimate: 2 h)
-- [ ] Остановить test task, удалить временный env/задачу по возможности.
-- [ ] Сверить, что production task/env не изменены.
-- [ ] Написать `docs/research/2026-09-13-sglang-validation-report.md` с
+- [x] Остановлен test task, удалены временные env/задача/каталоги.
+- [x] Сверено, что production task/env не изменены.
+- [x] Написан `docs/research/2026-09-13-sglang-validation-report.md` с
   verdict по каждой теории.
-- [ ] Обновить research-документ ссылкой на отчёт.
+- [x] Обновлён research-документ ссылкой на отчёт.
 - **Independent check:** production smoke `/v1/models` после cleanup;
   отчёт содержит команды, метрики и ограничения.
 
