@@ -81,6 +81,9 @@ impl BatchConfig {
 
 struct AdmitReq {
     prompt: Vec<u32>,
+    /// Позиция, на которой режется первый prefill-чанк (prefix-cache friendly
+    /// split). `None` = целиком по PREFILL_CHUNK.
+    first_chunk_cut: Option<usize>,
     params: GenParams,
     truncated: bool,
     prompt_tokens: usize,
@@ -584,10 +587,22 @@ impl Engine for BatchedEngine {
             (ids, n, was_trimmed, None)
         };
 
+        // Граница, на которой промпт станет cacheable-префиксом следующего
+        // хода: начало генерационного суффикса, то есть токен `<|im_start|>`
+        // последнего сообщения. Режем первый чанк ровно здесь — иначе промпт
+        // длиннее одного чанка не даёт снимка, пригодного следующему ходу.
+        let first_chunk_cut = {
+            let tok = self.tokenizer.lock().unwrap_or_else(|e| e.into_inner());
+            tok.token_to_id("<|im_start|>")
+                .and_then(|id| prompt.iter().rposition(|t| *t == id))
+                .filter(|p| *p > 0 && *p < prompt.len())
+        };
+
         let (out_tx, out_rx) = mpsc::channel(SLOT_CHAN_CAP);
         self.in_flight.fetch_add(1, Ordering::Relaxed);
         let req = AdmitReq {
             prompt,
+            first_chunk_cut,
             params: GenParams { ..params },
             truncated,
             prompt_tokens,
@@ -1367,7 +1382,7 @@ fn seed_slot(
             }
         },
         None => {
-            sched.submit(req.prompt, max_new);
+            sched.submit_with_first_chunk(req.prompt, max_new, req.first_chunk_cut);
         }
     }
     let (usage, media_lease) = match req.media {
