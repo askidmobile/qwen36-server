@@ -1,0 +1,300 @@
+# Почему yttri-forge отстаёт от llama.cpp: разбор и современные техники ускорения
+
+**Дата:** 14 сентября 2026.
+**Основание:** замер 14.09 на Ornith-1.5-9B Q4_K_M (см.
+[`2026-09-14-vs-llamacpp-ornith-q4km.md`](2026-09-14-vs-llamacpp-ornith-q4km.md)),
+плюс локальные профили и внешние источники.
+**Тип:** расследование + обзор техник. Не спека, изменений в runtime не вносит.
+
+---
+
+## 1. Что именно надо объяснить
+
+| точка | llama.cpp | yttri-forge | разница |
+|---|---:|---:|---:|
+| префил ~7K | 1654 | 1368 | −17% |
+| префил ~14K | 1622 | 1262 | −22% |
+| префил ~25K | 1545 | 1121 | −28% |
+| декод 1 слот | 52,4 | 49,3 | −6% |
+
+Декод почти в паритете. Отстаёт **префил**, и разрыв **растёт с длиной
+контекста**.
+
+Пересчёт в стоимость на токен вскрывает структуру:
+
+| | 7K, мс/ток | 25K, мс/ток | рост |
+|---|---:|---:|---:|
+| llama.cpp | 0,605 | 0,647 | **+7%** |
+| yttri-forge | 0,731 | 0,892 | **+22%** |
+
+У llama.cpp стоимость токена почти не зависит от длины промпта. У нас
+зависит. Значит отставание — не общий множитель на все ядра (иначе рост был
+бы одинаковым), а **компонент, чья доля растёт с длиной KV**.
+
+Кандидаты с такой зависимостью — только attention-слои (их работа на токен
+пропорциональна длине KV) и постраничная адресация KV (число страниц растёт с
+контекстом). Всё остальное — линейные слои GDN, FFN, эмбеддинги — на токен
+стоит одинаково при любой длине, поэтому их вклад в **рост** разрыва нулевой,
+хотя они могут давать постоянную часть отставания.
+
+Это ключевой вывод разбора: **искать надо в attention-пути префилла**, а не в
+GDN и не в FFN.
+
+---
+
+## 2. Что проверено и закрыто (замеры 14.09)
+
+### 2.1. Размер чанка префилла: найден реальный рычаг — и он уже выкручен
+
+Старый профиль Ornith нёс `PREFILL_CHUNK=64`. Замер:
+
+| chunk | 7K | 14K | 25K |
+|---|---:|---:|---:|
+| 64 | 627 | 587 | 535 |
+| 512 | 1368 | 1262 | 1121 |
+
+**+118% на 7K.** Причины для 64 в документации не нашлось; дефолт проекта —
+512. В рабочем профиле выставлено 512.
+
+Больше 512 проверить не удалось: авто-свип 1024/2048 выдал три идентичных
+результата, потому что перезапуск сервера в скрипте не срабатывал — числа
+сняты с одного и того же процесса. Раньше в
+`docs/plans/2026-08-23-prefill-optimization.md` зафиксировано, что 512→2048 не
+меняет wall time. То есть потолок по чанку мы, похоже, уже выбрали; но
+корректный свип 512/1024/2048/4096 с подтверждением смены PID **не сделан**.
+
+### 2.2. Вариант GDN-ядра не при чём
+
+В коде есть два ядра префилла линейных слоёв: chunked по 8 токенов
+(`delta_rule_prefill_chunked_c8`, дефолт) и v1 (warp-per-column). A/B:
+
+| ядро | 7K | 14K | 25K |
+|---|---:|---:|---:|
+| chunked C=8 (дефолт) | 1368 | 1262 | 1121 |
+| `DELTA_KERNEL=v1` | 1343 | 1246 | 1104 |
+
+Разница 1,5% в пользу дефолта. Оба варианта упираются в одно и то же, и выбор
+между ними не объясняет отставания.
+
+### 2.3. `PGRAPH=off` ускоряет префил, но ломает декод
+
+| режим | 7K | 14K | 25K | декод |
+|---|---:|---:|---:|---:|
+| `PGRAPH=on` | 1352 | 1266 | 1117 | 49,3 |
+| `PGRAPH=off` | 1512 | 1475 | 1381 | 43,9 |
+
+Префил +9…+24%, декод −11%. В логе:
+
+```
+[graphs] graphed decode failed, eager fallback: migrate KV slot 0:
+int8-пул: обратная миграция пока не поддержана — graph-путь требует
+batched-кэш (PGRAPH=on, это умолчание)
+```
+
+Графовый префил пишет KV сразу в page-пул; в int8-пуле обратной миграции нет,
+и декод падает в eager. Значит рычаг «+24% на префиле» существует, но заперт
+за отсутствием миграции int8→batched. Это отдельная задача с понятным
+результатом.
+
+### 2.4. Branch-point checkpoints стоят 4–5% префила
+
+| режим | 7K | 14K | 25K |
+|---|---:|---:|---:|
+| `PREFIX_CACHE_CHECKPOINTS=1` | 1352 | 1266 | 1117 |
+| `=0` | 1418 | 1307 | 1135 |
+
+Цена снятия нескольких host-снимков состояния. Окупается на ветвящейся
+нагрузке (divergent branch 3,18 → 1,99 с), но на одиночном длинном промпте
+видна как −4…−5%.
+
+### 2.5. Инфраструктурная находка: `GPROF` несовместим с графами
+
+`GPROF=2` печатает фазы GDN (`[pfphases]`), но использует
+`cudaStreamSynchronize` внутри префилла. При `CUDA_GRAPHS=1` это рвёт захват:
+
+```
+[graphed-step] ERROR in block 0: DriverError(CUDA_ERROR_STREAM_CAPTURE_INVALIDATED,
+"operation failed due to a previous error during capture")
+```
+
+Запрос падает, сервер уходит в eager. То есть **штатный профилировщик префилла
+включить на рабочей конфигурации нельзя** — а без него покомпонентный разрез
+префилла недоступен. Это первое, что нужно починить, прежде чем искать корень
+дальше.
+
+---
+
+## 3. Внешние источники: что даёт ускорение сейчас
+
+### 3.1. Chunked GDN-префилл — главный незанятый рычаг
+
+Это ровно наш класс моделей: у Ornith **24 из 32 слоёв — GDN (линейное
+внимание)**, полное внимание только в 8.
+
+**FlashQLA** (QwenLM, на TileLang) — библиотека ядер специально под GDN chunked
+prefill для Qwen3.5/3.6: заявлено **2–3× к forward относительно Triton-ядер
+FLA** за счёт fusion и оптимизации. Уже есть issue на интеграцию во vLLM.
+Источник: [github.com/QwenLM/FlashQLA](https://github.com/QwenLM/FlashQLA),
+[vllm#43089](https://github.com/vllm-project/vllm/issues/43089).
+
+**FLA (flash-linear-attention)** — эталонная chunked-реализация gated delta
+rule через **WY-представление**: внутри чанка строится нижнетреугольная матрица
+взаимодействия, решаются треугольные системы (`solve_tril`), и основная работа
+становится матричными умножениями на тензорных ядрах. Чанк — **64 токена и
+больше**, а не 8. Источники:
+[fla/ops/gated_delta_rule/chunk.py](https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/gated_delta_rule/chunk.py),
+[deepwiki: chunked processing](https://deepwiki.com/fla-org/flash-linear-attention/10.2-chunked-processing-strategy).
+
+**FlashInfer** уже поставляет `gdn_prefill.chunk_gated_delta_rule`
+([docs](https://docs.flashinfer.ai/generated/flashinfer.gdn_prefill.chunk_gated_delta_rule.html)).
+
+**llama.cpp, PR #26001** «CUDA: Support of GDN chunked kernel for prefill» —
+трёхстадийный конвейер по мотивам vLLM/FLA, смесь BF16/FP16/FP32 ради 16-битных
+тензорных ядер ([PR](https://github.com/ggml-org/llama.cpp/pull/26001)).
+
+При этом **в master llama.cpp GDN-ядро префилла до сих пор последовательное по
+токенам** (`for (int t = 0; t < n_tokens; t++)` с комментарием
+`TODO: Add chunked kernel for even faster pre-fill`,
+[исходник](https://raw.githubusercontent.com/ggml-org/llama.cpp/master/ggml/src/ggml-cuda/gated_delta_net.cu)).
+То есть llama.cpp обгоняет нас на последовательном ядре — а значит наш chunked
+C=8 проигрывает не «отсутствию chunked», а эффективности исполнения.
+
+### 3.2. Занятость (occupancy): арифметика против нас
+
+Из исходников обеих сторон для нашего профиля Ornith (16 value-heads,
+head_v_dim 256, state_size 128):
+
+| | сетка | потоков | CTA |
+|---|---|---:|---:|
+| yttri-forge, `delta_rule_prefill_chunked_c8` | grid (16, 256/64=4), блок (64,4) | 16 384 | **64** |
+| llama.cpp, `gated_delta_net_cuda` | grid (16, 1, 128/4=32), блок (32,4) | 65 536 | **512** |
+
+На карте с 28 SM это 585 потоков на SM против ~2048. llama.cpp берёт в 8 раз
+больше блоков и за счёт этого прячет латентность. Известная практика того же
+порядка — «flatten batch & head dims, чтобы поднять занятость»
+([vLLM kernel deep dive](https://martinuke0.github.io/posts/2026-03-21-optimizing-llm-inference-a-deep-dive-into-vllm-and-custom-kernel-development/)).
+
+Оговорка: это вычислено из конфигурации запуска, а не измерено. Чтобы
+превратить в факт, нужен `nsys` или счётчик занятости по ядру.
+
+### 3.3. Overhead запусков: PDL нам недоступен, megakernel — общая проблема
+
+llama.cpp дёргает в GDN-ядре `ggml_cuda_pdl_sync()`. **Programmatic Dependent
+Launch требует compute capability 9.0+**
+([NVIDIA CUDA guide](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/programmatic-dependent-launch.html));
+наша RTX 3060 — sm_86, то есть у нас PDL не работает и в llama.cpp. Этот
+рычаг мимо.
+
+Общий фон: современные движки разбивают forward на ~100 ядер и теряют до
+половины полосы на «пузырях» между ними
+([Hazy Research, megakernel](https://hazyresearch.stanford.edu/blog/2025-05-27-no-bubbles)).
+Отсюда линия работ — megakernel/меньше запусков. У нас есть CUDA-графы на
+префилл и декод, что закрывает часть; но граф **не устраняет** стоимость самих
+ядер.
+
+### 3.4. Декод: MTP с сжатием словаря — прямое попадание в нашу измеренную боль
+
+Ранее в проекте замерено, что MTP на Ornith выходит в паритет не из-за
+спекуляции, а из-за стоимости головы: `output.weight` это 4096×248320 Q6_K =
+834 МБ, проход головы ~5 мс, и **черновой токен (4,07 мс) дороже лишнего
+верифицируемого (2,9 мс)**.
+
+**FastMTP** (arXiv 2509.18362) делает ровно то, чего нам не хватает:
+«language-aware dynamic vocabulary compression» внутри MTP-головы —
+черновик считает проекцию не по полному словарю. Заявлено **2,03× к обычному
+next-token prediction, +82% к ванильному MTP**, без потери качества
+([arXiv](https://arxiv.org/abs/2509.18362)).
+
+Смежное: **EAGLE-3** удерживает приемлемость плоской по глубине драфта, тогда
+как у EAGLE она падает
+([E2E Networks](https://www.e2enetworks.com/blog/Accelerating_LLM_Inference_with_EAGLE));
+vLLM выложил сравнение MTP / EAGLE-3 / DFlash / DSpark
+([vLLM blog, 2026-08-23](https://vllm.ai/blog/2026-08-23-speculative-decoding-amd-gpus)).
+
+У Ornith MTP-голова **уже в файле** (`blk.32.nextn.*`), при этом в рабочем
+профиле `MTP=0`. То есть включение спекуляции — уже готовый рычаг, упирающийся
+именно в стоимость проекции головы.
+
+### 3.5. Прочее, что стоит держать в поле зрения
+
+- **Чанк префилла как аналог ubatch.** В замерах llama.cpp на 3090 рост
+  `n_ubatch` с 512 до 8096/24576 давал до **+65%** на префиле
+  ([discussion #15013](https://github.com/ggml-org/llama.cpp/discussions/15013)).
+  У нас это `PREFILL_CHUNK`, и потолок не проверен корректно.
+- **Cliff выбора ядра.** На части карт CUDA-диспетчер llama.cpp уходит на
+  медленный путь при большом батче, лечится форсом MMQ
+  ([разбор](https://www.uiblog.it/2026/08/eng-fixing-slow-prefill-on-nvidia-cmp-100-gv100-with-force_mmq/)).
+  Аналогичный cliff у нас не исключён — и он бы объяснял рост разрыва.
+- **Квантование KV** и раздельные K/V-типы у нас уже есть (q8).
+
+---
+
+## 4. Гипотезы, упорядоченные по отношению «эффект / стоимость проверки»
+
+| # | Гипотеза | Что предсказывает | Как проверить | Ожидаемый эффект |
+|---|---|---|---|---|
+| Г-1 | Постраничная адресация/unpaged-gather KV в attention префилла дорожает с числом страниц | Разрыв растёт с контекстом; время между ядрами attention растёт | `nsys` на 8K и 25K: сумма времени ядер против wall | до +20% на длинном префиле |
+| Г-2 | Низкая занятость GDN-ядра (64 CTA против 512) | Постоянная часть разрыва, не растущая | Счётчик occupancy по ядру; попытка разбить по головам | до +10% на префиле |
+| Г-3 | Чанк префилла за 512 не выкручен | Плоский сдвиг по всем длинам | Корректный свип 512/1024/2048/4096 со сверкой PID | 0…+30% |
+| Г-4 | `PGRAPH=off` даёт +24% на префиле, но заперт int8→batched миграцией | Прямо измерено | Реализовать миграцию int8→graph-пул | +9…+24% префила и +11% декода |
+| Г-5 | Chunked GDN (чанк 64, WY, тензорные ядра) обгонит наш C=8 | Постоянная часть разрыва | Портируем схему FLA/FlashQLA | 1,5–3× на GDN-части |
+| Г-6 | MTP со сжатым словарём черновика | Декод, не префилл | Включить `MTP=1` + shortlist, затем компрессия словаря | до 2× декода |
+
+**Порядок действий.** Г-1 первой: она единственная объясняет именно **рост**
+разрыва, а её проверка — один `nsys`-профиль. Г-4 второй: механизм уже
+измерен, осталась реализация. Г-3 третьей: дёшево, но, судя по прошлым данным,
+пусто. Г-2 и Г-5 — работы по ядрам, они самые дорогие и должны идти после
+того, как профиль подтвердит, что узкое место именно там. Г-6 ортогональна:
+это декод, а не префил.
+
+---
+
+## 5. Что нужно починить до измерений
+
+1. **`GPROF` и CUDA-графы несовместимы.** Без профиля префилла покомпонентный
+   разрез недоступен. Минимум — не синхронизировать внутри захвата (вынести
+   `sync_t` за пределы capture) либо собирать профиль отдельным бинарём без
+   графов.
+2. **Скрипты перезапуска должны подтверждать смену PID.** Авто-свип выдал три
+   идентичных результата, потому что молча продолжал мерить старый процесс.
+   Правило: перед замером сверять `StartTime` процесса и строку конфигурации
+   в логе.
+3. **`nsys` на префилле 8K и 25K** — сравнить сумму времени ядер с wall и
+   посмотреть, что растёт.
+
+---
+
+## 6. Чего этот разбор не делает
+
+- Не называет окончательную причину: рост разрыва указывает на attention-путь,
+  но конкретное ядро не локализовано — для этого нужен `nsys`, которого в
+  этом прогоне не было.
+- Не проверяет Г-3 (чанк >512) корректным свипом.
+- Опирается на однократные замеры префилла; декод и параллель имеют повторы.
+- Внешние цифры (FlashQLA 2–3×, FastMTP 2,03×, ubatch +65%) сняты на другом
+  железе и других моделях — это указание, куда смотреть, а не обещание
+  результата у нас.
+
+---
+
+## 7. Источники
+
+- [FlashQLA (QwenLM) — TileLang GDN chunked prefill, 2–3×](https://github.com/QwenLM/FlashQLA)
+- [vLLM issue #43089 — интеграция FlashQLA](https://github.com/vllm-project/vllm/issues/43089)
+- [FLA — gated delta rule chunk](https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/gated_delta_rule/chunk.py)
+- [FLA — chunked processing strategy](https://deepwiki.com/fla-org/flash-linear-attention/10.2-chunked-processing-strategy)
+- [FlashInfer — gdn_prefill.chunk_gated_delta_rule](https://docs.flashinfer.ai/generated/flashinfer.gdn_prefill.chunk_gated_delta_rule.html)
+- [llama.cpp PR #26001 — CUDA GDN chunked kernel](https://github.com/ggml-org/llama.cpp/pull/26001)
+- [llama.cpp master — gated_delta_net.cu](https://raw.githubusercontent.com/ggml-org/llama.cpp/master/ggml/src/ggml-cuda/gated_delta_net.cu)
+- [llama.cpp discussion #15013 — CUDA performance, ubatch](https://github.com/ggml-org/llama.cpp/discussions/15013)
+- [FastMTP: Enhanced Multi-Token Prediction (arXiv 2509.18362)](https://arxiv.org/abs/2509.18362)
+- [NVIDIA — Programmatic Dependent Launch (sm_90+)](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/programmatic-dependent-launch.html)
+- [Hazy Research — megakernel, пузыри между ядрами](https://hazyresearch.stanford.edu/blog/2025-05-27-no-bubbles)
+- [vLLM — speculative decoding на AMD (MTP/EAGLE-3/DFlash/DSpark)](https://vllm.ai/blog/2026-08-23-speculative-decoding-amd-gpus)
+- [E2E Networks — EAGLE-3](https://www.e2enetworks.com/blog/Accelerating_LLM_Inference_with_EAGLE)
+
+Локальные опорные документы:
+`docs/plans/2026-08-27-prefill-scaling-investigation.md` (гипотезы Г-1…Г-5
+прошлого расследования), `docs/plans/fr000-bandwidth-analysis.md` (bandwidth не
+потолок), `docs/plans/2026-08-23-prefill-optimization.md` (launch overhead),
+`docs/plans/2026-08-28-vs-llamacpp-ornith.md` (MTP и словарь черновика).
