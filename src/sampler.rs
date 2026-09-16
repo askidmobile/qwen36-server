@@ -185,17 +185,9 @@ pub fn sample_with_seen(
             let Some(v) = l.get_mut(t as usize) else {
                 continue;
             };
-            if presence_penalty != 0.0 {
-                *v -= presence_penalty;
-            }
-            if repetition_penalty != 0.0 && repetition_penalty != 1.0 {
-                // HF-семантика: логит делится на penalty, если <0 — умножается.
-                *v = if *v < 0.0 {
-                    *v * repetition_penalty
-                } else {
-                    *v / repetition_penalty
-                };
-            }
+            // HF-семантика: presence вычитается, затем логит делится на
+            // repetition (если <0 — умножается).
+            *v = apply_penalty(*v, presence_penalty, repetition_penalty);
         }
         penalized = l;
         &penalized
@@ -204,8 +196,12 @@ pub fn sample_with_seen(
     };
 
     // temperature <= 0 или дегенеративный случай → greedy argmax.
+    // Ветка стоит ДО копии словаря: при active penalties старая версия
+    // аллоцировала и копировала 248 320 логитов (1 МБ) на каждый токен, хотя
+    // для жадного выбора достаточно максимума по исходным логитам плюс
+    // проверки штрафованных позиций (штраф только понижает).
     if temperature <= 1e-5 {
-        return argmax(logits);
+        return argmax_with_penalties(logits, seen, presence_penalty, repetition_penalty);
     }
 
     // Отбор кандидатов по убыванию логита. Полная сортировка 152K логитов —
@@ -340,6 +336,47 @@ fn argmax(logits: &[f32]) -> u32 {
         if v > best_v {
             best_v = v;
             best = i as u32;
+        }
+    }
+    best
+}
+
+/// Штраф к одному логиту — та же арифметика и тот же порядок, что в ветке с
+/// копией словаря ниже (сначала presence, затем repetition).
+#[inline]
+fn apply_penalty(v: f32, presence: f32, repetition: f32) -> f32 {
+    let mut v = v;
+    if presence != 0.0 {
+        v -= presence;
+    }
+    if repetition != 0.0 && repetition != 1.0 {
+        v = if v < 0.0 { v * repetition } else { v / repetition };
+    }
+    v
+}
+
+/// Жадный выбор с штрафами без копии словаря.
+///
+/// Штрафы только *понижают* логиты, поэтому достаточно найти максимум по
+/// исходным логитам и сравнить его со значениями штрафованных позиций: ни
+/// одна неотмеченная позиция не может «перебить» найденный максимум. Копия
+/// 248 320 логитов (1 МБ) на каждом токене не нужна — а она стояла в
+/// критическом пути шага между чтением логитов и запуском следующего шага.
+fn argmax_with_penalties(
+    logits: &[f32],
+    seen: &HashSet<u32>,
+    presence_penalty: f32,
+    repetition_penalty: f32,
+) -> u32 {
+    let mut best = argmax(logits);
+    let mut best_v = logits.get(best as usize).copied().unwrap_or(f32::NEG_INFINITY);
+    for &t in seen {
+        let i = t as usize;
+        let Some(&v) = logits.get(i) else { continue };
+        let pv = apply_penalty(v, presence_penalty, repetition_penalty);
+        if pv > best_v {
+            best_v = pv;
+            best = t;
         }
     }
     best
@@ -600,6 +637,54 @@ mod tests {
         let mut rng = Rng::new(1);
         let t = sample(&logits, 0.0, 0, 1.0, 0.0, 0.0, 1.0, &[], &mut rng);
         assert_eq!(t, 1);
+    }
+
+    #[test]
+    fn greedy_with_penalties_matches_bruteforce() {
+        // Жадный путь без копии словаря обязан совпадать с эталоном
+        // «скопировать, применить штрафы, взять argmax».
+        let mut state: u64 = 0x9E3779B97F4A7C15;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f32 / (1u64 << 53) as f32
+        };
+        for case in 0..40 {
+            let n = 200 + case * 53;
+            let logits: Vec<f32> = (0..n).map(|_| next() * 30.0 - 15.0).collect();
+            let seen: HashSet<u32> = (0..n)
+                .filter(|_| next() < 0.05)
+                .map(|i| i as u32)
+                .collect();
+            for (presence, repetition) in [(0.0f32, 1.0f32), (1.5, 1.0), (0.0, 1.2), (1.5, 1.2)] {
+                let fast = sample_with_seen(
+                    &logits, 0.0, 20, 0.95, 0.0, presence, repetition, &seen,
+                    &mut Rng::new(7),
+                );
+                // эталон: независимая арифметика штрафов + argmax
+                let mut l = logits.clone();
+                for &t in &seen {
+                    if let Some(v) = l.get_mut(t as usize) {
+                        if presence != 0.0 {
+                            *v -= presence;
+                        }
+                        if repetition != 0.0 && repetition != 1.0 {
+                            *v = if *v < 0.0 { *v * repetition } else { *v / repetition };
+                        }
+                    }
+                }
+                let mut best = 0u32;
+                let mut best_v = f32::NEG_INFINITY;
+                for (i, &v) in l.iter().enumerate() {
+                    if v > best_v {
+                        best_v = v;
+                        best = i as u32;
+                    }
+                }
+                assert_eq!(fast, best, "case={case} presence={presence} repetition={repetition}");
+            }
+        }
     }
 
     #[test]
