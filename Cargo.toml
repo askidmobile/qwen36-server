@@ -47,7 +47,7 @@ url = "2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "bmp", "tiff", "gif"] }
 moxcms = "0.8"
 
-candle-flash-attn = { path = "../../yttri-forge/engine/candle-flash-attn", optional = true }
+candle-flash-attn = { path = "../yttri-forge/engine/candle-flash-attn", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
@@ -61,3 +61,14 @@ http-body-util = "0.1"
 default = []
 metal = ["qwen35-batch/metal", "candle-core/metal", "candle-transformers/metal"]
 cuda = ["qwen35-batch/cuda", "candle-core/cuda", "candle-transformers/cuda", "dep:candle-flash-attn"]
+
+# Пробники CUDA-ядер: собираются только с фичей cuda (на macOS/CPU их нет).
+[[bin]]
+name = "fa_probe"
+path = "src/bin/fa_probe.rs"
+required-features = ["cuda"]
+
+[[bin]]
+name = "mmq_probe"
+path = "src/bin/mmq_probe.rs"
+required-features = ["cuda"]

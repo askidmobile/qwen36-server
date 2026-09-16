@@ -94,6 +94,30 @@ pub fn sample(
 /// То же, что `sample`, но множество встречавшихся токенов передаётся готовым
 /// (инкрементально поддерживается вызывающим).
 #[allow(clippy::too_many_arguments)]
+/// Индексы `k` наибольших логитов, по убыванию. Один проход по словарю с
+/// массивом из `k` лучших вместо `Vec<u32>` на весь словарь (248 320 индексов
+/// = 1 МБ) и `select_nth_unstable_by` поверх него. Замер 2026-09-16 на живом
+/// сервере: argmax-ветка (тоже один проход, без аллокации) давала 53.7 t/s
+/// против 52.9 — то есть ~0.28 мс/токен уходило именно на отбор кандидатов.
+fn top_k_indices(logits: &[f32], k: usize) -> Vec<u32> {
+    let mut best: Vec<u32> = Vec::with_capacity(k);
+    for (i, &v) in logits.iter().enumerate() {
+        if best.len() == k {
+            let last = logits[*best.last().expect("k > 0") as usize];
+            if !(v > last) {
+                continue;
+            }
+            best.pop();
+        }
+        let pos = best
+            .iter()
+            .position(|&b| logits[b as usize] < v)
+            .unwrap_or(best.len());
+        best.insert(pos, i as u32);
+    }
+    best
+}
+
 pub fn sample_with_seen(
     logits: &[f32],
     temperature: f32,
@@ -151,13 +175,14 @@ pub fn sample_with_seen(
             .unwrap_or(std::cmp::Ordering::Equal)
     };
     let select = |cap: Option<usize>| -> Vec<u32> {
-        let mut all: Vec<u32> = (0..logits.len() as u32).collect();
-        if let Some(c) = cap.filter(|&c| c > 0 && c < all.len()) {
-            all.select_nth_unstable_by(c - 1, by_desc);
-            all.truncate(c);
+        match cap.filter(|&c| c > 0 && c < logits.len()) {
+            Some(c) => top_k_indices(logits, c),
+            None => {
+                let mut all: Vec<u32> = (0..logits.len() as u32).collect();
+                all.sort_unstable_by(by_desc);
+                all
+            }
         }
-        all.sort_unstable_by(by_desc);
-        all
     };
     let cap = if top_k > 0 {
         Some(top_k)
@@ -585,6 +610,43 @@ mod tests {
         let mut rng = Rng::new(3);
         let t = sample(&logits, 0.01, 0, 1.0, 0.0, 0.0, 8.0, &[0], &mut rng);
         assert_eq!(t, 1);
+    }
+
+    #[test]
+    fn top_k_indices_matches_full_sort() {
+        // Быстрый отбор обязан совпадать с эталоном «отсортировать всё и взять k».
+        let mut state: u64 = 0x2545F4914F6CDD1D;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f32 / (1u64 << 53) as f32
+        };
+        for case in 0..20 {
+            let n = 1000 + case * 37;
+            let logits: Vec<f32> = (0..n).map(|_| next() * 20.0 - 10.0).collect();
+            for k in [1usize, 2, 5, 20, 64] {
+                let mut want: Vec<u32> = (0..n as u32).collect();
+                want.sort_unstable_by(|&a, &b| {
+                    logits[b as usize]
+                        .partial_cmp(&logits[a as usize])
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                want.truncate(k);
+                let got = top_k_indices(&logits, k);
+                assert_eq!(got.len(), k);
+                // Сравниваем не индексы (при равных логитах порядок любой), а
+                // множество логитов.
+                let mut gl: Vec<f32> = got.iter().map(|&i| logits[i as usize]).collect();
+                let mut wl: Vec<f32> = want.iter().map(|&i| logits[i as usize]).collect();
+                gl.sort_by(|a, b| b.partial_cmp(a).unwrap());
+                wl.sort_by(|a, b| b.partial_cmp(a).unwrap());
+                assert_eq!(gl, wl, "k={k} n={n}: набор логитов разошёлся");
+            }
+        }
+        // Вырожденные случаи.
+        assert_eq!(top_k_indices(&[1.0, 1.0, 1.0], 2).len(), 2);
+        assert_eq!(top_k_indices(&[0.5], 5), vec![0]);
     }
 
     #[test]
