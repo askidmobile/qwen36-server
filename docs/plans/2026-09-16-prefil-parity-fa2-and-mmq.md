@@ -106,22 +106,45 @@ kBlockN=64 в пейдженном splitkv (загрузка тайла совп
    ядром (`quantize_q8_1`), поэтому выигрыш — только в зазорах
    (~0.3 мс/шаг).
 3. **rmsnorm + badd одним ядром** (−64 запуска) и **delta-prep 3→1**
-   (−48…72) — вместе ~0.3–0.4 мс/шаг.
-4. **Занятость декодного внимания (главный подозреваемый по скорости).**
-   Ядро — `flash_fwd_splitkv_kernel<traits<256, 64, 32, 4>>`: `kBlockM=64`,
-   `kBlockN=32`, 4 варпа. Shared-память:
-   `kSmemSizeSplitKV = kSmemQSize(32 КБ) + kSmemKVSize(32 КБ) + kSmemKV8Size(16 КБ) = 80 КБ`,
-   то есть **1 CTA/SM и всего 4 варпа на SM**. Отсюда 273 ГБ/с против 318,
-   которые выжимают MMVQ на той же памяти.
+   (−48…72) — вместе ~0.3–0.4 мс/шаг.4. **Занятость декодного внимания — ТОЧНАЯ СПЕЦИФИКАЦИЯ ПРАВКИ**
+   (разобрано по исходникам 2026-09-17; §59 доказывает, что рычаг работает).
 
-   Лечится тем же приёмом, что уже стоит в префильном ядре (вариант 7):
-   `Is_Q_in_regs + Share_Q_K_smem` даёт `smem = max(Q, K+V) + kv8 = 48 КБ`
-   (2 CTA/SM, 8 варпов), а отказ от int8-стейджинга на f16-пуле — 32 КБ
-   (3 CTA/SM, 12 варпов). Сейчас это запрещено в лончере:
-   `flash_fwd_launch_template.h:103-104`
-   (`static_assert(!Is_Q_in_regs)`, `static_assert(!Share_Q_K_smem)`), то есть
-   нужно перенести эту схему в split-KV ветку. Ожидаемый эффект: внимание
-   3.63 → ~3.0 мс/шаг, что закрывает весь остаток декода.
+   Мешает `smem` на CTA: он равен `max(основной цикл, эпилог)`, а эпилог
+   `sOaccum = kBlockM(64) × kHeadDim(256) × sizeof(float) = 64 КБ`. Поэтому
+   даже с общим буфером Q/K (48 КБ) аллокация остаётся 64 КБ → 1 CTA/SM.
+   Нужны **обе** правки:
 
-Ограничение по питанию снято как гипотеза (§57): llama упирается в 170 Вт,
-мы — нет.
+   * (a) промежуточный выход в fp16: для `Split` брать `ElementO = Element`,
+     а не `ElementAccum` → 32 КБ. Тогда `max(48, 32) = 48 КБ` → 2 CTA/SM;
+   * (b) `Is_Q_in_regs + Share_Q_K_smem` → основной цикл 48 КБ вместо 80 КБ
+     (и 32 КБ, если убрать неиспользуемый на f16-пуле `kSmemKV8Size` → 3 CTA/SM).
+
+   Файлы и точки (все в `engine/candle-flash-attn/kernels/`):
+
+   1. `kernel_traits.h`: добавить в `Flash_fwd_kernel_traits` девятый параметр
+      `bool Is_oaccum_fp16_=false` **после** `Base` (чтобы не сломать
+      позиционные инстанцирования), прокинуть как `static constexpr bool`;
+      при флаге `SmemCopyAtomOaccum` и `GmemTiledCopyOaccum` объявлять с
+      `Element`, а не `ElementAccum`.
+   2. `flash_fwd_kernel.h`, `compute_attn_1rowblock_splitkv`:
+      * `ElementO`: при `Kernel_traits::Is_oaccum_fp16` — `Element`;
+      * после загрузки Q в smem (строки ~950-988) вставить блок из плотного
+        ядра (строки 296-323): `cp_async_fence()`, при `Share_Q_K_smem` —
+        `cp_async_wait<0>()`, `__syncthreads()`, `cute::copy(smem_tiled_copy_Q,
+        tSsQ, tSrQ_copy_view)`, `__syncthreads()`;
+      * оба `flash::gemm` (строки 1076 и 1186) — с
+        `</*A_in_regs=*/Kernel_traits::Is_Q_in_regs>`;
+      * в `combine_attn_seqk_parallel` читать oaccum типом `Element` при флаге
+        и приводить к float при накоплении.
+   3. `flash_fwd_launch_template.h`: снять два `static_assert` (строки 103-104),
+      в `run_mha_fwd_splitkv_paged_dispatch` (строка 187) выбирать трейты по
+      env-флагу: `<Headdim, 64, 32, 4, true, true, T, false, Base, true>`
+      против штатных `<Headdim, 64, 32, 4, false, false, T>`.
+   4. `flash_api.cu`: при флаге аллоцировать `oaccum` по `sizeof(half)`
+      (строка ~346).
+
+   Флаг `QWEN36_FA_DECODE_QREGS=1`; по умолчанию путь не меняется.
+
+   **Стоимость итерации**: правка заголовков инвалидирует cudaforge-кэш для
+   всех 53 .cu flash-attn → пересборка ~40–60 мин, поэтому собирать надо один
+   раз и с уже проверенным синтаксисом.
