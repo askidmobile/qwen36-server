@@ -72,3 +72,8 @@ required-features = ["cuda"]
 name = "mmq_probe"
 path = "src/bin/mmq_probe.rs"
 required-features = ["cuda"]
+
+[[bin]]
+name = "h2d_probe"
+path = "src/bin/h2d_probe.rs"
+required-features = ["cuda"]
