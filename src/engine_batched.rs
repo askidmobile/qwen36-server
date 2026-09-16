@@ -685,6 +685,9 @@ fn dispatch_loop(
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     let mut since_print = 0u64;
+    // Подряд идущие ошибки шага (см. ветку Err ниже): после третьей
+    // освобождаем все слоты с отменёнными запросами.
+    let mut step_errors = 0u32;
 
     'outer: loop {
         if shutdown.load(Ordering::Relaxed) {
@@ -850,9 +853,39 @@ fn dispatch_loop(
                         b.cancelled = true;
                     }
                 }
-                true
+                // Слот, на котором упал шаг, обязан вернуться в Idle. Раньше
+                // ветка просто возвращала `true`, следующий шаг снова брал тот
+                // же чанк prefill, снова получал ту же ошибку — и так до
+                // перезапуска сервиса с GPU на 100 %. Воспроизведено
+                // 2026-09-16: CUDA_ERROR_OUT_OF_MEMORY на prefill и на
+                // повторном префиле из prefix-кеша (chunk 16384).
+                step_errors += 1;
+                for idx in 0..bindings.len() {
+                    if !bindings[idx]
+                        .as_ref()
+                        .map(|b| b.cancelled)
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    let st = sched.slots_mut()[idx].status;
+                    // Prefilling-слот чиним сразу (это и есть зацикливающийся
+                    // случай). Прочие статусы — после третьей подряд ошибки,
+                    // чтобы не разбирать чужие запросы из-за одной транзиентной.
+                    if st == SlotStatus::Prefilling
+                        || (step_errors >= 3 && st != SlotStatus::Idle)
+                    {
+                        sched.slots_mut()[idx].reset();
+                    }
+                }
+                false
             }
         };
+        // Успешный шаг сбрасывает счётчик подряд идущих ошибок (Err-ветка
+        // всегда возвращает did_work = false).
+        if did_work {
+            step_errors = 0;
+        }
 
         // Prefix cache: снять снимок после завершения префила. В этот момент
         // adapter хранит состояние ровно на длине промпта (последний чанк
