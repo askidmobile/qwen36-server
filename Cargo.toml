@@ -18,6 +18,7 @@ path = "src/main.rs"
 # Сборка против candle-fork давала продакшену код без сегодняшних правок MTP.
 qwen35-batch = { path = "../yttri-forge/engine/qwen35-batch", features = ["real-model"] }
 candle-transformers = { path = "../yttri-forge/engine/candle-transformers" }
+rayon = "1.10"
 anyhow = "1"
 axum = { version = "0.8", features = ["multipart"] }
 tokio = { version = "1", features = ["full"] }

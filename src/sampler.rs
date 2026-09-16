@@ -99,9 +99,10 @@ pub fn sample(
 /// = 1 МБ) и `select_nth_unstable_by` поверх него. Замер 2026-09-16 на живом
 /// сервере: argmax-ветка (тоже один проход, без аллокации) давала 53.7 t/s
 /// против 52.9 — то есть ~0.28 мс/токен уходило именно на отбор кандидатов.
-fn top_k_indices(logits: &[f32], k: usize) -> Vec<u32> {
+fn top_k_indices_range(logits: &[f32], lo: usize, hi: usize, k: usize) -> Vec<u32> {
     let mut best: Vec<u32> = Vec::with_capacity(k);
-    for (i, &v) in logits.iter().enumerate() {
+    for i in lo..hi {
+        let v = logits[i];
         if best.len() == k {
             let last = logits[*best.last().expect("k > 0") as usize];
             if !(v > last) {
@@ -116,6 +117,48 @@ fn top_k_indices(logits: &[f32], k: usize) -> Vec<u32> {
         best.insert(pos, i as u32);
     }
     best
+}
+
+/// Параллельная версия того же отбора: словарь режется на чанки, в каждом
+/// считается свой верх-k, затем кандидаты (их не больше потоков × k) сливаются
+/// сортировкой по (значение ↓, индекс ↑) — ровно тем же правилом тай-брейка,
+/// что и последовательный проход. Верх-k объединения равен верх-k объединения
+/// частичных верх-k, поэтому результат совпадает с последовательным (это
+/// проверяет `top_k_indices_matches_full_sort`).
+///
+/// Зачем: последовательный проход по 248 320 логитам стоил ~0.2 мс на токен и
+/// стоял в критическом пути шага (после D2H логитов и до запуска следующего
+/// шага). Потоки берутся из глобального пула rayon, то есть переиспользуются.
+fn top_k_indices(logits: &[f32], k: usize) -> Vec<u32> {
+    use rayon::prelude::*;
+    if k == 0 {
+        return Vec::new();
+    }
+    const MIN_PER_THREAD: usize = 16 * 1024;
+    let n = logits.len();
+    let nthreads = rayon::current_num_threads()
+        .min((n / MIN_PER_THREAD).max(1))
+        .max(1);
+    if nthreads <= 1 {
+        return top_k_indices_range(logits, 0, n, k);
+    }
+    let chunk = n.div_ceil(nthreads);
+    let mut cand: Vec<u32> = (0..nthreads)
+        .into_par_iter()
+        .flat_map_iter(|t| {
+            let lo = (t * chunk).min(n);
+            let hi = ((t + 1) * chunk).min(n);
+            top_k_indices_range(logits, lo, hi, k)
+        })
+        .collect();
+    cand.sort_by(|&a, &b| {
+        let (va, vb) = (logits[a as usize], logits[b as usize]);
+        vb.partial_cmp(&va)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.cmp(&b))
+    });
+    cand.truncate(k);
+    cand
 }
 
 pub fn sample_with_seen(
