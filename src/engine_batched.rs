@@ -953,7 +953,10 @@ fn dispatch_loop(
         // 5. Нет работы — ждём с polling shutdown (таймаут 50мс, иначе shutdown
         // не виден пока не придёт сообщение; blocking_recv блокирует навечно).
         if !did_work && pending.is_empty() && bindings.iter().all(|b| b.is_none()) {
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            // Спим коротко: 50 мс стояли прямо в TTFT коротких запросов (замер
+            // 2026-09-16: 11-токенный промпт отвечал ~0.24 с при ~25 мс работы).
+            // Верхняя граница ожидания нового запроса теперь 5 мс.
+            std::thread::sleep(std::time::Duration::from_millis(5));
             match rx.try_recv() {
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break 'outer,
                 Ok(_) if shutdown.load(Ordering::Relaxed) => break 'outer,
