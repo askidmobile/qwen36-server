@@ -32,7 +32,7 @@ use crate::engine_types::{
     StreamEvent, TokenLogprob,
 };
 use crate::media::prepare::{PreparedContentBlock, PreparedLease};
-use crate::prefix_cache::{HostSnapshotWorker, PrefixCache};
+use crate::prefix_cache::{EntryMeta, HostSnapshotWorker, PrefixCache};
 use crate::sampler::{self, Rng};
 
 /// Макс. слотов = DECODE_BATCH_CAPACITY форка.
@@ -904,8 +904,8 @@ fn dispatch_loop(
         if let Some(pc) = cache.as_mut() {
             // Сначала забираем то, что воркер уже перенёс в host-память.
             if let Some(worker) = host_worker.as_ref() {
-                for (tokens, host_snaps, logits) in worker.drain() {
-                    pc.put_many(&tokens, host_snaps, logits);
+                for (tokens, host_snaps, logits, meta) in worker.drain() {
+                    pc.put_many(&tokens, host_snaps, logits, meta);
                 }
             }
             for (idx, b) in bindings.iter_mut().enumerate() {
@@ -930,9 +930,15 @@ fn dispatch_loop(
                     // Логиты последней позиции префила — только для записи во
                     // всю длину промпта (попадание «ровно в длину»).
                     let logits = sched.model_mut().take_prefill_logits(idx);
+                    // Метаданные записи: слот + поколение промпта. Нужны
+                    // pool-backed записям (строки живут в пуле слота).
+                    let meta = Some(EntryMeta {
+                        slot: idx,
+                        generation: sched.model_mut().slot_generation(idx),
+                    });
                     match host_worker.as_ref() {
                         Some(worker) => {
-                            worker.submit(prompt, snapshots, logits);
+                            worker.submit(prompt, snapshots, logits, meta);
                             eprintln!(
                                 "[pcache] snapshots queued: {total}, entries {}, bytes {} MiB",
                                 pc.len(),
@@ -940,7 +946,7 @@ fn dispatch_loop(
                             );
                         }
                         None => {
-                            let saved = pc.put_many(&prompt, snapshots, logits);
+                            let saved = pc.put_many(&prompt, snapshots, logits, meta);
                             eprintln!(
                                 "[pcache] snapshots saved: {saved}/{total}, entries {}, bytes {} MiB",
                                 pc.len(),
@@ -1429,7 +1435,29 @@ fn seed_slot(
     let hit = match cache.as_mut() {
         Some(pc) if req.media.is_none() => {
             let device = sched.model_mut().device().clone();
-            pc.find(&req.prompt, &device)
+            let found = pc.find(&req.prompt, &device);
+            // Pool-backed запись валидна, только пока тот же промпт слота
+            // лежит в пуле (иначе строки перезаписаны — это был бы мусор).
+            match found {
+                Some(h) => match h.meta {
+                    Some(m) => {
+                        if sched
+                            .model_mut()
+                            .pool_backed_valid(m.slot, m.generation, h.prefix_len)
+                        {
+                            Some(h)
+                        } else {
+                            eprintln!(
+                                "[pcache] запись слота {} поколения {} устарела (len {}), промах",
+                                m.slot, m.generation, h.prefix_len
+                            );
+                            None
+                        }
+                    }
+                    None => Some(h),
+                },
+                None => None,
+            }
         }
         _ => None,
     };
