@@ -136,6 +136,54 @@ __global__ void k_v3(const int8_t* __restrict__ src, const half* __restrict__ sc
     for (int i = threadIdx.x; i < ELEMS; i += THREADS) dst[i] = sd[i];
 }
 
+
+// V4: «магическая» константа: для байта b ∈ [-128,127] биты half(1152+b) равны
+// 0x6480 + b. Значит конверсия — это PRMT (разложить байты по 16-битным
+// дорожкам) + IADD константы + HADD2 вычитания 1152. Масштаб — один HMUL2.
+__device__ __forceinline__ __half2 magic2(uint32_t two_bytes) {
+    const uint32_t spread = __byte_perm(two_bytes, 0u, 0x4140); // byte0->out0, byte1->out2
+    const __half2 bits = *reinterpret_cast<const __half2*>(&spread); // 0x????
+    return __hsub2(bits, __half2half2(__ushort_as_half(0x6480)));
+}
+__global__ void k_v4(const int8_t* __restrict__ src, const half* __restrict__ scale, half* __restrict__ dst, int rounds, unsigned long long* out) {
+    __shared__ int8_t s8[ELEMS];
+    __shared__ __half sf[ROWS];
+    __shared__ __half sd[ELEMS];
+    for (int i = threadIdx.x; i < ELEMS; i += THREADS) s8[i] = src[i];
+    if (threadIdx.x < ROWS) sf[threadIdx.x] = scale[threadIdx.x];
+    __syncthreads();
+    unsigned long long t0 = clock64();
+    for (int r = 0; r < rounds; ++r) {
+        #pragma unroll
+        for (int v = 0; v < 2; ++v) {
+            const int base = (v * THREADS + threadIdx.x) * 16;
+            const int row = base / COLS;
+            const half2 s2 = __half2half2(sf[row]);
+            const uchar4* p4 = reinterpret_cast<const uchar4*>(s8 + base);
+            __half2* d2 = reinterpret_cast<__half2*>(sd + base);
+            #pragma unroll
+            for (int q = 0; q < 4; ++q) {
+                const uchar4 u = p4[q];
+                const uint32_t lo = (uint32_t)u.x | ((uint32_t)u.y << 8) | ((uint32_t)u.z << 16) | ((uint32_t)u.w << 24);
+                // 4 байта -> 2 half2
+                const uint32_t b01 = lo & 0xFFFFu, b23 = lo >> 16;
+                const uint32_t s01 = __byte_perm(b01, 0u, 0x4140);
+                const uint32_t s23 = __byte_perm(b23, 0u, 0x4140);
+                const uint32_t c01 = s01 + 0x64806480u;
+                const uint32_t c23 = s23 + 0x64806480u;
+                const __half2 h01 = __hsub2(*reinterpret_cast<const __half2*>(&c01), __half2half2(__ushort_as_half(0x6400)));
+                const __half2 h23 = __hsub2(*reinterpret_cast<const __half2*>(&c23), __half2half2(__ushort_as_half(0x6400)));
+                d2[2 * q] = __hmul2(h01, s2);
+                d2[2 * q + 1] = __hmul2(h23, s2);
+            }
+        }
+        __syncthreads();
+    }
+    unsigned long long t1 = clock64();
+    if (threadIdx.x == 0) out[0] = t1 - t0;
+    for (int i = threadIdx.x; i < ELEMS; i += THREADS) dst[i] = sd[i];
+}
+
 template <typename F>
 void run(const char* name, F kernel, const int8_t* src, const half* sc, half* dst, int rounds, unsigned long long* out) {
     kernel<<<1, THREADS>>>(src, sc, dst, rounds, out);
@@ -157,5 +205,6 @@ int main() {
     run("V1", k_v1, src, sc, dst, rounds, out);
     run("V2", k_v2, src, sc, dst, rounds, out);
     run("V3", k_v3, src, sc, dst, rounds, out);
+    run("V4", k_v4, src, sc, dst, rounds, out);
     return 0;
 }
