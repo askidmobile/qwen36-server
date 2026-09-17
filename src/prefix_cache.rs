@@ -40,20 +40,20 @@ pub const BLOCK_TOKENS: usize = 64;
 /// забирает уже готовые host-снимки на ближайшей итерации: клиент получает
 /// токен, не дожидаясь копии, кеш наполняется через ~0.2 с после префила.
 pub struct HostSnapshotWorker {
-    tx: std::sync::mpsc::Sender<(Vec<u32>, Vec<(usize, StateSnapshot)>)>,
-    rx: std::sync::mpsc::Receiver<(Vec<u32>, Vec<(usize, StateSnapshot)>)>,
+    tx: std::sync::mpsc::Sender<(Vec<u32>, Vec<(usize, StateSnapshot)>, Option<Vec<f32>>)>,
+    rx: std::sync::mpsc::Receiver<(Vec<u32>, Vec<(usize, StateSnapshot)>, Option<Vec<f32>>)>,
 }
 
 impl HostSnapshotWorker {
     pub fn new() -> Self {
         let (job_tx, job_rx) =
-            std::sync::mpsc::channel::<(Vec<u32>, Vec<(usize, StateSnapshot)>)>();
+            std::sync::mpsc::channel::<(Vec<u32>, Vec<(usize, StateSnapshot)>, Option<Vec<f32>>)>();
         let (res_tx, res_rx) =
-            std::sync::mpsc::channel::<(Vec<u32>, Vec<(usize, StateSnapshot)>)>();
+            std::sync::mpsc::channel::<(Vec<u32>, Vec<(usize, StateSnapshot)>, Option<Vec<f32>>)>();
         let spawned = std::thread::Builder::new()
             .name("pcache-to-host".to_string())
             .spawn(move || {
-                while let Ok((tokens, snaps)) = job_rx.recv() {
+                while let Ok((tokens, snaps, logits)) = job_rx.recv() {
                     let mut host = Vec::with_capacity(snaps.len());
                     for (pos, snap) in snaps {
                         match snap.to_host() {
@@ -66,7 +66,7 @@ impl HostSnapshotWorker {
                     if host.is_empty() {
                         continue;
                     }
-                    if res_tx.send((tokens, host)).is_err() {
+                    if res_tx.send((tokens, host, logits)).is_err() {
                         break;
                     }
                 }
@@ -77,16 +77,22 @@ impl HostSnapshotWorker {
         Self { tx: job_tx, rx: res_rx }
     }
 
-    /// Отдать снимки воркеру (не блокирует).
-    pub fn submit(&self, tokens: Vec<u32>, snapshots: Vec<(usize, StateSnapshot)>) {
+    /// Отдать снимки воркеру (не блокирует). `logits` — логиты последней
+    /// позиции промпта, если снимок снят ровно на его длине.
+    pub fn submit(
+        &self,
+        tokens: Vec<u32>,
+        snapshots: Vec<(usize, StateSnapshot)>,
+        logits: Option<Vec<f32>>,
+    ) {
         if snapshots.is_empty() {
             return;
         }
-        let _ = self.tx.send((tokens, snapshots));
+        let _ = self.tx.send((tokens, snapshots, logits));
     }
 
     /// Забрать готовые host-снимки, не блокируясь.
-    pub fn drain(&self) -> Vec<(Vec<u32>, Vec<(usize, StateSnapshot)>)> {
+    pub fn drain(&self) -> Vec<(Vec<u32>, Vec<(usize, StateSnapshot)>, Option<Vec<f32>>)> {
         self.rx.try_iter().collect()
     }
 }
@@ -103,6 +109,10 @@ pub struct PrefixHit {
     /// Длина совпавшего префикса в токенах; кратна BLOCK_TOKENS не обязана быть —
     /// равна длине закешированного промпта.
     pub prefix_len: usize,
+    /// Логиты последней позиции префикса — есть только у записи, снятой на
+    /// границе ПОЛНОГО промпта. С ними попадание «ровно в длину» не требует
+    /// prefill'а вообще: берём логиты из записи и сразу сэмплируем.
+    pub logits: Option<Vec<f32>>,
 }
 
 struct Entry {
@@ -110,6 +120,8 @@ struct Entry {
     /// Хеш блочной границы записи (по которому её находит find).
     key: u64,
     snap: StateSnapshot,
+    /// Логиты последней позиции (см. PrefixHit::logits).
+    logits: Option<Vec<f32>>,
     size_bytes: usize,
     /// Полный токенный состав закешированного промпта — для защиты от
     /// hash collision: find сверяет токены, а не только хеш.
@@ -163,6 +175,17 @@ impl PrefixCache {
     /// Промпты короче блока не кэшируются — попадание с них невозможно.
     /// Возвращает true, если запись сохранена.
     pub fn put(&mut self, tokens: Vec<u32>, snap: StateSnapshot) -> bool {
+        self.put_with_logits(tokens, snap, None)
+    }
+
+    /// Как `put`, но вместе со снимком кладёт логиты последней позиции:
+    /// запись становится пригодной для попадания «ровно в длину».
+    pub fn put_with_logits(
+        &mut self,
+        tokens: Vec<u32>,
+        snap: StateSnapshot,
+        logits: Option<Vec<f32>>,
+    ) -> bool {
         debug_assert_eq!(
             snap.position,
             tokens.len(),
@@ -217,6 +240,7 @@ impl PrefixCache {
                 id,
                 key,
                 snap,
+                logits,
                 size_bytes,
                 tokens,
             },
@@ -230,13 +254,20 @@ impl PrefixCache {
     /// сохраняется в нескольких точках, поэтому divergent ветка может попасть
     /// в более ранний общий префикс, а не только в последнюю границу чанка.
     /// Позиции за пределами prompt'а или нулевые отбрасываются.
-    pub fn put_many(&mut self, tokens: &[u32], snapshots: Vec<(usize, StateSnapshot)>) -> usize {
+    pub fn put_many(
+        &mut self,
+        tokens: &[u32],
+        snapshots: Vec<(usize, StateSnapshot)>,
+        logits: Option<Vec<f32>>,
+    ) -> usize {
         let mut saved = 0usize;
         for (pos, snap) in snapshots {
             if pos == 0 || pos > tokens.len() {
                 continue;
             }
-            if self.put(tokens[..pos].to_vec(), snap) {
+            // Логиты относятся только к записи во всю длину промпта.
+            let entry_logits = if pos == tokens.len() { logits.clone() } else { None };
+            if self.put_with_logits(tokens[..pos].to_vec(), snap, entry_logits) {
                 saved += 1;
             }
         }
@@ -261,8 +292,13 @@ impl PrefixCache {
                 let Some(e) = self.by_id.get(&id) else {
                     continue;
                 };
+                // Полное совпадение отдаём только тогда, когда в записи есть
+                // логиты последней позиции: иначе primed-пути неоткуда взять
+                // логиты для первого сэмпла (см. submit_fully_primed).
+                let fits = e.tokens.len() < tokens.len()
+                    || (e.tokens.len() == tokens.len() && e.logits.is_some());
                 if e.tokens.len() > best_len
-                    && e.tokens.len() < tokens.len()
+                    && fits
                     && e.tokens.as_slice() == &tokens[..e.tokens.len()]
                 {
                     best = Some(id);
@@ -283,6 +319,7 @@ impl PrefixCache {
                 return Some(PrefixHit {
                     snap,
                     prefix_len: e.tokens.len(),
+                    logits: e.logits.clone(),
                 });
             }
             // Коллизия хеша / содержимое разошлось — ищем по младшим границам.
@@ -362,6 +399,7 @@ impl PrefixCache {
                 id,
                 key,
                 snap,
+                logits: None,
                 size_bytes,
                 tokens,
             },
@@ -603,7 +641,7 @@ mod tests {
                 snap_for(&prefix[..2 * BLOCK_TOKENS], 2048),
             ),
         ];
-        assert_eq!(c.put_many(&prefix, snapshots), 2);
+        assert_eq!(c.put_many(&prefix, snapshots, None), 2);
 
         // Ветка расходится после второго блока: длинный checkpoint не подходит,
         // а ранний checkpoint на первом блоке остаётся валидным.

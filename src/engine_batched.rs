@@ -904,8 +904,8 @@ fn dispatch_loop(
         if let Some(pc) = cache.as_mut() {
             // Сначала забираем то, что воркер уже перенёс в host-память.
             if let Some(worker) = host_worker.as_ref() {
-                for (tokens, host_snaps) in worker.drain() {
-                    pc.put_many(&tokens, host_snaps);
+                for (tokens, host_snaps, logits) in worker.drain() {
+                    pc.put_many(&tokens, host_snaps, logits);
                 }
             }
             for (idx, b) in bindings.iter_mut().enumerate() {
@@ -927,9 +927,12 @@ fn dispatch_loop(
                 } else {
                     let prompt = std::mem::take(&mut b.prompt);
                     let total = snapshots.len();
+                    // Логиты последней позиции префила — только для записи во
+                    // всю длину промпта (попадание «ровно в длину»).
+                    let logits = sched.model_mut().take_prefill_logits(idx);
                     match host_worker.as_ref() {
                         Some(worker) => {
-                            worker.submit(prompt, snapshots);
+                            worker.submit(prompt, snapshots, logits);
                             eprintln!(
                                 "[pcache] snapshots queued: {total}, entries {}, bytes {} MiB",
                                 pc.len(),
@@ -937,7 +940,7 @@ fn dispatch_loop(
                             );
                         }
                         None => {
-                            let saved = pc.put_many(&prompt, snapshots);
+                            let saved = pc.put_many(&prompt, snapshots, logits);
                             eprintln!(
                                 "[pcache] snapshots saved: {saved}/{total}, entries {}, bytes {} MiB",
                                 pc.len(),
@@ -1430,7 +1433,31 @@ fn seed_slot(
         }
         _ => None,
     };
+    // Промпт целиком в кеше: логиты последней позиции лежат в записи —
+    // prefill не нужен вовсе (см. BatchScheduler::submit_fully_primed).
+    let full_logits: Option<Vec<f32>> = hit.as_ref().and_then(|h| {
+        if h.prefix_len == req.prompt.len() {
+            h.logits.clone()
+        } else {
+            None
+        }
+    });
     match hit {
+        Some(hit) if full_logits.is_some() => {
+            let logits = full_logits.unwrap_or_default();
+            match sched.submit_fully_primed(req.prompt.clone(), max_new, logits) {
+                Some(sidx) => {
+                    sched.model_mut().inject_slot_snapshot(sidx, hit.snap);
+                    eprintln!(
+                        "[pcache] slot={sidx} fully primed: {} токенов из снимка, prefill пропущен",
+                        hit.prefix_len,
+                    );
+                }
+                None => {
+                    sched.submit(req.prompt, max_new);
+                }
+            }
+        }
         Some(hit) => match sched.submit_primed(req.prompt.clone(), max_new, hit.prefix_len) {
             Some(sidx) => {
                 sched.model_mut().inject_slot_snapshot(sidx, hit.snap);
