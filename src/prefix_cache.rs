@@ -31,6 +31,72 @@ use qwen35_batch::real::model_weights::StateSnapshot;
 /// режется страницами.
 pub const BLOCK_TOKENS: usize = 64;
 
+/// Асинхронный перенос снимков в системную память.
+///
+/// `StateSnapshot::to_host()` — это D2H примерно 0.5 ГиБ на 30k контекста
+/// (8 слоёв внимания × K/V). В потоке планировщика он держит первый токен
+/// ответа: замер 2026-09-17 — TTFT 19.86…19.95 с с кешем против 19.66 с
+/// `PREFIX_CACHE_MIB=0`. Поэтому снимки уезжают воркеру, а планировщик
+/// забирает уже готовые host-снимки на ближайшей итерации: клиент получает
+/// токен, не дожидаясь копии, кеш наполняется через ~0.2 с после префила.
+pub struct HostSnapshotWorker {
+    tx: std::sync::mpsc::Sender<(Vec<u32>, Vec<(usize, StateSnapshot)>)>,
+    rx: std::sync::mpsc::Receiver<(Vec<u32>, Vec<(usize, StateSnapshot)>)>,
+}
+
+impl HostSnapshotWorker {
+    pub fn new() -> Self {
+        let (job_tx, job_rx) =
+            std::sync::mpsc::channel::<(Vec<u32>, Vec<(usize, StateSnapshot)>)>();
+        let (res_tx, res_rx) =
+            std::sync::mpsc::channel::<(Vec<u32>, Vec<(usize, StateSnapshot)>)>();
+        let spawned = std::thread::Builder::new()
+            .name("pcache-to-host".to_string())
+            .spawn(move || {
+                while let Ok((tokens, snaps)) = job_rx.recv() {
+                    let mut host = Vec::with_capacity(snaps.len());
+                    for (pos, snap) in snaps {
+                        match snap.to_host() {
+                            Ok(host_snap) => host.push((pos, host_snap)),
+                            Err(err) => {
+                                eprintln!("[pcache] to_host не удался: {err}");
+                            }
+                        }
+                    }
+                    if host.is_empty() {
+                        continue;
+                    }
+                    if res_tx.send((tokens, host)).is_err() {
+                        break;
+                    }
+                }
+            });
+        if let Err(err) = spawned {
+            eprintln!("[pcache] воркер переноса в host не запустился: {err}");
+        }
+        Self { tx: job_tx, rx: res_rx }
+    }
+
+    /// Отдать снимки воркеру (не блокирует).
+    pub fn submit(&self, tokens: Vec<u32>, snapshots: Vec<(usize, StateSnapshot)>) {
+        if snapshots.is_empty() {
+            return;
+        }
+        let _ = self.tx.send((tokens, snapshots));
+    }
+
+    /// Забрать готовые host-снимки, не блокируясь.
+    pub fn drain(&self) -> Vec<(Vec<u32>, Vec<(usize, StateSnapshot)>)> {
+        self.rx.try_iter().collect()
+    }
+}
+
+impl Default for HostSnapshotWorker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PrefixHit {
     pub snap: StateSnapshot,

@@ -32,7 +32,7 @@ use crate::engine_types::{
     StreamEvent, TokenLogprob,
 };
 use crate::media::prepare::{PreparedContentBlock, PreparedLease};
-use crate::prefix_cache::PrefixCache;
+use crate::prefix_cache::{HostSnapshotWorker, PrefixCache};
 use crate::sampler::{self, Rng};
 
 /// Макс. слотов = DECODE_BATCH_CAPACITY форка.
@@ -361,8 +361,18 @@ impl BatchedEngine {
             ready.store(true, Ordering::Relaxed);
             let cache =
                 (cfg2.prefix_cache_mib > 0).then(|| PrefixCache::new(cfg2.prefix_cache_mib));
+            // Перенос снимков в host-память — в отдельном потоке: D2H ~0.5 ГиБ
+            // на 30k контекста иначе задерживает первый токен ответа.
+            let host_worker = cache.as_ref().map(|_| HostSnapshotWorker::new());
             dispatch_loop(
-                scheduler, rx_ingest, cfg2, in_flight, tokenizer, shutdown2, cache,
+                scheduler,
+                rx_ingest,
+                cfg2,
+                in_flight,
+                tokenizer,
+                shutdown2,
+                cache,
+                host_worker,
             );
         });
         *engine.dispatch_handle.lock().expect("dispatch lock") = Some(handle);
@@ -648,6 +658,7 @@ fn dispatch_loop(
     tokenizer: Arc<Mutex<tokenizers::Tokenizer>>,
     shutdown: Arc<AtomicBool>,
     mut cache: Option<PrefixCache>,
+    host_worker: Option<HostSnapshotWorker>,
 ) {
     let mut bindings: Vec<Option<SlotBinding>> = (0..cfg.slots).map(|_| None).collect();
     let mut pending: VecDeque<AdmitReq> = VecDeque::new();
@@ -891,6 +902,12 @@ fn dispatch_loop(
         // adapter хранит состояние ровно на длине промпта (последний чанк
         // prefill), декод ещё не менял slot_snaps.
         if let Some(pc) = cache.as_mut() {
+            // Сначала забираем то, что воркер уже перенёс в host-память.
+            if let Some(worker) = host_worker.as_ref() {
+                for (tokens, host_snaps) in worker.drain() {
+                    pc.put_many(&tokens, host_snaps);
+                }
+            }
             for (idx, b) in bindings.iter_mut().enumerate() {
                 let Some(b) = b else { continue };
                 if b.prefix_captured || b.cancelled || b._media_lease.is_some() {
@@ -910,12 +927,24 @@ fn dispatch_loop(
                 } else {
                     let prompt = std::mem::take(&mut b.prompt);
                     let total = snapshots.len();
-                    let saved = pc.put_many(&prompt, snapshots);
-                    eprintln!(
-                        "[pcache] snapshots saved: {saved}/{total}, entries {}, bytes {} MiB",
-                        pc.len(),
-                        pc.total_bytes() / (1024 * 1024),
-                    );
+                    match host_worker.as_ref() {
+                        Some(worker) => {
+                            worker.submit(prompt, snapshots);
+                            eprintln!(
+                                "[pcache] snapshots queued: {total}, entries {}, bytes {} MiB",
+                                pc.len(),
+                                pc.total_bytes() / (1024 * 1024),
+                            );
+                        }
+                        None => {
+                            let saved = pc.put_many(&prompt, snapshots);
+                            eprintln!(
+                                "[pcache] snapshots saved: {saved}/{total}, entries {}, bytes {} MiB",
+                                pc.len(),
+                                pc.total_bytes() / (1024 * 1024),
+                            );
+                        }
+                    }
                 }
             }
         }
