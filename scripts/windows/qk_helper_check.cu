@@ -43,6 +43,42 @@ __global__ void helper_kernel(const int8_t* __restrict__ q, const int8_t* __rest
     copy(acc, thr.partition_C(gC));
 }
 
+
+// Инлайновый вариант — ровно тот код, что дал 0 несовпадений в спайке §91.
+__global__ void inline_kernel(const int8_t* __restrict__ q, const int8_t* __restrict__ k,
+                              float* __restrict__ out) {
+    __shared__ int8_t sQ[M * K];
+    __shared__ int8_t sK[N * K];
+    for (int i = threadIdx.x; i < M * K; i += THREADS) sQ[i] = q[i];
+    for (int i = threadIdx.x; i < N * K; i += THREADS) sK[i] = k[i];
+    __syncthreads();
+    using LQ  = Layout<Shape<Int<M>, Int<K>>, Stride<Int<K>, Int<1>>>;
+    using LK  = Layout<Shape<Int<N>, Int<K>>, Stride<Int<K>, Int<1>>>;
+    using LC  = Layout<Shape<Int<M>, Int<N>>, Stride<Int<N>, Int<1>>>;
+    auto tQ = make_tensor(make_smem_ptr(sQ), LQ{});
+    auto tK = make_tensor(make_smem_ptr(sK), LK{});
+    using TiledMmaS8 = decltype(make_tiled_mma(SM80_16x8x32_S32S8S8S32_TN{}, Layout<Shape<Int<4>, Int<1>, Int<1>>>{}));
+    TiledMmaS8 mma8;
+    auto thr = mma8.get_thread_slice(threadIdx.x);
+    auto tAsQ = thr.partition_A(tQ);
+    auto tBsK = thr.partition_B(tK);
+    auto tArQ = thr.partition_fragment_A(tQ);
+    auto tBrK = thr.partition_fragment_B(tK);
+    auto acc32 = partition_fragment_C(mma8, Shape<Int<M>, Int<N>>{});
+    clear(acc32);
+    #pragma unroll
+    for (int kb = 0; kb < K / 32; ++kb) {
+        copy(tAsQ(_, _, kb), tArQ(_, _, kb));
+        copy(tBsK(_, _, kb), tBrK(_, _, kb));
+        gemm(mma8, tArQ(_, _, kb), tBrK(_, _, kb), acc32);
+    }
+    Tensor accf = make_tensor<float>(acc32.layout());
+    #pragma unroll
+    for (int i = 0; i < size(acc32); ++i) accf(i) = static_cast<float>(acc32(i));
+    auto gC = make_tensor(make_gmem_ptr(out), LC{});
+    copy(accf, thr.partition_C(gC));
+}
+
 int main() {
     static int8_t q[M * K], k[N * K];
     static __half qs[M], ks[N];
@@ -71,6 +107,21 @@ int main() {
         if (d > 0.5f) bad++; if (d > maxd) maxd = d;
     }
     printf("qk_int8_scores: несовпадений=%d из %d, max|diff|=%.2f\n", bad, M * N, maxd);
+    {   // дифференциальный тест: инлайновый вариант против хелпера
+        static float outi[M * N];
+        float* douti; cudaMalloc(&douti, sizeof(float) * M * N);
+        inline_kernel<<<1, THREADS>>>(dq, dk, douti);
+        cudaError_t e2 = cudaDeviceSynchronize();
+        if (e2 != cudaSuccess) printf("inline: CUDA error %s\n", cudaGetErrorString(e2));
+        cudaMemcpy(outi, douti, sizeof(float) * M * N, cudaMemcpyDeviceToHost);
+        int bad2 = 0; float maxd2 = 0.0f;
+        for (int i = 0; i < M * N; ++i) {
+            float dd = out[i] - outi[i]; if (dd < 0) dd = -dd;
+            if (dd > 0.5f) bad2++; if (dd > maxd2) maxd2 = dd;
+        }
+        printf("helper vs inline: несовпадений=%d из %d, max|diff|=%.2f\n", bad2, M * N, maxd2);
+        cudaFree(douti);
+    }
     int shown = 0;
     for (int m = 0; m < M && shown < 8; ++m) for (int n = 0; n < N && shown < 8; ++n) {
         float ref = 0.0f;
