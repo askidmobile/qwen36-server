@@ -90,7 +90,14 @@ pub fn footprint_from_gguf_with(path: &Path, moe_experts: &str) -> Result<ModelF
             .and_then(|v| v.to_u32().ok())
             .map(|v| v as usize)
     };
-    let block_count = g("block_count").ok_or_else(|| anyhow!("no block_count"))?;
+    // Qwen3.8+: block_count включает nextn/MTP-слои (blk.<last>), а движок их
+    // при MTP=0 не грузит (model_weights.rs: block_count_raw - nextn_layers).
+    // Без этой поправки план считал в весах лишний слой: на 27B это 430 МиБ
+    // фантомного расхода (замер 2026-09-18), из-за чего VRAM-бюджет и
+    // решение auto о размещении экспертов были смещены.
+    let block_count_raw = g("block_count").ok_or_else(|| anyhow!("no block_count"))?;
+    let nextn_layers = g("nextn_predict_layers").unwrap_or(0);
+    let block_count = block_count_raw.saturating_sub(nextn_layers);
     let (attn_blocks, delta_blocks) = if matches!(arch.as_str(), "qwen35" | "qwen35moe") {
         let interval = g("full_attention_interval").unwrap_or(4).max(1);
         let attn = (0..block_count).filter(|i| (i + 1) % interval == 0).count();
