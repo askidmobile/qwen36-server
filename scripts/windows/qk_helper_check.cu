@@ -79,6 +79,38 @@ __global__ void inline_kernel(const int8_t* __restrict__ q, const int8_t* __rest
     copy(accf, thr.partition_C(gC));
 }
 
+
+// Третий вариант: тот же вызов хелпера, но аккумулятор пишется в gmem
+// поэлементно по координатам identity-тензора (без copy(partition_C)).
+__global__ void coord_kernel(const int8_t* __restrict__ q, const int8_t* __restrict__ k,
+                             const __half* __restrict__ qs, const __half* __restrict__ ks,
+                             float* __restrict__ out) {
+    __shared__ int8_t sQ[M * K];
+    __shared__ int8_t sK[N * K];
+    for (int i = threadIdx.x; i < M * K; i += THREADS) sQ[i] = q[i];
+    for (int i = threadIdx.x; i < N * K; i += THREADS) sK[i] = k[i];
+    __syncthreads();
+    using LQ  = Layout<Shape<Int<M>, Int<K>>, Stride<Int<K>, Int<1>>>;
+    using LK  = Layout<Shape<Int<N>, Int<K>>, Stride<Int<K>, Int<1>>>;
+    using LQS = Layout<Shape<Int<M>, Int<1>>, Stride<Int<1>, Int<1>>>;
+    using LKS = Layout<Shape<Int<N>>, Stride<Int<1>>>;
+    auto tQ  = make_tensor(make_smem_ptr(sQ), LQ{});
+    auto tK  = make_tensor(make_smem_ptr(sK), LK{});
+    auto gQS = make_tensor(make_gmem_ptr(qs), LQS{});
+    auto gKS = make_tensor(make_gmem_ptr(ks), LKS{});
+    using TiledMmaS8 = decltype(make_tiled_mma(SM80_16x8x32_S32S8S8S32_TN{}, Layout<Shape<Int<4>, Int<1>, Int<1>>>{}));
+    TiledMmaS8 mma8;
+    auto thr = mma8.get_thread_slice(threadIdx.x);
+    Tensor acc = partition_fragment_C(mma8, Shape<Int<M>, Int<N>>{});
+    qk_int8_scores<M, N, K, 4>(tQ, gQS, tK, gKS, acc, threadIdx.x, 0, 0, M, 1.0f);
+    auto tScS = thr.partition_C(make_identity_tensor(Shape<Int<M>, Int<N>>{}));
+    #pragma unroll
+    for (int i = 0; i < size(acc); ++i) {
+        auto rc = tScS(i);
+        out[get<0>(rc) * N + get<1>(rc)] = acc(i);
+    }
+}
+
 int main() {
     static int8_t q[M * K], k[N * K];
     static __half qs[M], ks[N];
@@ -121,6 +153,22 @@ int main() {
         }
         printf("helper vs inline: несовпадений=%d из %d, max|diff|=%.2f\n", bad2, M * N, maxd2);
         cudaFree(douti);
+        // Третий вариант: вывод по координатам identity-тензора
+        static float outc[M * N];
+        float* doutc; cudaMalloc(&doutc, sizeof(float) * M * N);
+        cudaMemset(doutc, 0xFF, sizeof(float) * M * N);  // NaN-заполнение: видно незаписанные
+        coord_kernel<<<1, THREADS>>>(dq, dk, dqs, dks, doutc);
+        cudaError_t e3 = cudaDeviceSynchronize();
+        if (e3 != cudaSuccess) printf("coord: CUDA error %s\n", cudaGetErrorString(e3));
+        cudaMemcpy(outc, doutc, sizeof(float) * M * N, cudaMemcpyDeviceToHost);
+        int bad3 = 0, nan3 = 0; float maxd3 = 0.0f;
+        for (int i = 0; i < M * N; ++i) {
+            if (outc[i] != outc[i]) { nan3++; continue; }
+            float dd = outc[i] - outi[i]; if (dd < 0) dd = -dd;
+            if (dd > 0.5f) bad3++; if (dd > maxd3) maxd3 = dd;
+        }
+        printf("coord vs inline: несовпадений=%d, не записано=%d, max|diff|=%.2f\n", bad3, nan3, maxd3);
+        cudaFree(doutc);
     }
     int shown = 0;
     for (int m = 0; m < M && shown < 8; ++m) for (int n = 0; n < N && shown < 8; ++n) {
