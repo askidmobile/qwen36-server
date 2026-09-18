@@ -206,7 +206,9 @@ powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File D:\Projects\yttri-in
 `.env`, задача и правило фаервола перепроверяются, сервис перезапускается.
 `-Rebuild` форсирует `npm ci`/`npm run build` и переустановку зависимостей,
 `-AdminPassword '<pw>'` задаёт пароль админа (без него — существующий из `.env`
-или новый сгенерированный), `-SkipStart` — только подготовка без запуска.
+или новый сгенерированный), `-SkipTask` — не трогать задачу и firewall,
+`-SkipStart` — только подготовка без запуска. Скрипт вызывает `npm.cmd`
+(а не `npm.ps1`) — PowerShell-шим npm ломает аргументы (`Unknown command: "pm"`).
 
 ### Доступ и учётные данные
 

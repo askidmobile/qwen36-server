@@ -14,6 +14,7 @@
 #   powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File openwebui-install.ps1
 #   ... -AdminEmail admin@localhost -AdminPassword 'S3cret...'   # omit -> keep/generate
 #   ... -Rebuild                                                 # force npm/pip stages
+#   ... -SkipTask                                                # do not touch task/firewall
 #   ... -SkipStart                                               # prepare only
 #
 # Requires: git, node/npm (>=18), uv, Python 3.12 available to uv.
@@ -31,6 +32,7 @@ param(
     [string]$AdminName = 'Admin',
     [string]$TaskName = 'open-webui',
     [switch]$Rebuild,
+    [switch]$SkipTask,
     [switch]$SkipStart
 )
 
@@ -84,10 +86,15 @@ function Get-YforgeApiKey([string]$EnvFile, [string]$KeyName) {
 }
 
 # --- preflight -------------------------------------------------------------
-foreach ($tool in @('git', 'npm', 'uv')) {
+# NB: on Windows `npm` resolves to npm.ps1, which mangles arguments; use npm.cmd.
+$script:Npm = if (Get-Command npm.cmd -ErrorAction SilentlyContinue) { 'npm.cmd' } else { 'npm' }
+foreach ($tool in @('git', 'uv')) {
     if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
         throw "required tool not found in PATH: $tool"
     }
+}
+if (-not (Get-Command $Npm -ErrorAction SilentlyContinue)) {
+    throw "required tool not found in PATH: npm (npm.cmd)"
 }
 if (-not (Test-Path -LiteralPath $ServerEnv)) { throw "yforge env not found: $ServerEnv" }
 Write-Line "install target: $WebuiDir (open-webui $Version)"
@@ -115,10 +122,10 @@ if ($Rebuild -or -not (Test-Path -LiteralPath $BuildFile)) {
     Write-Line "stage 2: npm ci"
     Push-Location $WebuiDir
     try {
-        & npm ci --loglevel=error
+        & $Npm ci --loglevel=error
         if ($LASTEXITCODE -ne 0) { throw 'npm ci failed' }
-        Write-Line "stage 2: npm run build"
-        & npm run build
+        Write-Line "stage 2: $Npm run build"
+        & $Npm run build
         if ($LASTEXITCODE -ne 0) { throw 'npm run build failed' }
     } finally { Pop-Location }
 } else {
@@ -187,7 +194,9 @@ Write-Line "stage 4: $WebuiEnv written (auth on, signup off, admin $AdminEmail)"
 
 # --- stage 5: task + firewall ---------------------------------------------
 $setup = Join-Path $Root 'openwebui-setup.ps1'
-if (Test-Path -LiteralPath $setup) {
+if ($SkipTask) {
+    Write-Line "stage 5: skipped (-SkipTask)"
+} elseif (Test-Path -LiteralPath $setup) {
     Write-Line "stage 5: $setup"
     & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $setup -Root $Root -Port $Port -TaskName $TaskName
     if ($LASTEXITCODE -ne 0) { throw 'openwebui-setup.ps1 failed' }
