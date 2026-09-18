@@ -320,6 +320,10 @@ pub fn compute_dynamic(
     });
     // Сколько слотов могут быть одновременно заполнены ctx полностью.
     let full_concurrent = (kv_budget / (kv_per_tok * ctx as f64)).floor() as usize;
+    // Прямая цена одного полного ctx. Без неё строка читается навыворот:
+    // q8 на 128k и f16 на 64k стоят одинаково (~2 ГиБ), а «~5 слотов» у
+    // q8-64k означает вдвое более дешёвый слот, а не вдвое больший расход.
+    let kv_per_slot = kv_per_tok * ctx as f64;
     // Оценка справочная, и это важно проговорить: движок считает окно пула
     // заново, от фактически свободной VRAM в момент создания, и бюджет отсюда
     // не смотрит. Числа расходятся — на 3060 планировщик дал «~0 слотов
@@ -327,7 +331,7 @@ pub fn compute_dynamic(
     // Без этой оговорки строка читается как «не влезет», хотя это не так.
     let report = format!(
         "[vram] total={total_mib}MiB weights={}MiB (experts={}, kv_budget={kv_budget:.0}MiB state={state:.0}MiB/slot)\n\
-         [vram] plan(dynamic): ctx={ctx} slots={req_slots} — ~{full_concurrent} слот(а) полного ctx одновременно, очередь FIFO\n\
+         [vram] plan(dynamic): ctx={ctx} slots={req_slots} — KV {kv_per_slot:.0}MiB/слот, в бюджет {kv_budget:.0}MiB влезает ~{full_concurrent} полных ctx, очередь FIFO\n\
          [vram] оценка справочная: окно пула движок считает сам от свободной VRAM — фактическое смотри в строке [kv] paged pool",
         weights_mib,
         placement,

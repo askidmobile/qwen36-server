@@ -131,6 +131,17 @@ curl.exe -s -m 180 http://127.0.0.1:18099/v1/chat/completions `
 В ответе `usage.mtp.enabled=true` — спекуляция работает. Пейлоад `smoke.json` —
 любой валидный chat-completions JSON.
 
+### VRAM-замер A/B (`scripts\windows\vram_ab.ps1`)
+
+Меряет по фазам (restart / idle / request / after) для процесса `yforge`:
+dedicated и shared GPU-память (WDDM, `Win32_PerfFormattedData_GPUPerformanceCounters_GPUProcessMemory`),
+`nvidia-smi` used/free, power, SM clock и свободную RAM; плюс decode/TTFT из
+`bench-live.ps1`. Профили по умолчанию: `q8-128k`, `f16-64k`, `q8-64k`
+(плюс `q8-128k-c16k`, `f16-64k-c16k` для чанка 16384); `-Only <name>`,
+`-Prompt <file>`, `-MaxTokens N`. В конце возвращает прод-профиль из `.env`.
+Результат 2026-09-18: q8-128k и f16-64k по VRAM равны (2064 против 2048 МиБ
+пула), вытеснения в shared нет, цена int8 — распаковка в декоде, не память.
+
 ### Синхронизация кода с yttri-win (аудит 2026-08-31)
 
 ### Выгрузка экспертов MoE (2026-09-04, план moe-expert-offload)
