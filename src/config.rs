@@ -588,6 +588,12 @@ impl Config {
         // длинного контекста. Кладём значение уже после apply_vram_plan — оно
         // может оказаться меньше запрошенного.
         std::env::set_var("CTX", cfg.ctx.to_string());
+        // Симметричный проброс: сервер принимает KV_CACHE_TYPE (и CLI-флаг
+        // --kv-cache-type пишет обе переменные), а движок читает голое
+        // KV_CACHE_DTYPE. Без этого env KV_CACHE_TYPE=q8 не доезжал до
+        // движка, тот брал свой дефолт q8_f16 для dense-модели и держал
+        // F16-зеркало batched-KV — лишняя VRAM на коротком контексте.
+        std::env::set_var("KV_CACHE_DTYPE", &cfg.kv_cache_type);
         Ok(cfg)
     }
 
