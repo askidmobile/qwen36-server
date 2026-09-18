@@ -40,7 +40,7 @@ __global__ void tiled_kernel(const int8_t* __restrict__ q, const int8_t* __restr
     copy(tAsQ, tArQ);
     copy(tBsK, tBrK);
     gemm(mma8, tArQ, tBrK, acc32);
-    auto gC = make_tensor(make_gmem_ptr(out), Layout<Shape<Int<TM>, Int<N>>, Stride<Int<TN>, Int<1>>>{});
+    auto gC = make_tensor(make_gmem_ptr(out), Layout<Shape<Int<TM>, Int<TN>>, Stride<Int<TN>, Int<1>>>{});
     auto accf = make_tensor<float>(acc32.layout());
     for (int i = 0; i < size(acc32); ++i) accf(i) = static_cast<float>(acc32(i));
     copy(accf, thr.partition_C(gC));
@@ -79,5 +79,7 @@ int main() {
     run_case<64, 32, 4>("case2 M=64 K=32 4варпа 1блок");
     run_case<16, 64, 1>("case3 M=16 K=64 1варп 2блока");
     run_case<64, 32, 4, 32>("case4 M=64 N=32 K=32 4варпа 1блок");
+    run_case<64, 64, 4, 32>("case5 M=64 N=32 K=64 4варпа 2k-блока");
+    run_case<64, 256, 4, 32>("case6 M=64 N=32 K=256 4варпа 8k-блоков");
     return 0;
 }
