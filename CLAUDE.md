@@ -7,8 +7,9 @@ Rust-сервер инференса Qwen3.6-27B (GGUF 2-bit) на собств�
 ## Обязательный контекст (читать первым)
 
 - [docs/brief/PROJECT-BRIEF.md](docs/brief/PROJECT-BRIEF.md) — видение, scope v1, критерий успеха, дорожная карта.
-- [docs/brief/decisions.md](docs/brief/decisions.md) — **обязывающие** решения BD-001…BD-020. Отмена решения — только новой строкой «overrides BD-XXX».
+- [docs/brief/decisions.md](docs/brief/decisions.md) — **обязывающие** решения BD-001…BD-032. Отмена решения — только новой строкой «overrides BD-XXX».
 - [docs/brief/open-questions.md](docs/brief/open-questions.md) — отложенное (IQ2, vision, MTP, VRAM-бюджет).
+- [docs/DEPLOY.md](docs/DEPLOY.md) — полное развёртывание на новом сервере: yforge (задача `\qwen36-inference`) + Open WebUI (задача `\open-webui`).
 
 ## Принципы
 

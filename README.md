@@ -6,6 +6,8 @@
 
 Совместимые API: **OpenAI Chat Completions**, **OpenAI Responses**, **Anthropic Messages**, плюс встроенный веб-чат.
 
+Развёртывание на новом сервере (Windows + NVIDIA, от нуля до стенда с веб-интерфейсом): **[docs/DEPLOY.md](docs/DEPLOY.md)**.
+
 ---
 
 ## Быстрый старт
@@ -256,6 +258,9 @@ cargo build --release --features cuda --bin yforge
 ```cmd
 target\release\yforge.exe --env D:\configs\prod.env
 ```
+
+> Полный продакшен-вариант (лаунчер `inference-run.bat`, задача `\qwen36-inference`,
+> firewall, WebUI) — в [docs/DEPLOY.md](docs/DEPLOY.md).
 
 **Как служба (переживает выход из сессии).** `Start-Process` из ssh-сессии
 умирает вместе с ней — используйте планировщик заданий. Bat-обёртка:

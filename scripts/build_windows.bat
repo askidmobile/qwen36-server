@@ -40,5 +40,5 @@ echo [build] CUDA_PATH=%CUDA_PATH%
 echo [build] CUDA_COMPUTE_CAP=%CUDA_COMPUTE_CAP%
 cargo build --release --features cuda || exit /b 1
 
-echo [ok] target\release\qwen36-server.exe
+echo [ok] target\release\yforge.exe
 endlocal
