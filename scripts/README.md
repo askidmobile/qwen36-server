@@ -176,6 +176,61 @@ dedicated и shared GPU-память (WDDM, `Win32_PerfFormattedData_GPUPerforma
 
 Правки в код делать в локальном репо → коммит → push → перенос на yttri-win (`git pull` там, либо scp конкретных файлов). Обратно — только через bundle/diff + сверка содержимого, как выше.
 
+## Open WebUI (сборка из исходников, yttri-win)
+
+Браузерный чат вместо встроенного `web/index.html` и Unsloth Studio: собран из
+исходников [github.com/open-webui/open-webui](https://github.com/open-webui/open-webui)
+тег v0.9.6, живёт на yttri-win по адресу **http://192.168.2.89:8080/** (LAN).
+Авторизации нет: `WEBUI_AUTH=false`, из локалки сразу открывается чат с уже
+выбранной моделью. Порт 18099 при этом остаётся API (OpenAI/Responses/Anthropic)
+и прежним fallback-чатом — Open WebUI это отдельный порт.
+
+- Каталог: `D:\Projects\yttri-inference\open-webui` (checkout v0.9.6; frontend
+  собран `npm ci && npm run build`, backend — `.venv` с `backend/requirements.txt`
+  на Python 3.12).
+- Бэкенд: yforge как OpenAI-совместимый провайдер
+  (`OPENAI_API_BASE_URLS=http://127.0.0.1:18099/v1`, ключ из `qwen36-server\.env`,
+  запись с именем `web-chat`). Список моделей тянется из `/v1/models`.
+- Синхронизация «установленной» модели: `openwebui-run.ps1` при каждом старте
+  опрашивает `/v1/models` и пишет реально загруженные id в `open-webui\.env` как
+  `DEFAULT_MODELS` (там же `WEBUI_AUTH=false`, ключ, `HF_HOME` и opt-out
+  телеметрии). Сменили модель в `.env` сервера → перезапустите задачу `\open-webui`.
+- Автозапуск: задача планировщика `\open-webui` (BootTrigger, SYSTEM,
+  RestartOnFailure 3×1 мин) → `D:\Projects\yttri-inference\openwebui-run.bat`,
+  лог — `logs\open-webui.log`. Правило фаервола — `Open WebUI 8080`.
+
+Управление и проверка:
+
+```bat
+schtasks /run  /tn open-webui
+schtasks /query /tn open-webui
+netstat -ano | findstr :8080
+taskkill /PID <pid> /F          :: жёсткая остановка
+```
+
+```powershell
+curl.exe -s http://127.0.0.1:8080/api/config     # "auth":false
+# токен для отладки API выдаёт no-auth вход admin@localhost / admin
+curl.exe -s http://127.0.0.1:8080/api/models -H "Authorization: Bearer <token>"
+```
+
+Развёртывание с нуля на yttri-win (из-под администратора):
+
+```powershell
+git clone --depth 1 --branch v0.9.6 https://github.com/open-webui/open-webui.git D:\Projects\yttri-inference\open-webui
+cd D:\Projects\yttri-inference\open-webui
+npm ci; npm run build
+uv venv --python 3.12 .venv
+uv pip install --python .venv\Scripts\python.exe -r backend\requirements.txt
+# скопировать scripts\windows\openwebui-run.bat, openwebui-run.ps1, openwebui-setup.ps1
+# в D:\Projects\yttri-inference и выполнить:
+powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File D:\Projects\yttri-inference\openwebui-setup.ps1
+```
+
+Первый старт дополнительно скачивает embedding-модель RAG
+(`sentence-transformers/all-MiniLM-L6-v2`, ~90 МБ) в `open-webui\.cache\huggingface`
+(`HF_HOME` задаёт лончер, поэтому кэш не дублируется в профиле SYSTEM).
+
 ## Профильная схема (run_windows.bat)
 
 `YFORGE_CURRENT=D:\Models\yttri\qwen3.5-4b\current` — JSON-указатель на релиз
