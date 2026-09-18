@@ -37,7 +37,8 @@ __global__ void helper_kernel(const int8_t* __restrict__ q, const int8_t* __rest
     using TiledMmaS8 = decltype(make_tiled_mma(SM80_16x8x32_S32S8S8S32_TN{}, Layout<Shape<Int<4>, Int<1>, Int<1>>>{}));
     TiledMmaS8 mma8;
     auto thr = mma8.get_thread_slice(threadIdx.x);
-    Tensor acc = partition_fragment_C(mma8, Shape<Int<M>, Int<N>>{});
+    Tensor acc = make_tensor<float>(partition_fragment_C(mma8, Shape<Int<M>, Int<N>>{}).layout());
+    clear(acc);
     qk_int8_scores<M, N, K, 4>(tQ, gQS, tK, gKS, acc, threadIdx.x, 0, 0, M, 1.0f);
     auto gC = make_tensor(make_gmem_ptr(out), LC{});
     copy(acc, thr.partition_C(gC));
@@ -101,13 +102,26 @@ __global__ void coord_kernel(const int8_t* __restrict__ q, const int8_t* __restr
     using TiledMmaS8 = decltype(make_tiled_mma(SM80_16x8x32_S32S8S8S32_TN{}, Layout<Shape<Int<4>, Int<1>, Int<1>>>{}));
     TiledMmaS8 mma8;
     auto thr = mma8.get_thread_slice(threadIdx.x);
-    Tensor acc = partition_fragment_C(mma8, Shape<Int<M>, Int<N>>{});
+    Tensor acc = make_tensor<float>(partition_fragment_C(mma8, Shape<Int<M>, Int<N>>{}).layout());
+    clear(acc);
     qk_int8_scores<M, N, K, 4>(tQ, gQS, tK, gKS, acc, threadIdx.x, 0, 0, M, 1.0f);
-    auto tScS = thr.partition_C(make_identity_tensor(Shape<Int<M>, Int<N>>{}));
+    Tensor scores = make_tensor(acc.data(), flash::convert_layout_acc_rowcol(acc.layout()));
+    const int lane = threadIdx.x % 32;
+    const int lm_warp = (threadIdx.x / 32) * 16 + (lane / 4);
+    const int ln_pair = (lane % 4) * 2;
     #pragma unroll
-    for (int i = 0; i < size(acc); ++i) {
-        auto rc = tScS(i);
-        out[get<0>(rc) * N + get<1>(rc)] = acc(i);
+    for (int mi = 0; mi < size<0, 1>(scores); ++mi) {
+        #pragma unroll
+        for (int i = 0; i < size<0, 0>(scores); ++i) {
+            const int lm = lm_warp + i * 8 + mi * (4 * 16);
+            #pragma unroll
+            for (int nj = 0; nj < size<1, 1>(scores); ++nj) {
+                #pragma unroll
+                for (int j = 0; j < size<1, 0>(scores); ++j) {
+                    out[lm * N + ln_pair + j + nj * 8] = scores(make_coord(i, mi), make_coord(j, nj));
+                }
+            }
+        }
     }
 }
 
@@ -117,8 +131,8 @@ int main() {
     static float out[M * N];
     for (int i = 0; i < M * K; ++i) q[i] = (int8_t)((i * 37 % 255) - 127);
     for (int i = 0; i < N * K; ++i) k[i] = (int8_t)((i * 53 % 255) - 127);
-    for (int i = 0; i < M; ++i) qs[i] = __float2half(1.0f);
-    for (int i = 0; i < N; ++i) ks[i] = __float2half(1.0f);
+    for (int i = 0; i < M; ++i) qs[i] = __float2half(0.5f + 0.01f * i);
+    for (int i = 0; i < N; ++i) ks[i] = __float2half(0.25f + 0.02f * i);
     int8_t *dq, *dk; __half *dqs, *dks; float* dout;
     cudaMalloc(&dq, M * K); cudaMalloc(&dk, N * K);
     cudaMalloc(&dqs, sizeof(__half) * M); cudaMalloc(&dks, sizeof(__half) * N);
@@ -135,8 +149,9 @@ int main() {
     for (int m = 0; m < M; ++m) for (int n = 0; n < N; ++n) {
         float ref = 0.0f;
         for (int kk = 0; kk < K; ++kk) ref += (float)q[m*K+kk] * (float)k[n*K+kk];
+        ref *= __half2float(qs[m]) * __half2float(ks[n]);
         float d = out[m*N+n] - ref; if (d < 0) d = -d;
-        if (d > 0.5f) bad++; if (d > maxd) maxd = d;
+        if (d > 1.0f) bad++; if (d > maxd) maxd = d;
     }
     printf("qk_int8_scores: несовпадений=%d из %d, max|diff|=%.2f\n", bad, M * N, maxd);
     {   // дифференциальный тест: инлайновый вариант против хелпера
