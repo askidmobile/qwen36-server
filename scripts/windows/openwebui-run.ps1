@@ -3,8 +3,10 @@
 # What it does:
 #   1. reads the yforge API key (entry named "web-chat") from qwen36-server\.env;
 #   2. waits until yforge answers /v1/models and takes the model ids it serves;
-#   3. writes/updates open-webui\.env: auth off, OpenAI connection to yforge,
-#      DEFAULT_MODELS = the model actually loaded right now;
+#   3. writes/updates open-webui\.env: auth ON (login+password, signup off),
+#      OpenAI connection to yforge, DEFAULT_MODELS = the model actually loaded
+#      right now. Admin credentials (WEBUI_ADMIN_EMAIL/PASSWORD) are preserved
+#      from .env - they are managed by openwebui-install.ps1;
 #   4. starts uvicorn (Open WebUI backend) on 0.0.0.0:8080 in the foreground.
 #
 # Source checkout: D:\Projects\yttri-inference\open-webui (tag v0.9.6).
@@ -75,7 +77,8 @@ if ($modelIds.Count -gt 0) {
 
 # --- open-webui .env -------------------------------------------------------
 $desired = [ordered]@{
-    'WEBUI_AUTH'                  = 'false'
+    'WEBUI_AUTH'                  = 'true'
+    'ENABLE_SIGNUP'               = 'false'
     'ENABLE_OPENAI_API'           = 'true'
     'OPENAI_API_BASE_URLS'        = $BaseUrl
     'OPENAI_API_KEYS'             = $apiKey
@@ -99,6 +102,23 @@ foreach ($line in $existing) {
 if (-not $secret) { $secret = [guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N') }
 $desired['WEBUI_SECRET_KEY'] = $secret
 
+# Admin bootstrap credentials: keep what .env already has, generate on first run.
+$adminEmail = $null
+$adminPassword = $null
+foreach ($line in $existing) {
+    if ($line -match '^\s*WEBUI_ADMIN_EMAIL\s*=') { $adminEmail = ($line -split '=', 2)[1].Trim() }
+    if ($line -match '^\s*WEBUI_ADMIN_PASSWORD\s*=') { $adminPassword = ($line -split '=', 2)[1].Trim() }
+}
+if (-not $adminEmail) { $adminEmail = 'admin@localhost' }
+if (-not $adminPassword) {
+    $bytes = New-Object byte[] 15
+    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+    $adminPassword = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+}
+$desired['WEBUI_ADMIN_EMAIL'] = $adminEmail
+$desired['WEBUI_ADMIN_PASSWORD'] = $adminPassword
+$desired['WEBUI_ADMIN_NAME'] = 'Admin'
+
 $written = New-Object System.Collections.Generic.List[string]
 foreach ($line in $existing) {
     if ($line -notmatch '^\s*[A-Za-z_][A-Za-z0-9_]*\s*=') { $written.Add($line); continue }
@@ -115,7 +135,7 @@ Write-Line "open-webui .env updated: $WebuiEnv"
 # --- start -----------------------------------------------------------------
 $env:PYTHONUTF8 = '1'
 $env:PYTHONIOENCODING = 'utf-8'
-Write-Line "starting Open WebUI on http://0.0.0.0:$Port/ (auth disabled, default models: $modelsText)"
+Write-Line "starting Open WebUI on http://0.0.0.0:$Port/ (auth on, default models: $modelsText)"
 Set-Location -LiteralPath $Backend
 & $Python -m uvicorn open_webui.main:app --host '0.0.0.0' --port $Port --workers 1
 exit $LASTEXITCODE
