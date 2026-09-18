@@ -35,12 +35,11 @@ __global__ void tiled_kernel(const int8_t* __restrict__ q, const int8_t* __restr
     auto tBrK = thr.partition_fragment_B(tK);
     auto acc32 = partition_fragment_C(mma8, Shape<Int<TM>, Int<TN>>{});
     clear(acc32);
-    #pragma unroll
-    for (int kb = 0; kb < TK / 32; ++kb) {
-        copy(tAsQ(_, _, kb), tArQ(_, _, kb));
-        copy(tBsK(_, _, kb), tBrK(_, _, kb));
-        gemm(mma8, tArQ(_, _, kb), tBrK(_, _, kb), acc32);
-    }
+    // Вариант: не резать по k вручную, а отдать фрагменты целиком —
+    // cute::gemm сам обходит MMA_K (и MMA_N) внутри tiled MMA.
+    copy(tAsQ, tArQ);
+    copy(tBsK, tBrK);
+    gemm(mma8, tArQ, tBrK, acc32);
     auto gC = make_tensor(make_gmem_ptr(out), Layout<Shape<Int<TM>, Int<N>>, Stride<Int<TN>, Int<1>>>{});
     auto accf = make_tensor<float>(acc32.layout());
     for (int i = 0; i < size(acc32); ++i) accf(i) = static_cast<float>(acc32(i));
