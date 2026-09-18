@@ -377,6 +377,30 @@ impl BatchedEngine {
         });
         *engine.dispatch_handle.lock().expect("dispatch lock") = Some(handle);
 
+        // Ждём фактической загрузки весов, прежде чем отдать движок наверх.
+        //
+        // Адаптер грузится в dispatch-потоке, и до этой правки `load()` возвращал
+        // управление сразу: сервер биндил порт и печатал «готов принимать
+        // запросы», когда весов ещё не было. Первый пользовательский запрос
+        // получал `model still loading` либо платил за загрузку целиком —
+        // замер 2026-09-18 на CTX=262144 дал TTFT 5.7–6.9 с на промпте в
+        // 53 токена против 0.16 с у llama.cpp, который грузится синхронно.
+        // Ожидание внутри `load()` делает старт честным: к моменту bind порт
+        // открывается уже на готовом движке. Ошибка загрузки приходит тем же
+        // путём, что и раньше (load_error), и превращается в ошибку старта.
+        for _ in 0..1200 {
+            if engine.ready.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+            if let Some(e) = engine.load_error() {
+                anyhow::bail!("model load failed: {e}");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        if !engine.ready.load(std::sync::atomic::Ordering::Relaxed) {
+            anyhow::bail!("model load timed out after 300s");
+        }
+
         Ok(engine)
     }
 }
