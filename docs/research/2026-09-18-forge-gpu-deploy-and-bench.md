@@ -1,7 +1,7 @@
 # Развёртывание на forge-gpu и сравнение yforge ↔ llama.cpp
 
 **Дата:** 2026-09-18
-**Стенд:** `forge-gpu` (hostname `lilah`, 161.104.59.62), Ubuntu 24.04.3, kernel 6.8,
+**Стенд:** `forge-gpu` (hostname `lilah`), Ubuntu 24.04.3, kernel 6.8,
 RTX 4090 48 ГБ (драйвер 580.65.06, CUDA 13.0), AMD EPYC 9554, 12 потоков, 62 ГБ RAM.
 **Модель:** `Qwen3.8-27B-Q8_0.gguf` (26 402 MiB), нативный ctx 262 144.
 
@@ -15,9 +15,9 @@ RTX 4090 48 ГБ (драйвер 580.65.06, CUDA 13.0), AMD EPYC 9554, 12 пот
 | Инференс-сервис | `yforge.service` | `active`, `enabled` |
 | Web-чат | Open WebUI `0.11.3` (`open-webui.service`) | `active`, `enabled` |
 
-API: `http://161.104.59.62:18099/v1` · UI: `http://161.104.59.62:8080`
+API: порт `18099` (`/v1`) · UI: порт `8080`
 Конфиг сервиса: `/root/yforge.env`. Конфиг UI: `/root/open-webui/.env`
-(логин `admin@localhost`, auth включён, регистрация закрыта).
+(auth включён, регистрация закрыта).
 Сквозной путь Open WebUI → yforge проверен: список моделей `qwen3.8-27b`, чат отвечает.
 
 ### Грабли: `CONTEXT_LIMIT`, а не `CTX`
