@@ -476,6 +476,22 @@ feature flag for CPU-only.
 
 ---
 
+## Лицензия
+
+Код распространяется по двойной лицензии на выбор: [MIT](LICENSE-MIT) или
+[Apache-2.0](LICENSE-APACHE) (`MIT OR Apache-2.0`). Форк candle, от которого зависит сервер, живёт в
+[yttri-forge](https://github.com/askidmobile/yttri-forge) на тех же условиях.
+
+Если явно не указано иное, любой вклад, намеренно отправленный для включения
+в проект, распространяется на условиях той же двойной лицензии без
+дополнительных условий.
+
+Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE)
+at your option. Unless you explicitly state otherwise, any contribution
+intentionally submitted for inclusion in the work by you, as defined in the
+Apache-2.0 license, shall be dual licensed as above, without any additional
+terms or conditions.
+
 <a id="donate"></a>
 
 ## Поддержать проект

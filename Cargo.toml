@@ -3,6 +3,7 @@ name = "qwen36-server"
 version = "0.1.0"
 edition = "2021"
 description = "Yttri Forge — сервер локального инференса GGUF (Qwen 3.5/3.6/3.8, Ornith)"
+license = "MIT OR Apache-2.0"
 
 # Имя исполняемого файла: yforge(.exe). Крейт остаётся qwen36-server, чтобы не
 # ломать `use qwen36_server::...` в тестах и внешних потребителях библиотеки.
