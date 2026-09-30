@@ -17,7 +17,7 @@ use futures::future::BoxFuture;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, Notify};
 
-use crate::engine::{CancelFlag, GenParams, StreamEvent};
+use crate::engine::{CancelFlag, ChatMessage, ContentBlock, GenParams, InferenceRequest, MediaSource, StreamEvent};
 use crate::engine_batched::{BatchConfig, BatchedEngine, RawRequest};
 use crate::sidecar_protocol::{Event, GenerateReq, Request, PROTOCOL_VERSION};
 
@@ -67,6 +67,8 @@ const PROFILE: &[(&str, &str)] = &[
 #[async_trait::async_trait]
 pub trait RawEngine: Send + Sync {
     async fn generate_raw(&self, req: RawRequest) -> Result<mpsc::Receiver<StreamEvent>>;
+    /// Чат-путь движка (шаблон модели, медиа) — для `describe_image`.
+    async fn generate_chat(&self, req: InferenceRequest) -> Result<mpsc::Receiver<StreamEvent>>;
     /// Рабочие шаги планировщика: растут — движок жив.
     fn steps(&self) -> u64;
     /// Запросы в слотах и в очереди.
@@ -77,6 +79,9 @@ pub trait RawEngine: Send + Sync {
 impl RawEngine for BatchedEngine {
     async fn generate_raw(&self, req: RawRequest) -> Result<mpsc::Receiver<StreamEvent>> {
         BatchedEngine::generate_raw(self, req).await
+    }
+    async fn generate_chat(&self, req: InferenceRequest) -> Result<mpsc::Receiver<StreamEvent>> {
+        crate::engine::Engine::generate(self, req).await
     }
     fn steps(&self) -> u64 {
         BatchedEngine::steps(self)
@@ -90,6 +95,8 @@ pub struct LoadSpec {
     pub model_path: String,
     pub slots: usize,
     pub ctx: usize,
+    /// `mmproj` для режима `vlm`; `None` — только текст.
+    pub vision: Option<std::path::PathBuf>,
 }
 
 pub struct Loaded {
@@ -97,6 +104,7 @@ pub struct Loaded {
     pub slots: usize,
     pub ctx: usize,
     pub vram: Vram,
+    pub vision: bool,
 }
 
 pub type Loader = Arc<dyn Fn(LoadSpec) -> BoxFuture<'static, Result<Loaded>> + Send + Sync>;
@@ -187,14 +195,68 @@ async fn load_batched(spec: LoadSpec) -> Result<Loaded> {
         kv_budget_mib,
         kv_per_tok_mib,
         prefix_cache_mib: 2048,
+        // У Yttri на диске обычный mmproj F16 — он и есть эталон Q8-артефакта.
+        vision_reference: true,
     };
     let media = Arc::new(crate::media::MediaService::new(Default::default())?);
-    let engine = BatchedEngine::load(cfg, media, None, None).await?;
+    let vision = spec.vision.is_some();
+    let engine = BatchedEngine::load(cfg, media, spec.vision, None).await?;
     Ok(Loaded {
         engine,
         slots,
         ctx,
         vram,
+        vision,
+    })
+}
+
+/// Vision-артефакт рядом с моделью: Yttri кладёт `mmproj-*.gguf` в её каталог.
+fn find_mmproj(model_path: &str) -> Option<std::path::PathBuf> {
+    let dir = std::path::Path::new(model_path).parent()?;
+    std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).find(|p| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("mmproj") && n.ends_with(".gguf"))
+    })
+}
+
+/// Картинка с диска + вопрос → чат-запрос. Жадно и без штрафов, как у MLX.
+fn image_request(
+    path: &str,
+    prompt: String,
+    max_tokens: usize,
+    cancel: CancelFlag,
+) -> Result<InferenceRequest> {
+    use base64::Engine as _;
+    let bytes = std::fs::read(path).map_err(|e| anyhow::anyhow!("read image {path}: {e}"))?;
+    Ok(InferenceRequest {
+        messages: vec![ChatMessage {
+            role: "user".into(),
+            content: vec![
+                ContentBlock::Media {
+                    kind: crate::media::MediaKind::Image,
+                    // Тип картинки движок определяет сам по сигнатуре.
+                    source: MediaSource::DataUrl {
+                        declared_mime: "image/*".into(),
+                        base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                    },
+                },
+                ContentBlock::Text { text: prompt },
+            ],
+            ..Default::default()
+        }],
+        params: GenParams {
+            temperature: 0.0,
+            presence_penalty: 0.0,
+            repetition_penalty: 1.0,
+            max_tokens,
+            thinking: false,
+            ..Default::default()
+        },
+        owner: crate::media::OwnerDigest::from_key("yttri-sidecar"),
+        cancel,
+        tools: None,
+        reasoning_effort: None,
     })
 }
 
@@ -261,6 +323,7 @@ where
         match request {
             Request::Load {
                 model_path,
+                mode,
                 batch_slots,
                 max_seq,
             } => {
@@ -272,7 +335,19 @@ where
                         });
                         continue;
                     }
+                    let vision = match (mode.as_str(), find_mmproj(&model_path)) {
+                        ("vlm", None) => {
+                            let _ = tx.send(Event::Error {
+                                message: "load: mode vlm, but no mmproj-*.gguf next to the model".into(),
+                                req_id: 0,
+                            });
+                            continue;
+                        }
+                        ("vlm", found) => found,
+                        _ => None,
+                    };
                     let spec = LoadSpec {
+                        vision,
                         model_path,
                         slots: match batch_slots as usize {
                             0 => DEFAULT_SLOTS,
@@ -319,7 +394,7 @@ where
                     batch_active: active as u32,
                     active_memory_mb: vram,
                     supports_progress: true,
-                    vision: false,
+                    vision: loaded.as_ref().is_some_and(|l| l.vision),
                 });
             }
             Request::Generate(req) => {
@@ -344,6 +419,39 @@ where
                     let id = req.req_id;
                     forward(l, req, cancel, wake, &tx).await;
                     running.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+                });
+            }
+            Request::DescribeImage {
+                req_id,
+                image_path,
+                prompt,
+                max_tokens,
+            } => {
+                let Some(l) = loaded.clone().filter(|l| l.vision) else {
+                    let _ = tx.send(Event::Error {
+                        message: "vision is not loaded (load with mode=vlm)".into(),
+                        req_id,
+                    });
+                    continue;
+                };
+                let run = Running {
+                    cancel: CancelFlag::default(),
+                    wake: Arc::new(Notify::new()),
+                };
+                let (cancel, wake) = (run.cancel.clone(), run.wake.clone());
+                running
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(req_id, run);
+                let (tx, running) = (tx.clone(), running.clone());
+                tokio::spawn(async move {
+                    let started = Instant::now();
+                    let rx = match image_request(&image_path, prompt, max_tokens, cancel.clone()) {
+                        Ok(req) => l.engine.generate_chat(req).await,
+                        Err(e) => Err(e),
+                    };
+                    pump(&l, req_id, started, rx, cancel, wake, &tx).await;
+                    running.lock().unwrap_or_else(|e| e.into_inner()).remove(&req_id);
                 });
             }
             Request::Cancel { req_id } => {
@@ -381,7 +489,7 @@ where
     Ok(())
 }
 
-/// Один запрос: движок → `chunk`*/`progress`* → `done` или `error`.
+/// Запрос `generate`: сырой промпт в движок, дальше — [`pump`].
 async fn forward(
     l: Arc<Loaded>,
     req: GenerateReq,
@@ -416,7 +524,21 @@ async fn forward(
         max_prompt_tokens: req.max_prompt_tokens,
         cancel: cancel.clone(),
     };
-    let mut rx = match l.engine.generate_raw(raw).await {
+    let rx = l.engine.generate_raw(raw).await;
+    pump(&l, id, started, rx, cancel, wake, tx).await;
+}
+
+/// Поток движка → `chunk`*/`progress`* → `done` или `error`.
+async fn pump(
+    l: &Loaded,
+    id: u64,
+    started: Instant,
+    rx: Result<mpsc::Receiver<StreamEvent>>,
+    cancel: CancelFlag,
+    wake: Arc<Notify>,
+    tx: &mpsc::UnboundedSender<Event>,
+) {
+    let mut rx = match rx {
         Ok(rx) => rx,
         Err(e) => {
             let _ = tx.send(Event::Error {
@@ -579,6 +701,27 @@ mod tests {
             });
             Ok(rx)
         }
+        async fn generate_chat(&self, req: InferenceRequest) -> Result<mpsc::Receiver<StreamEvent>> {
+            let (tx, rx) = mpsc::channel(4);
+            let has_image = req.messages[0]
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Media { .. }));
+            let _ = tx.try_send(StreamEvent::Delta {
+                text: if has_image { "a cat".into() } else { "no image".into() },
+                logprobs: None,
+            });
+            let _ = tx.try_send(StreamEvent::Done {
+                finish_reason: "stop".into(),
+                usage: GenerationUsage {
+                    prompt_tokens: 300,
+                    completion_tokens: 2,
+                    ..Default::default()
+                },
+                ended_in_thinking: false,
+            });
+            Ok(rx)
+        }
         fn steps(&self) -> u64 {
             if self.moving.load(Ordering::Relaxed) {
                 self.steps.fetch_add(1, Ordering::Relaxed) + 1
@@ -611,6 +754,7 @@ mod tests {
                         slots: spec.slots,
                         ctx: spec.ctx,
                         vram: Vram::default(),
+                        vision: spec.vision.is_some(),
                     })
                 })
             });
@@ -748,6 +892,48 @@ mod tests {
         assert_eq!(done["stop_reason"], "cancelled");
         let seen = h.mock.seen.lock().unwrap();
         assert!(seen[0].cancel.is_cancelled(), "движок получил отмену");
+    }
+
+    /// Vision: `mode=vlm` находит `mmproj-*.gguf` рядом с моделью; подпись идёт
+    /// чат-путём с картинкой. В текстовом режиме `describe_image` — ошибка.
+    #[tokio::test]
+    async fn describe_image_needs_vlm_mode_and_mmproj() {
+        let dir = std::env::temp_dir().join(format!("yforge-sidecar-vlm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let model = dir.join("model.gguf");
+        let image = dir.join("cat.png");
+        std::fs::write(&model, b"gguf").unwrap();
+        std::fs::write(&image, b"\x89PNG\r\n\x1a\n").unwrap();
+        let model = model.to_string_lossy().into_owned();
+        let image = image.to_string_lossy().into_owned();
+
+        // Без mmproj режим vlm не поднимается, процесс жив.
+        let mut h = Harness::start();
+        h.send(json!({"op": "load", "model_path": model, "mode": "vlm"})).await;
+        let err = h.next().await;
+        assert_eq!(err["event"], "error");
+        assert!(err["message"].as_str().unwrap().contains("mmproj"), "{err}");
+        // Текстовый режим: подписи нет.
+        h.send(json!({"op": "load", "model_path": model, "mode": "text"})).await;
+        assert_eq!(h.next().await["event"], "loaded");
+        h.send(json!({"op": "describe_image", "req_id": 3, "image_path": image, "prompt": "Опиши", "max_tokens": 64})).await;
+        let err = h.next().await;
+        assert_eq!((err["event"].as_str(), err["req_id"].as_u64()), (Some("error"), Some(3)));
+
+        std::fs::write(dir.join("mmproj-Qwen3.5-4B-F16.gguf"), b"gguf").unwrap();
+        let mut h = Harness::start();
+        h.send(json!({"op": "load", "model_path": model, "mode": "vlm"})).await;
+        assert_eq!(h.next().await["event"], "loaded");
+        h.send(json!({"op": "health"})).await;
+        assert_eq!(h.next().await["vision"], true);
+        h.send(json!({"op": "describe_image", "req_id": 4, "image_path": image, "prompt": "Опиши", "max_tokens": 64})).await;
+        let chunk = h.next().await;
+        assert_eq!(chunk["event"], "chunk");
+        let done = h.next().await;
+        assert_eq!(done["event"], "done");
+        assert_eq!(done["text"], "a cat");
+        assert_eq!(done["prompt_tokens"], 300);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test(start_paused = true)]

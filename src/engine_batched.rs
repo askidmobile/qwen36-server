@@ -55,6 +55,10 @@ pub struct BatchConfig {
     pub kv_per_tok_mib: f64,
     /// Бюджет prefix cache (MiB, snapshot'ы state). 0 = выключен.
     pub prefix_cache_mib: usize,
+    /// Vision грузить эталонным путём (обычный mmproj F16/BF16 llama.cpp), а не
+    /// строгим прод-профилем Q8. Нужно сайдкару Yttri: у него на диске mmproj
+    /// F16 — численно это и есть эталон, с которым сверяли Q8-артефакт.
+    pub vision_reference: bool,
 }
 
 impl BatchConfig {
@@ -75,6 +79,7 @@ impl BatchConfig {
             kv_budget_mib: 0.0,
             kv_per_tok_mib: 0.0,
             prefix_cache_mib: num("PREFIX_CACHE_MIB", 0),
+            vision_reference: false,
         }
     }
 }
@@ -335,7 +340,12 @@ impl BatchedEngine {
                 }
             };
             if let Some(path) = vision_path2 {
-                if let Err(e) = adapter.load_vision(&path) {
+                let loaded = if cfg2.vision_reference {
+                    adapter.load_vision_reference(&path)
+                } else {
+                    adapter.load_vision(&path)
+                };
+                if let Err(e) = loaded {
                     eprintln!("[dispatch] vision load failed: {e:#}");
                 }
             }
@@ -2025,6 +2035,7 @@ mod tests {
             kv_budget_mib: 0.0,
             kv_per_tok_mib: 0.0,
             prefix_cache_mib,
+            vision_reference: false,
         }
     }
 
@@ -2047,6 +2058,7 @@ mod tests {
             kv_budget_mib: 0.0,
             kv_per_tok_mib: 0.0,
             prefix_cache_mib: 0,
+            vision_reference: false,
         };
         let media = Arc::new(crate::media::MediaService::new(Default::default()).unwrap());
         let engine = BatchedEngine::load(cfg, media, None, None).await.unwrap();

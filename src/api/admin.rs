@@ -775,6 +775,7 @@ pub async fn do_switch(
                 kv_budget_mib,
                 kv_per_tok_mib,
                 prefix_cache_mib: 0,
+                vision_reference: false,
             },
             state.media.clone(),
             None,

@@ -148,6 +148,7 @@ async fn main() -> Result<()> {
             kv_budget_mib: cfg.kv_budget_mib,
             kv_per_tok_mib: cfg.kv_per_tok_mib,
             prefix_cache_mib: cfg.prefix_cache_mib,
+            vision_reference: false,
         };
         let vision_path = profile.as_ref().and_then(|profile| match &profile.vision {
             qwen36_server::profile::ComponentArtifact::Available { path } => Some(path.clone()),

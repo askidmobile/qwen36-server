@@ -18,12 +18,15 @@ fn one() -> f32 {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
-    /// Загрузка модели. `max_seq` — окно контекста, `batch_slots` — слоты.
-    /// Остальные поля MLX (`cache_*`, `kv_bits`, `mode`) здесь не нужны:
-    /// KV всегда int8, префикс-кеш и память планирует движок.
+    /// Загрузка модели. `max_seq` — окно контекста, `batch_slots` — слоты,
+    /// `mode` = `vlm` — ещё и vision (`mmproj-*.gguf` рядом с моделью).
+    /// Остальные поля MLX (`cache_*`, `kv_bits`) здесь не нужны: KV всегда
+    /// int8, префикс-кеш и память планирует движок.
     Load {
         #[serde(default)]
         model_path: String,
+        #[serde(default)]
+        mode: String,
         #[serde(default)]
         batch_slots: u32,
         #[serde(default)]
@@ -33,6 +36,14 @@ pub enum Request {
     Generate(GenerateReq),
     Cancel {
         req_id: u64,
+    },
+    /// Подпись к картинке по пути к файлу — жадно, как у MLX.
+    DescribeImage {
+        #[serde(default)]
+        req_id: u64,
+        image_path: String,
+        prompt: String,
+        max_tokens: usize,
     },
     Trim,
     Unload,
