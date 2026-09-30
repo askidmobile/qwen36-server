@@ -38,6 +38,10 @@ fn log_section(title: &str) {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    // Сайдкар Yttri: ни env-файла, ни HTTP — только stdio (T-682 Yttri).
+    if cli.sidecar {
+        return qwen36_server::sidecar::run().await;
+    }
     // Флаги — в окружение ДО чтения env-файла: файл пишет только незанятые
     // имена, поэтому приоритет «флаг > окружение > файл» получается сам.
     cli.apply_to_env();

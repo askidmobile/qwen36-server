@@ -235,6 +235,7 @@ fn to_gen_params(
         logprobs: req
             .logprobs
             .then(|| req.top_logprobs.unwrap_or(0).max(0) as usize),
+        ..GenParams::default()
     }
 }
 

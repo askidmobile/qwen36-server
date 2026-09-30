@@ -10,7 +10,7 @@
 //! - TODO-F6 (форк): `BatchScheduler::slots_mut()` — сбор Finished.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -171,6 +171,13 @@ struct SlotBinding {
     stop_hit: bool,
     /// Генерация зациклилась: один и тот же кусок повторяется без конца.
     looped: bool,
+    /// Исчерпан бюджет ответа или рассуждений при `max_thinking_tokens > 0`.
+    budget_hit: bool,
+    /// Токены внутри `<think>…</think>` и вне его (только при бюджете рассуждений).
+    thinking_tokens: usize,
+    content_tokens: usize,
+    /// Токены промпта, пришедшие из prefix cache (0 — промах).
+    cached_tokens: usize,
     cancelled: bool,
     last_progress: Instant,
     usage: MediaUsage,
@@ -197,6 +204,10 @@ pub struct BatchedEngine {
     info: ModelInfo,
     max_queue: usize,
     in_flight: Arc<AtomicUsize>,
+    /// Шаги планировщика с работой (чанк префила или декод). Сайдкар Yttri
+    /// шлёт `progress` только пока счётчик растёт: иначе зависший движок
+    /// выглядел бы для клиента живым, и тот не перезапустил бы процесс.
+    steps: Arc<AtomicU64>,
     tokenizer: Arc<Mutex<tokenizers::Tokenizer>>,
     media: Arc<crate::media::MediaService>,
     vision_path: Option<std::path::PathBuf>,
@@ -281,6 +292,7 @@ impl BatchedEngine {
             info,
             max_queue: cfg.max_queue,
             in_flight: Arc::new(AtomicUsize::new(0)),
+            steps: Arc::new(AtomicU64::new(0)),
             tokenizer: Arc::new(Mutex::new(tokenizer::load_from_gguf_path(
                 std::path::Path::new(&cfg.model_path),
             )?)),
@@ -299,6 +311,7 @@ impl BatchedEngine {
 
         let tokenizer = engine.tokenizer.clone();
         let in_flight = Arc::clone(&engine.in_flight);
+        let steps = Arc::clone(&engine.steps);
         let cfg2 = Arc::clone(&cfg);
         let shutdown2 = Arc::clone(&engine.shutdown);
         let vision_path2 = engine.vision_path.clone();
@@ -369,6 +382,7 @@ impl BatchedEngine {
                 rx_ingest,
                 cfg2,
                 in_flight,
+                steps,
                 tokenizer,
                 shutdown2,
                 cache,
@@ -402,6 +416,126 @@ impl BatchedEngine {
         }
 
         Ok(engine)
+    }
+}
+
+/// Запрос с готовым промптом — вход сайдкара Yttri (`yforge --sidecar`).
+///
+/// Шаблон чата и разбор вызовов делает клиент: он строит промпт побайтно по
+/// официальному шаблону модели и сам разбирает `<tool_call>`. Здесь промпт идёт
+/// в планировщик как есть — те же слоты, префикс-кеш и сэмплер, что у HTTP.
+pub struct RawRequest {
+    pub prompt: String,
+    /// Токены промпта от клиента; `None` — режет свой токенайзер.
+    pub prompt_ids: Option<Vec<u32>>,
+    /// Граница кешируемого префикса в токенах; `None` — по `prefix_text`,
+    /// иначе последний `<|im_start|>`.
+    pub prefix_tokens: Option<usize>,
+    /// Стабильное начало промпта текстом (протокол v4: клиент без своего
+    /// токенайзера). Граница берётся, только если его токены — точное начало
+    /// токенов промпта: разрез посреди слова дал бы запись, которая не
+    /// совпадёт ни с одним следующим промптом.
+    pub prefix_text: String,
+    pub params: GenParams,
+    /// Продуктовый потолок промпта клиента; 0 — только окно контекста.
+    pub max_prompt_tokens: usize,
+    pub cancel: crate::engine_types::CancelFlag,
+}
+
+impl BatchedEngine {
+    /// Счётчик рабочих шагов планировщика (см. поле `steps`).
+    pub fn steps(&self) -> u64 {
+        self.steps.load(Ordering::Relaxed)
+    }
+
+    /// Запросы в работе: в слотах и в очереди.
+    pub fn in_flight(&self) -> usize {
+        self.in_flight.load(Ordering::Relaxed)
+    }
+
+    pub async fn generate_raw(&self, req: RawRequest) -> anyhow::Result<mpsc::Receiver<StreamEvent>> {
+        if !self.ready.load(Ordering::Relaxed) {
+            if let Some(err) = self.load_error() {
+                bail!("model load failed: {err}");
+            }
+            bail!("model still loading");
+        }
+        if self.in_flight.load(Ordering::Relaxed) >= self.max_queue + MAX_SLOTS {
+            bail!("queue full (MAX_QUEUE)");
+        }
+        let RawRequest {
+            prompt,
+            prompt_ids,
+            prefix_tokens,
+            prefix_text,
+            mut params,
+            max_prompt_tokens,
+            cancel,
+        } = req;
+        let (ids, im_start, text_prefix) = {
+            let tok = self.tokenizer.lock().unwrap_or_else(|e| e.into_inner());
+            let encode = |text: &str| {
+                tok.encode(text, false)
+                    .map(|e| e.get_ids().to_vec())
+                    .map_err(|e| anyhow!("encode prompt: {e}"))
+            };
+            let ids = match prompt_ids {
+                Some(ids) if !ids.is_empty() => ids,
+                _ => encode(&prompt)?,
+            };
+            let text_prefix = if prefix_tokens.is_none()
+                && !prefix_text.is_empty()
+                && prompt.starts_with(&prefix_text)
+            {
+                encode(&prefix_text)
+                    .ok()
+                    .filter(|p| ids.starts_with(p))
+                    .map(|p| p.len())
+            } else {
+                None
+            };
+            (ids, tok.token_to_id("<|im_start|>"), text_prefix)
+        };
+        let n = ids.len();
+        if max_prompt_tokens > 0 && n > max_prompt_tokens {
+            return Err(crate::engine::ContextOverflow {
+                prompt_tokens: n,
+                limit: max_prompt_tokens,
+            }
+            .into());
+        }
+        params.clamp_to_context(n, self.info.context_length)?;
+        // Планировщик получает ответ + рассуждения — сумма тоже в окне.
+        params.max_thinking_tokens = params
+            .max_thinking_tokens
+            .min(self.info.context_length - n - params.max_tokens);
+        // Шаблон с enable_thinking оставляет в хвосте открытый `<think>`; иначе
+        // (пустой блок или режим «авто») фазу определяет сгенерированный токен.
+        params.thinking = prompt.trim_end().ends_with("<think>");
+        let first_chunk_cut = prefix_tokens
+            .or(text_prefix)
+            .filter(|&p| p > 0 && p < n)
+            .or_else(|| {
+                im_start
+                    .and_then(|id| ids.iter().rposition(|t| *t == id))
+                    .filter(|p| *p > 0 && *p < n)
+            });
+        let (out_tx, out_rx) = mpsc::channel(SLOT_CHAN_CAP);
+        self.in_flight.fetch_add(1, Ordering::Relaxed);
+        self.tx_ingest
+            .send(IngestMsg::Admit(AdmitReq {
+                prompt: ids,
+                first_chunk_cut,
+                params,
+                truncated: false,
+                prompt_tokens: n,
+                out: out_tx,
+                cancel,
+                media: None,
+            }))
+            .await
+            .map_err(|_| anyhow!("engine dispatch loop dead"))?;
+        Ok(out_rx)
     }
 }
 
@@ -679,6 +813,7 @@ fn dispatch_loop(
     mut rx: mpsc::Receiver<IngestMsg>,
     cfg: Arc<BatchConfig>,
     in_flight: Arc<AtomicUsize>,
+    steps: Arc<AtomicU64>,
     tokenizer: Arc<Mutex<tokenizers::Tokenizer>>,
     shutdown: Arc<AtomicBool>,
     mut cache: Option<PrefixCache>,
@@ -920,6 +1055,7 @@ fn dispatch_loop(
         // всегда возвращает did_work = false).
         if did_work {
             step_errors = 0;
+            steps.fetch_add(1, Ordering::Relaxed);
         }
 
         // Prefix cache: снять снимок после завершения префила. В этот момент
@@ -1147,8 +1283,24 @@ fn drain_after_step(
             } else if t == THINK_OPEN_ID {
                 b.in_reasoning = true;
             }
+            // Как у сайдкара MLX: `<think>` уже рассуждение, `</think>` — ответ.
+            if b.in_reasoning {
+                b.thinking_tokens += 1;
+            } else {
+                b.content_tokens += 1;
+            }
         }
         b.phase_checked = generated.len();
+        // Бюджеты сайдкара Yttri: ответ считает только свои токены, а
+        // рассуждения дольше бюджета обрываются (дальше — петля, не мысль).
+        if b.params.max_thinking_tokens > 0
+            && !b.stop_hit
+            && (b.content_tokens >= b.params.max_tokens
+                || b.in_reasoning && b.thinking_tokens >= b.params.max_thinking_tokens)
+        {
+            b.budget_hit = true;
+            b.stop_hit = true;
+        }
         // В logprobs по контракту идут только токены ответа. Сами
         // `<think>` и `</think>` туда не попадают. Записи выравниваем по
         // хвосту generated: если очередь разошлась с историей (откат
@@ -1439,7 +1591,9 @@ fn seed_slot(
     cache: &mut Option<PrefixCache>,
 ) {
     let prompt_tokens = req.prompt_tokens;
-    let max_new = req.params.max_tokens;
+    // С бюджетом рассуждений они не тратят `max_tokens`: предел планировщика —
+    // сумма, точный счёт ответа и рассуждений ведёт drain_after_step.
+    let max_new = req.params.max_tokens + req.params.max_thinking_tokens;
     let seed = req.params.seed.unwrap_or_else(|| {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1494,11 +1648,13 @@ fn seed_slot(
             None
         }
     });
+    let mut cached_tokens = 0;
     match hit {
         Some(hit) if full_logits.is_some() => {
             let logits = full_logits.unwrap_or_default();
             match sched.submit_fully_primed(req.prompt.clone(), max_new, logits) {
                 Some(sidx) => {
+                    cached_tokens = hit.prefix_len;
                     sched.model_mut().inject_slot_snapshot(sidx, hit.snap);
                     eprintln!(
                         "[pcache] slot={sidx} fully primed: {} токенов из снимка, prefill пропущен",
@@ -1512,6 +1668,7 @@ fn seed_slot(
         }
         Some(hit) => match sched.submit_primed(req.prompt.clone(), max_new, hit.prefix_len) {
             Some(sidx) => {
+                cached_tokens = hit.prefix_len;
                 sched.model_mut().inject_slot_snapshot(sidx, hit.snap);
                 eprintln!(
                     "[pcache] slot={sidx} primed: {} из {} токенов из снимка, досчитать {}",
@@ -1566,6 +1723,10 @@ fn seed_slot(
         stable_len: 0,
         stop_hit: false,
         looped: false,
+        budget_hit: false,
+        thinking_tokens: 0,
+        content_tokens: 0,
+        cached_tokens,
         cancelled: false,
         last_progress: Instant::now(),
         usage,
@@ -1609,14 +1770,14 @@ fn finish_slot(
         }
     }
     if !b.cancelled {
-        let finish_reason = if b.looped {
-            // Не "stop": клиент должен видеть, что ответ оборван сторожем,
-            // а не завершён моделью. Иначе агент примет мусорный хвост за
-            // законченную мысль.
+        let finish_reason = if b.looped || b.budget_hit {
+            // Не "stop": клиент должен видеть, что ответ оборван сторожем
+            // или бюджетом, а не завершён моделью. Иначе агент примет
+            // мусорный хвост за законченную мысль.
             "length"
         } else if b.stop_hit {
             "stop"
-        } else if b.completion_tokens >= b.params.max_tokens {
+        } else if b.completion_tokens >= b.params.max_tokens + b.params.max_thinking_tokens {
             "length"
         } else {
             "stop" // EOS
@@ -1632,6 +1793,7 @@ fn finish_slot(
             usage: GenerationUsage {
                 prompt_tokens: b.prompt_tokens,
                 completion_tokens: b.completion_tokens,
+                cached_tokens: b.cached_tokens,
                 truncated,
                 media: b.usage.clone(),
                 mtp: sched
@@ -1734,12 +1896,34 @@ impl ForkSampler for IndexedSampler {
                 // Множество для penalties — инкрементально: generated только
                 // растёт (после отката спекуляции состояние восстанавливается
                 // из checkpoint вместе с seen); укорочение — пересборка.
-                if generated.len() < st.seen_len {
+                if st.params.penalty_window > 0 {
+                    // Окно штрафов (сайдкар Yttri, как mlx-lm): только хвост.
+                    let from = generated.len().saturating_sub(st.params.penalty_window);
                     st.seen.clear();
-                    st.seen_len = 0;
+                    st.seen.extend(generated[from..].iter().copied());
+                } else {
+                    if generated.len() < st.seen_len {
+                        st.seen.clear();
+                        st.seen_len = 0;
+                    }
+                    st.seen.extend(generated[st.seen_len..].iter().copied());
                 }
-                st.seen.extend(generated[st.seen_len..].iter().copied());
                 st.seen_len = generated.len();
+                // Запрещённые токены — после штрафов, до отбора кандидатов.
+                // Копия словаря только при непустом списке.
+                let suppressed: Vec<f32>;
+                let logits = if st.params.suppress_tokens.is_empty() {
+                    logits
+                } else {
+                    let mut l = logits.to_vec();
+                    for &t in &st.params.suppress_tokens {
+                        if let Some(v) = l.get_mut(t as usize) {
+                            *v = f32::NEG_INFINITY;
+                        }
+                    }
+                    suppressed = l;
+                    &suppressed
+                };
                 let t0 = Instant::now();
                 let (tok, lp) = sampler::sample_with_seen_logprobs(
                     logits,
@@ -1842,6 +2026,98 @@ mod tests {
             kv_per_tok_mib: 0.0,
             prefix_cache_mib,
         }
+    }
+
+    /// Сырой вход сайдкара Yttri и чат-путь HTTP на одном промпте дают одну и
+    /// ту же жадную генерацию: промпт — рендер официального шаблона модели, как
+    /// его побайтно строит Yttri. GGUF — `QWEN35_GGUF`; нет — SKIP.
+    #[tokio::test]
+    #[ignore = "грузит Qwen3.5-4B на GPU"]
+    async fn raw_prompt_matches_chat_path_greedy() {
+        let Ok(gguf) = std::env::var("QWEN35_GGUF") else {
+            eprintln!("SKIP: QWEN35_GGUF не задан");
+            return;
+        };
+        let cfg = BatchConfig {
+            model_path: gguf,
+            slots: 1,
+            max_queue: 4,
+            req_timeout: Duration::from_secs(300),
+            context_length: 8192,
+            kv_budget_mib: 0.0,
+            kv_per_tok_mib: 0.0,
+            prefix_cache_mib: 0,
+        };
+        let media = Arc::new(crate::media::MediaService::new(Default::default()).unwrap());
+        let engine = BatchedEngine::load(cfg, media, None, None).await.unwrap();
+        while !engine.ready() {
+            if let Some(err) = engine.load_error() {
+                panic!("load: {err}");
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        let messages = vec![
+            ChatMessage::text("system", "You are Yttri, a personal assistant."),
+            ChatMessage::text("user", "Найди заметки про аренду офиса на Тверской"),
+        ];
+        let tools: serde_json::Value = serde_json::from_str(
+            r#"[{"type": "function", "function": {"name": "search_notes", "description": "Search the user's notes by text", "parameters": {"properties": {"query": {"type": "string"}}, "required": ["query"], "type": "object"}}}]"#,
+        )
+        .unwrap();
+        let params = GenParams {
+            temperature: 0.0,
+            max_tokens: 64,
+            ..Default::default()
+        };
+        async fn collect(mut rx: mpsc::Receiver<StreamEvent>) -> (String, String) {
+            let mut text = String::new();
+            while let Some(event) = rx.recv().await {
+                match event {
+                    StreamEvent::Delta { text: t, .. } => text.push_str(&t),
+                    StreamEvent::Done { finish_reason, .. } => return (text, finish_reason),
+                    StreamEvent::Error(err) => panic!("{err}"),
+                }
+            }
+            panic!("поток закрылся без Done")
+        }
+        let prompt = engine
+            .chat_tpl
+            .as_ref()
+            .expect("шаблон из GGUF")
+            .render(&messages, Some(&tools), params.thinking, None)
+            .unwrap();
+        let raw = collect(
+            engine
+                .generate_raw(RawRequest {
+                    prompt,
+                    prompt_ids: None,
+                    prefix_tokens: None,
+                    prefix_text: String::new(),
+                    params: params.clone(),
+                    max_prompt_tokens: 0,
+                    cancel: Default::default(),
+                })
+                .await
+                .unwrap(),
+        )
+        .await;
+        let chat = collect(
+            engine
+                .generate(InferenceRequest {
+                    messages,
+                    params,
+                    owner: crate::media::OwnerDigest::from_key("test"),
+                    cancel: Default::default(),
+                    tools: Some(tools),
+                    reasoning_effort: None,
+                })
+                .await
+                .unwrap(),
+        )
+        .await;
+        eprintln!("raw: {raw:?}");
+        assert!(raw.0.contains("<tool_call>"), "ожидался вызов инструмента: {raw:?}");
+        assert_eq!(raw, chat);
     }
 
     #[tokio::test]

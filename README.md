@@ -174,6 +174,7 @@ yforge --env prod.env --dry-run
 | `--env FILE` | `ENV_FILE` | `.env` | Env-файл с параметрами |
 | `--studio-url URL` | `STUDIO_URL` | `http://127.0.0.1:8888` | Бэкенд Unsloth Studio для WebUI |
 | `--dry-run` | — | — | Показать конфигурацию и выйти |
+| `--sidecar` | — | — | Режим сайдкара Yttri: протокол v11 по stdin/stdout вместо HTTP, прод-профиль вшит, env-файл и прочие флаги не читаются (`src/sidecar.rs`) |
 
 Полный список: `yforge --help`.
 

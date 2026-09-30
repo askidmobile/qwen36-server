@@ -11,6 +11,8 @@ pub mod media;
 pub mod prefix_cache;
 pub mod profile;
 pub mod sampler;
+pub mod sidecar;
+pub mod sidecar_protocol;
 pub mod vram_plan;
 
 // Result<T, Response> намеренно: Response — готовый early-return для axum

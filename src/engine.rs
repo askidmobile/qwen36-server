@@ -40,6 +40,20 @@ pub struct GenParams {
     /// сырым логитам модели, до штрафов и температуры: docs/plans/logprobs.md.
     #[serde(default)]
     pub logprobs: Option<usize>,
+    /// Запрещённые токены: логиты зануляются после штрафов (как
+    /// `SuppressProcessor` сайдкара MLX у Yttri — там так запрещают открыть
+    /// `<think>` в режиме без рассуждений). HTTP-клиенты поле не шлют.
+    #[serde(default)]
+    pub suppress_tokens: Vec<u32>,
+    /// Отдельный бюджет рассуждений. 0 — прежний счёт: все токены тратят
+    /// `max_tokens`. Иначе `max_tokens` считает только ответ, а рассуждения
+    /// дольше бюджета обрываются `length` (семантика сайдкара MLX у Yttri).
+    #[serde(default)]
+    pub max_thinking_tokens: usize,
+    /// Окно штрафов: последние N токенов генерации. 0 — вся генерация
+    /// (прежнее поведение HTTP). Сайдкар Yttri присылает 20, как mlx-lm.
+    #[serde(default)]
+    pub penalty_window: usize,
 }
 
 impl Default for GenParams {
@@ -56,6 +70,9 @@ impl Default for GenParams {
             seed: None,
             thinking: false,
             logprobs: None,
+            suppress_tokens: Vec::new(),
+            max_thinking_tokens: 0,
+            penalty_window: 0,
         }
     }
 }
@@ -219,6 +236,8 @@ pub struct MtpUsage {
 pub struct GenerationUsage {
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
+    /// Токены промпта из prefix cache: префил их не считал (0 — промах).
+    pub cached_tokens: usize,
     pub truncated: bool,
     pub media: MediaUsage,
     pub mtp: MtpUsage,
