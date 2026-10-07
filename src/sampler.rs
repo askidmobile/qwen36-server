@@ -134,11 +134,23 @@ fn top_k_indices(logits: &[f32], k: usize) -> Vec<u32> {
     if k == 0 {
         return Vec::new();
     }
-    const MIN_PER_THREAD: usize = 16 * 1024;
     let n = logits.len();
-    let nthreads = rayon::current_num_threads()
-        .min((n / MIN_PER_THREAD).max(1))
-        .max(1);
+    // Последовательный проход — ДЕФОЛТ, и это измеренный выбор, а не догадка.
+    // Замер 2026-10-07 на forge-gpu (248 320 логитов, RTX 4090, декод Ornith):
+    // подъём rayon-задачи на каждый токен стоит дороже самого прохода —
+    //   k=1: 153.9 послед. / 138.5 паралл.   k=20: 153.1 / 143.5
+    //   k=64: 153.1 / 143.8                  k=1024: 152.7 / 143.4
+    // то есть ~7% шага декода терялось на координации пула, и это верно на всём
+    // диапазоне k. TOP_K_THREADS=N включает параллельный отбор (для больших
+    // батчей/будущих словарей), 1 или не задано — последовательный.
+    static FORCED: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    let forced: Option<usize> = *FORCED.get_or_init(|| {
+        std::env::var("TOP_K_THREADS").ok().and_then(|v| v.trim().parse::<usize>().ok())
+    });
+    let nthreads = match forced {
+        Some(t) if t > 1 => t.min(n.max(1)).max(1),
+        _ => 1,
+    };
     if nthreads <= 1 {
         return top_k_indices_range(logits, 0, n, k);
     }
