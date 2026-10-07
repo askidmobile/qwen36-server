@@ -4,6 +4,72 @@
 потоков), окно 262144, один слот. Конфигурация обоих движков одинаковая:
 q8-KV, flash-attention, окно 262144. У yforge `PREFILL_CHUNK=4096`, `MOE_MMQ=1`.
 
+## Стенд
+
+| компонент | значение |
+|---|---|
+| GPU | NVIDIA GeForce RTX 4090, 49 140 МиБ (мод. 48 ГБ) |
+| Драйвер / CUDA драйвера | 580.65.06 / 13.0 |
+| Тулчейн сборки | CUDA 12.8 (`/usr/local/cuda-12.8`, `CUDA_COMPUTE_CAP=89`) |
+| CPU | AMD EPYC 9554 64-Core, выделено 12 vCPU |
+| RAM | 62 ГиБ |
+| ОС | Linux (диск 126 ГБ, занят на 98 % — на нём же 36 ГиБ модели) |
+| Модель | `Ornith-1.5-35B-A3B-Q8_0.gguf`, 37 802 149 280 Б (36 ГиБ), окно 262 144, vocab 248 320 |
+| Движок A | yforge: `/root/target/release/yforge`, движок `/root/yttri-forge` (ветка main, поверх `b2087797`), сборка 2026-10-07 16:34 |
+| Движок B | llama.cpp: `version 0.3.0-dev (build 1, commit 0379a19)`, GNU 13.3.0 |
+| Движок C | vLLM 0.28.0 (`/root/vllm-env`), модель FP8 `/root/models/ornith-fp8` (37 ГБ, compressed-tensors) |
+
+## Как воспроизводилось
+
+Один процесс на вариант, движки не работают одновременно. Перед каждым
+запуском GPU дренируется до `nvidia-smi --query-gpu=memory.used ≤ 400 МиБ`.
+
+Флаги движков (окно у всех одинаковое):
+
+- **yforge** — env-файл `/root/yforge.env`: `CTX=CONTEXT_LIMIT=262144`,
+  `SLOTS=1`, `GPU_ONLY=1`, `GPU_LAYERS=999`, `KV_POOL_Q8=1`,
+  `KV_CACHE_TYPE=q8`, `CUDA_GRAPHS=1`, `PGRAPH=on`, `FLASH_ATTN=1`,
+  `PREFIX_CACHE_MIB=0`, `SAMPLING_LOCK=1`, `MOE_EXPERTS=auto`, `MOE_MMQ=1`,
+  `PREFILL_CHUNK=4096`.
+- **llama.cpp** — `llama-server -m Ornith-1.5-35B-Q8_0.gguf -c <CTX> -ngl 999
+  --parallel 1 --api-key x --no-warmup -fa on --cache-type-k q8_0
+  --cache-type-v q8_0`.
+- **vLLM** — `vllm serve /root/models/ornith-fp8 --max-model-len <CTX>
+  --gpu-memory-utilization 0.90 --max-num-seqs 1 --trust-remote-code
+  --served-model-name ornith`.
+
+Харнессы (лежат на сервере в `/root/`, не в репозитории — это стендовые
+скрипты):
+
+| файл | что делает |
+|---|---|
+| `ornith_ab.py` | yforge или llama.cpp: TTFT, префил, декод, dVRAM; сэмплинг greedy |
+| `ornith_ab_fair.py` | то же, но одинаковые поля сэмплинга на обеих сторонах (temp=0.6, top_k=20, top_p=0.95, seed=7) |
+| `ornith_ab_topk.py` | развёртка по `top_k` при фиксированном числе потоков отбора |
+| `vllm_bench.py` | те же метрики для уже поднятого vLLM |
+| `three_way2.sh` | vLLM → yforge → llama.cpp подряд на одном окне |
+| `interleave.sh` | чередование yforge/llama.cpp по кругу (контроль дрейфа) |
+| `start_ttft.py` | «старт процесса → первый токен» для обоих движков |
+| `determinism20.py` | 20 одинаковых запросов в одном процессе (проверка воспроизводимости) |
+| `load_loop.py` | нагрузочный цикл для профилей nsys |
+
+Методика: уникальный промпт на каждый повтор (иначе prompt cache llama.cpp
+даёт фальшивый TTFT), медиана из 2–3 прогонов с пропуском первого, промпты
+фиксированной длины (2656 / 12 578 / 54 460 / 108 928 / 119 998 токенов).
+Профили ядер — `nsys profile --trace=cuda --cuda-graph-trace=node --delay=18
+--duration=40`, нормировка на токен по инварианту «41 слой MoE на токен».
+
+Грабли, которые надо помнить при повторных прогонах:
+
+- `PREFILL_CHUNK=4096` обязателен: на дефолтных 512 префил падает с ~7600 до
+  ~5000 t/s.
+- `CUDA_GRAPHS=1` обязателен: без графов декод падает с ~153 до ~64 t/s.
+- Повторный одинаковый промпт у llama.cpp почти не считает префил — сравнение
+  на нём бессмысленно (наблюдалось 24k t/s против реальных 4.9k).
+- `SAMPLING_LOCK=1` подставляет model-card (temp=0.6, top_k=20) независимо от
+  запроса; для честного сравнения лок снимается, либо используется
+  `ornith_ab_fair.py`.
+
 ## Итоговая таблица (одинаковый сэмплинг на обеих сторонах)
 
 Методика: `ornith_ab_fair.py`, `temperature=0.6`, `top_k=20`, `top_p=0.95`,
