@@ -80,6 +80,33 @@ blocks_per_iter=32 — половина блока из 128 потоков во�
 росла именно потому, что ядро считало не всё. После починки вывод связный, а
 декод 126.4 t/s, то есть **простаивавшие потоки не стоили ничего**.
 
+### Sverka matvec-semeystva s llama.cpp
+
+Oba profila normirovany na token po invariantu 41 sloya (MoE dual 1735 vyзовов
+u nas, topk_moe 8040 u llama.cpp).
+
+| semeystvo | yforge | llama.cpp |
+|---|---|---|
+| `mul_mat_vec_q*` (vse varianty) | 2.39 + 0.18 + 0.13 = **2.70 ms** | 2.29 + 1.12 + 0.54 = **3.95 ms** |
+| MoE-specjadra (`*_moe`) | net | 0.066 + 0.053 = **0.12 ms** |
+| MoE-yadra dvizhka | 1.22 + 0.86 = **2.08 ms** | vhodyat v obshchie `mul_mat_vec_q` |
+| **itogo chtenie vesov** | **4.78 ms** | **4.07 ms** |
+
+Klyuchevoe: u llama.cpp MoE-proektsii idut vnutri obshchikh `mul_mat_vec_q`
+(ih `mul_mat_vec_q_moe` vyzyvaetsya vsego 2.4 raza na token), poetomu razdelit
+MoE i plotnye matritsy po ih profilyu nelzya. Sravnimo tolko semeystvo
+celikom: **4.78 protiv 4.07 ms — my medlennee na 17%**, i eto rovno
+nedostayushchie ~0.7 ms/token, to est ves razryv dekoda.
+
+Otdelno: na chisto plotnykh matritsakh (`mul_mat_vec_q*` bez MoE) my uzhe
+bystree — 2.70 protiv 3.95 ms. Provereno i po kodu: u llama.cpp dlya
+`ncols_dst == 1` v tablice GENERIC stoit `rpb = 1, nwarps = 4`, rovno kak u nas,
+tak chto konfiguraciya zapuska plotnogo matvec u nas ne khuzhe.
+
+Ocenka nashikh skorostey po baitam (1.81 GB vesov na token): 379 GB/s protiv
+444 GB/s u llama.cpp. Razryv ravnomernyy po semeystvu, a ne v odnom yadre,
+poetomu dalneyshaya rabota — eto plotnyy matvec i MoE-moV vmeste, a ne
+tochechnaya pravka odnogo iz nikh.
 ### Длинный профиль декода: где на самом деле уходит время
 
 Профиль nsys на 400 токенах декода (`--cuda-graph-trace=node`), окно 8192.
