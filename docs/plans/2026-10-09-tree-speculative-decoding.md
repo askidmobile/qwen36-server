@@ -4,6 +4,8 @@
 Контекст: [research](../research/2026-10-09-qwen35-mtp-linear-vs-baseline.md).
 Референс: `trymirai/uzu`, PR #908 (`Use grouped attention for tree verify`, commit `fba8c21`).
 
+Статус: фаза 1 начата — базовые `TrieNode`/`FlatTrie` и приём пути добавлены в `yttri-forge` (коммиты `45b4deb1`, `3d8e58ee`, `e05e9a7e`).
+
 ## Цель
 
 Получить на Qwen3.5-9B/Qwen3.5-9B-like модель выигрыш по decode t/s против baseline не за счёт «большей ширины линейного MTP», а за счёт однопроходной проверки ветвящегося дерева.
