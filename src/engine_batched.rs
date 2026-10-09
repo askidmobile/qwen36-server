@@ -245,6 +245,29 @@ impl Drop for BatchedEngine {
     }
 }
 
+/// `MTP_TREE=0` — линейный MTP; `MTP_TREE=1` — tree speculative decoding
+/// с параметрами `MTP_TREE_BUDGET`/`MTP_TREE_DEPTH`/`MTP_TREE_BRANCHING`.
+fn tree_spec_from_env() -> Option<qwen35_batch::scheduler::TreeSpec> {
+    if std::env::var("MTP_TREE").as_deref() != Ok("1") {
+        return None;
+    }
+    let parse = |name: &str, default: usize| -> anyhow::Result<usize> {
+        let value = std::env::var(name)
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(default);
+        if value == 0 {
+            anyhow::bail!("{name} must be positive");
+        }
+        Ok(value)
+    };
+    Some(qwen35_batch::scheduler::TreeSpec {
+        budget: parse("MTP_TREE_BUDGET", 9)?,
+        depth: parse("MTP_TREE_DEPTH", 4)?,
+        branching: parse("MTP_TREE_BRANCHING", 2)?,
+    })
+}
+
 impl BatchedEngine {
     pub async fn load(
         cfg: BatchConfig,
@@ -380,7 +403,14 @@ impl BatchedEngine {
             // Лишний снимок на границе чанка стоит копии KV в VRAM — снимаем
             // только когда кеш префикса действительно включён.
             adapter.set_prefix_capture(cfg2.prefix_cache_mib > 0);
-            let scheduler = BatchScheduler::new(adapter, cfg2.slots, eos, vocab);
+            let mut scheduler = BatchScheduler::new(adapter, cfg2.slots, eos, vocab);
+            if let Some(spec) = tree_spec_from_env() {
+                scheduler.set_speculative_tree_spec(Some(spec));
+                eprintln!(
+                    "[mtp-tree] включён: budget={} depth={} branching={}",
+                    spec.budget, spec.depth, spec.branching
+                );
+            }
             ready.store(true, Ordering::Relaxed);
             let cache =
                 (cfg2.prefix_cache_mib > 0).then(|| PrefixCache::new(cfg2.prefix_cache_mib));
@@ -463,7 +493,10 @@ impl BatchedEngine {
         self.in_flight.load(Ordering::Relaxed)
     }
 
-    pub async fn generate_raw(&self, req: RawRequest) -> anyhow::Result<mpsc::Receiver<StreamEvent>> {
+    pub async fn generate_raw(
+        &self,
+        req: RawRequest,
+    ) -> anyhow::Result<mpsc::Receiver<StreamEvent>> {
         if !self.ready.load(Ordering::Relaxed) {
             if let Some(err) = self.load_error() {
                 bail!("model load failed: {err}");
@@ -1041,19 +1074,14 @@ fn dispatch_loop(
                 // повторном префиле из prefix-кеша (chunk 16384).
                 step_errors += 1;
                 for idx in 0..bindings.len() {
-                    if !bindings[idx]
-                        .as_ref()
-                        .map(|b| b.cancelled)
-                        .unwrap_or(false)
-                    {
+                    if !bindings[idx].as_ref().map(|b| b.cancelled).unwrap_or(false) {
                         continue;
                     }
                     let st = sched.slots_mut()[idx].status;
                     // Prefilling-слот чиним сразу (это и есть зацикливающийся
                     // случай). Прочие статусы — после третьей подряд ошибки,
                     // чтобы не разбирать чужие запросы из-за одной транзиентной.
-                    if st == SlotStatus::Prefilling
-                        || (step_errors >= 3 && st != SlotStatus::Idle)
+                    if st == SlotStatus::Prefilling || (step_errors >= 3 && st != SlotStatus::Idle)
                     {
                         sched.slots_mut()[idx].reset();
                     }
@@ -2128,7 +2156,10 @@ mod tests {
         )
         .await;
         eprintln!("raw: {raw:?}");
-        assert!(raw.0.contains("<tool_call>"), "ожидался вызов инструмента: {raw:?}");
+        assert!(
+            raw.0.contains("<tool_call>"),
+            "ожидался вызов инструмента: {raw:?}"
+        );
         assert_eq!(raw, chat);
     }
 
