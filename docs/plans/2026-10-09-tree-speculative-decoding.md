@@ -31,7 +31,8 @@
    - [x] `PagedAttn` валидирует форму/dtype `trie_ranges` и передаёт указатель в ядро.
    - [x] Интеграция tree-verify в `ModelWeights::forward_verify_tree_graphed`.
    - [x] Интеграция tree-verify в `Qwen35BatchAdapter::paged_graph_run`.
-   - [ ] Для DeltaNet — теневые снимки по путям, откат к принятому префиксу.
+   - [x] Safe-откат DeltaNet в tree-режиме: checkpoint + re-run принятого пути (теневые строки чужих веток не используются).
+   - [ ] Специализированное tree-ядро DeltaNet (параллельные пути).
    - [ ] CUDA-тест trie-маски против построчного эталона.
    - [x] Host-эталон `trie_mask_allows` с unit-тестом.
 
