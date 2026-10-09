@@ -39,6 +39,14 @@
    - Проверить VRAM и TTFT.
    - Если выигрыш устойчив — включить по умолчанию.
 
+## Технические зацепки
+
+- `engine/qwen35-batch/src/real/mtp.rs` — сейчас линейный драфт; сюда добавляется построение дерева.
+- `engine/qwen35-batch/src/real/adapter.rs` — `speculative_verify` и `speculative_accept`; сюда встраивается однопроходная проверка дерева.
+- `engine/qwen35-batch/src/real/paged_attn.rs` — единственный вызов attention-ядра; сюда нужно добавить trie-маску.
+- `engine/qwen35-batch/src/real/paged_kv_cuda.rs` — стейджинг длин для varlen; нужен отдельный буфер trie-узлов.
+- `engine/candle-kernels/` — если текущий flash-attention не принимает произвольную маску, сюда добавляется специализированное ядро tree-attention.
+
 ## Критерии успеха
 
 - Decode t/s выше baseline на Qwen3.5-9B.
