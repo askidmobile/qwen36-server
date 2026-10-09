@@ -247,9 +247,9 @@ impl Drop for BatchedEngine {
 
 /// `MTP_TREE=0` — линейный MTP; `MTP_TREE=1` — tree speculative decoding
 /// с параметрами `MTP_TREE_BUDGET`/`MTP_TREE_DEPTH`/`MTP_TREE_BRANCHING`.
-fn tree_spec_from_env() -> Option<qwen35_batch::scheduler::TreeSpec> {
+fn tree_spec_from_env() -> anyhow::Result<Option<qwen35_batch::scheduler::TreeSpec>> {
     if std::env::var("MTP_TREE").as_deref() != Ok("1") {
-        return None;
+        return Ok(None);
     }
     let parse = |name: &str, default: usize| -> anyhow::Result<usize> {
         let value = std::env::var(name)
@@ -261,11 +261,11 @@ fn tree_spec_from_env() -> Option<qwen35_batch::scheduler::TreeSpec> {
         }
         Ok(value)
     };
-    Some(qwen35_batch::scheduler::TreeSpec {
+    Ok(Some(qwen35_batch::scheduler::TreeSpec {
         budget: parse("MTP_TREE_BUDGET", 9)?,
         depth: parse("MTP_TREE_DEPTH", 4)?,
         branching: parse("MTP_TREE_BRANCHING", 2)?,
-    })
+    }))
 }
 
 impl BatchedEngine {
@@ -404,7 +404,7 @@ impl BatchedEngine {
             // только когда кеш префикса действительно включён.
             adapter.set_prefix_capture(cfg2.prefix_cache_mib > 0);
             let mut scheduler = BatchScheduler::new(adapter, cfg2.slots, eos, vocab);
-            if let Some(spec) = tree_spec_from_env() {
+            if let Some(spec) = tree_spec_from_env()? {
                 scheduler.set_speculative_tree_spec(Some(spec));
                 eprintln!(
                     "[mtp-tree] включён: budget={} depth={} branching={}",
