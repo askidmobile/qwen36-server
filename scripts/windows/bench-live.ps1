@@ -4,7 +4,8 @@ param(
   [int]$Runs = 1,
   [switch]$NoStream,
   [string]$PromptFile = '',
-  [string]$Tag = ''
+  [string]$Tag = '',
+  [string]$Model = 'qwen3.5-9b'
 )
 $ErrorActionPreference = 'Stop'
 [System.Net.ServicePointManager]::Expect100Continue = $false
@@ -26,7 +27,7 @@ if ($PromptFile -ne '') {
 }
 
 function Invoke-Streaming([string]$prompt, [int]$maxTokens) {
-  $body = @{ model='ornith-1.5-9b'; stream=$true; max_tokens=$maxTokens;
+  $body = @{ model=$Model; stream=$true; max_tokens=$maxTokens; stream_options=@{ include_usage=$true };
              messages=@(@{role='user'; content=$prompt}); temperature=0.0 } | ConvertTo-Json -Depth 6 -Compress
   $client = New-Object System.Net.Http.HttpClient
   $client.Timeout = [TimeSpan]::FromMinutes(60)
