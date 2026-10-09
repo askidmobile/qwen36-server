@@ -30,7 +30,7 @@
    - [x] CUDA-маска разрешает общий committed-префикс и поддерево текущего узла.
    - [x] `PagedAttn` валидирует форму/dtype `trie_ranges` и передаёт указатель в ядро.
    - [x] Интеграция tree-verify в `ModelWeights::forward_verify_tree_graphed`.
-   - [ ] Интеграция tree-verify в `Qwen35BatchAdapter::speculative_verify`.
+   - [x] Интеграция tree-verify в `Qwen35BatchAdapter::paged_graph_run`.
    - [ ] Для DeltaNet — теневые снимки по путям, откат к принятому префиксу.
    - [ ] CUDA-тест trie-маски против построчного эталона.
    - [x] Host-эталон `trie_mask_allows` с unit-тестом.
