@@ -135,6 +135,11 @@ curl.exe -s -m 180 http://127.0.0.1:18099/v1/chat/completions `
 В ответе `usage.mtp.enabled=true` — спекуляция работает. Пейлоад `smoke.json` —
 любой валидный chat-completions JSON.
 
+### Потоковый бенчмарк (`scripts\windows\bench-live.ps1`)
+
+Параметр `-Model` задаёт model id для chat-completions; по умолчанию — `qwen3.5-9b`.
+Скрипт также передаёт `stream_options.include_usage=true`, чтобы в отчёт попадали `prompt_tokens`, `completion_tokens` и `usage.mtp`.
+
 ### VRAM-замер A/B (`scripts\windows\vram_ab.ps1`)
 
 Меряет по фазам (restart / idle / request / after) для процесса `yforge`:
