@@ -404,7 +404,16 @@ impl BatchedEngine {
             // только когда кеш префикса действительно включён.
             adapter.set_prefix_capture(cfg2.prefix_cache_mib > 0);
             let mut scheduler = BatchScheduler::new(adapter, cfg2.slots, eos, vocab);
-            if let Some(spec) = tree_spec_from_env()? {
+            let tree_spec = match tree_spec_from_env() {
+                Ok(spec) => spec,
+                Err(e) => {
+                    eprintln!("[dispatch] MTP_TREE config failed: {e:#}");
+                    *load_error.write().expect("load_error lock") =
+                        format!("MTP_TREE config failed: {e:#}");
+                    return;
+                }
+            };
+            if let Some(spec) = tree_spec {
                 scheduler.set_speculative_tree_spec(Some(spec));
                 eprintln!(
                     "[mtp-tree] включён: budget={} depth={} branching={}",
