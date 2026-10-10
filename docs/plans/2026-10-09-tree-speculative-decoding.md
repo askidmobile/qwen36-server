@@ -4,7 +4,7 @@
 Контекст: [research](../research/2026-10-09-qwen35-mtp-linear-vs-baseline.md).
 Референс: `trymirai/uzu`, PR #908 (`Use grouped attention for tree verify`, commit `fba8c21`).
 
-Статус: фазы 1-5 пройдены, benchmark выполнен 2026-10-10. Результат — отрицательный: tree не быстрее baseline и linear MTP. Отчёт: [2026-10-10-tree-speculative-benchmark.md](../research/2026-10-10-tree-speculative-benchmark.md).
+Статус: фазы 1-5 пройдены. Benchmark перезапущен 2026-10-11 с парной MTP-головой из того же Q4_K_M GGUF. Результат — отрицательный: tree не быстрее baseline и linear MTP. Отчёт: [2026-10-10-tree-speculative-benchmark.md](../research/2026-10-10-tree-speculative-benchmark.md).
 
 ## Цель
 
@@ -58,11 +58,25 @@
 
 ## Критерии успеха
 
-- Decode t/s выше baseline на Qwen3.5-9B. **Не выполнен:** tree 7.2-7.5 t/s против baseline 53-54 t/s.
-- Нет деградации VRAM и TTFT. **Частично:** prefill не изменился, VRAM вырос с 7648 до 8614 MiB.
-- `used=true` и `accepted/drafted ≥ 0.5`. **Не выполнен:** tree acceptance 2-8%, linear W1 70-87%, но linear всё равно медленнее baseline.
+- Decode t/s выше baseline на Qwen3.5-9B. **Не выполнен:** tree 7.54-7.65 t/s, linear MTP 44.12-44.28 t/s против baseline 53.73-53.75 t/s.
+- Нет деградации VRAM и TTFT. **Частично:** prefill почти не изменился, VRAM вырос с 7698 до 8340 MiB.
+- `used=true` и `accepted/drafted ≥ 0.5`. **Не выполнен:** tree acceptance 5.6-11.3%, linear W1 73.0-87.3%, но linear всё равно медленнее baseline.
 - Отсутствие выпадения токенов и порчи выдачи. **Стабильность достигнута:** после `6ab9a2d2` рассинхрон paged pool и ошибки `позиция против длины пула` исчезли.
 
-## Итог 2026-10-10
+## Исправление pairing 2026-10-11
 
-Корректность tree-контура доведена до рабочего состояния: DFS-порядок, RoPE по глубине, обход ветки, перестройка принятого пути, ONEPASS с trie-маской. Ускорения нет, потому что MTP-драфт и целевой DeltaNet не tree-aware: узлы веток используют общее последовательное состояние. Для продолжения нужны per-node MTP state и per-node DeltaNet state; без них tree не может конкурировать с baseline. Подробности и все метрики — в [отчёте](../research/2026-10-10-tree-speculative-benchmark.md).
+Первые замеры использовали `lmstudio-community/Qwen3.5-9B-Q4_K_M` и отдельную голову `mtp-Ornith-1.5-9B-head-Q8_0.gguf` — это непарная конфигурация. Корректный вариант: `unsloth/Qwen3.5-9B-MTP-GGUF/Qwen3.5-9B-Q4_K_M.gguf`, где MTP-слой (`qwen35.nextn_predict_layers=1`, `blk.32.nextn.*`) встроен в тот же Q4_K_M GGUF. `MODEL` и `MTP_PATH` указывают на один файл.
+
+| Режим | Decode, t/s | Acceptance |
+| --- | ---: | ---: |
+| `MTP=0`, baseline | 53.73 / 53.74 / 53.75 | — |
+| `MTP=1`, W1, полный словарь | 38.00 / 39.77 / 40.00 | 85.7-87.3% |
+| `MTP=1`, W1, `MTP_VOCAB_TOP=32768` | 44.12 / 44.23 / 44.28 | 73.0-76.2% |
+| `MTP=1`, tree K=8, полный словарь, ONEPASS=1 | 4.53 / 4.59 / 4.60 | 6.8-11.3% |
+| `MTP=1`, tree K=8, `MTP_VOCAB_TOP=32768`, ONEPASS=1 | 7.54 / 7.61 / 7.65 | 5.6-8.7% |
+
+Prefill на 6412 токенах: baseline 4.526 s, linear 4.644 s, tree 4.416 s. VRAM: baseline 7698 MiB, linear 7858 MiB, tree 8340 MiB.
+
+## Итог 2026-10-11
+
+Парная MTP-голова загружается и даёт высокий linear acceptance (73-87%), но baseline всё равно быстрее: лучший linear-режим отстаёт примерно на 18%. Tree остаётся в 7 раз медленнее baseline и даёт acceptance 5.6-11.3%. Причина не в pairing и не в trie-маске, а в том, что MTP-драфт и целевой DeltaNet не tree-aware: узлы веток используют общее последовательное состояние. Для продолжения нужны per-node MTP state и per-node DeltaNet state. Подробности — в [отчёте](../research/2026-10-10-tree-speculative-benchmark.md).

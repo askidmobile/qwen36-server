@@ -122,8 +122,7 @@ D:\Projects\yttri-inference\qwen36-server\scripts\windows\convert-hf-gguf.bat ^
   D:\Models\source\<repo> D:\Models\<org>\<repo>-GGUF <basename> Q4_K_M
 ```
 
-Опционально MTP-драфт для спекулятивного декода: `D:\Models\ornith-mtp\mtp-Ornith-1.5-9B-head-Q8_0.gguf`
-(+ `MTP=1`, `MTP_PATH=...` в `.env`; продакшен работает с `MTP=0`).
+Опционально MTP-драфт для спекулятивного декода: для Qwen3.5-9B используйте MTP-слой из `unsloth/Qwen3.5-9B-MTP-GGUF/Qwen3.5-9B-Q4_K_M.gguf`, то есть `MODEL` и `MTP_PATH` должны указывать на один и тот же Q4_K_M GGUF (`qwen35.nextn_predict_layers=1`, блок `blk.32.nextn.*`). Отдельная голова `mtp-Ornith-1.5-9B-head-Q8_0.gguf` относится к Ornith-модели и для Qwen3.5-9B даёт невалидный pairing. Включать так: `MTP=1`, `MTP_PATH=<тот же файл, что MODEL>`; продакшен работает с `MTP=0`.
 
 ## 7. Конфигурация сервера (`.env`)
 
@@ -164,7 +163,7 @@ YTTRI_ATTN_PREP_FUSED=1
 QWEN36_FA_PREFILL_TILE=7
 MOE_EXPERTS=auto
 MTP=0
-MTP_PATH=D:\Models\ornith-mtp\mtp-Ornith-1.5-9B-head-Q8_0.gguf
+MTP_PATH=D:\Models\unsloth\Qwen3.5-9B-MTP-GGUF\Qwen3.5-9B-Q4_K_M.gguf
 MTP_WIDTH=3
 MTP_VOCAB_TOP=32768
 MTP_TIMING=0

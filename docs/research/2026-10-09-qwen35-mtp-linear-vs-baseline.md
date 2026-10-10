@@ -2,6 +2,9 @@
 
 Дата: 2026-10-09.
 Стенд: `yttri-win` (RTX 3060 12 GB), модель `Qwen3.5-9B-Q4_K_M.gguf`, MTP-голова `mtp-Ornith-1.5-9B-head-Q8_0.gguf`.
+> [!WARNING]
+> **Невалидный pairing.** В этом отчёте модель — `Qwen3.5-9B-Q4_K_M` (`lmstudio-community`), а MTP-голова — `mtp-Ornith-1.5-9B-head-Q8_0.gguf` от другой модели и в другом кванте. Эти числа нельзя использовать для сравнения model+head. Исправленные результаты на парном Q4_K_M GGUF: [2026-10-10-tree-speculative-benchmark.md](2026-10-10-tree-speculative-benchmark.md).
+
 Промпт: одинаковый технический запрос, 44 токена, `max_tokens=128`, `temperature=0`.
 Каждый режим — три прогона после прогрева; в таблице указаны min/median/max decode t/s и суммарные `drafted/accepted` по трём прогонам.
 
