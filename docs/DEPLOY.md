@@ -122,7 +122,23 @@ D:\Projects\yttri-inference\qwen36-server\scripts\windows\convert-hf-gguf.bat ^
   D:\Models\source\<repo> D:\Models\<org>\<repo>-GGUF <basename> Q4_K_M
 ```
 
-Опционально MTP-драфт для спекулятивного декода: для Qwen3.5-9B используйте MTP-слой из `unsloth/Qwen3.5-9B-MTP-GGUF/Qwen3.5-9B-Q4_K_M.gguf`, то есть `MODEL` и `MTP_PATH` должны указывать на один и тот же Q4_K_M GGUF (`qwen35.nextn_predict_layers=1`, блок `blk.32.nextn.*`). Отдельная голова `mtp-Ornith-1.5-9B-head-Q8_0.gguf` относится к Ornith-модели и для Qwen3.5-9B даёт невалидный pairing. Включать так: `MTP=1`, `MTP_PATH=<тот же файл, что MODEL>`; продакшен работает с `MTP=0`.
+Опционально MTP-драфт для спекулятивного декода: для Qwen3.5-9B используйте MTP-слой из
+`unsloth/Qwen3.5-9B-MTP-GGUF/Qwen3.5-9B-Q4_K_M.gguf`, то есть `MODEL` и `MTP_PATH` должны
+указывать на один и тот же GGUF (`qwen35.nextn_predict_layers=1`, блок `blk.32.nextn.*`).
+Отдельная голова `mtp-Ornith-1.5-9B-head-Q8_0.gguf` относится к Ornith-модели и для
+Qwen3.5-9B даёт невалидный pairing.
+
+**Обновление 2026-10-11 (QAMQ).** Рекомендуемый профиль для Qwen3.5-9B на 12 ГБ:
+`MODEL`/`MTP_PATH` = `D:\Models\unsloth\Qwen3.5-9B-MTP-GGUF\Qwen3.5-9B-QAMQ-A5L-AWQ2.gguf`
+(5.36 ГБ, смешанный K-quant + AWQ-фолдинг; собирается скриптами `scripts/qamq/`),
+`MTP=1`, `MTP_WIDTH=3`, `MTP_ADAPTIVE=1`, `MTP_VOCAB_TOP=32768`, `MTP_MAX_CTX=8000`.
+С этими значениями decode 61 t/s (MTP выключен) и 66 t/s в среднем / до 81 t/s на коде
+(MTP W3), MMLU 75.7%, GSM8K 96.2%, ruMMLU 69.7%, tool-calling 10/10, 115k контекста без OOM.
+
+**Важно про `MTP_MAX_CTX`:** спекулятивный verify читает attention по всему KV, поэтому на
+длинном контексте MTP становится медленнее baseline (на 39k измерено −38% до правки). Гейт
+`MTP_MAX_CTX=8000` отключает спекуляции после 8k токенов и возвращает baseline-скорость.
+Ставить MTP=1 без `MTP_MAX_CTX` на длинных контекстах нельзя — это регрессия.
 
 ## 7. Конфигурация сервера (`.env`)
 
