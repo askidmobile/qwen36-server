@@ -9,8 +9,8 @@
 
 | Фаза | Статус | Отчёт |
 |---|---|---|
-| Phase 0 — measurement/sensitivity | 🔄 In progress | будет `docs/research/2026-10-11-qamq-phase0.md` |
-| Phase 1 — QAMQ-A mixed K-quant | ⏳ Ожидает Phase 0 | будет `docs/research/2026-10-11-qamq-a.md` |
+| Phase 0 — measurement/sensitivity | ✅ Done | [`2026-10-11-qamq-phase0.md`](../research/2026-10-11-qamq-phase0.md) |
+| Phase 1 — QAMQ-A mixed K-quant | ✅ Done: QAMQ-A3 | [`2026-10-11-qamq-a.md`](../research/2026-10-11-qamq-a.md) |
 | Phase 2 — QAMQ-B rotation/AWQ/low-rank W4 | 📝 Запланировано | — |
 | Phase 3 — QAMQ-C DeltaNet/SSM/KV/MTP | 📝 Запланировано | — |
 | Phase 4 — QAMQ-D VQ/TCQ 2–3 бита | 📝 Запланировано | — |
@@ -112,13 +112,29 @@
 - Gate: качество не хуже Q4_K_M на выбранном наборе; decode ≥ 58 t/s.
 - [ ] `docs/research/2026-10-11-qamq-a.md`: методика, сырые метрики, что сработало/не сработало, вывод и решение по Phase 2/3.
 
+## Результаты Phase 0 + Phase 1
+
+- Инструменты: llama.cpp `b11552` (commit `23b0202a1`), CUDA 12.4 prebuilt.
+- Калибровка: `qamq-calib.txt` 3.3 MB, `qamq-heldout.txt` 672 KB.
+- Imatrix: `qamq-imatrix.gguf`, 1715 chunks, 248 entries. `--nextn` падает на state embedding; trunk-only.
+- Лучший рецепт: **QAMQ-A3** (`qamq-a3-tensor-types.txt`), 5 456 392 608 байт, sha256 `91970A42BFA2ACFA6D27E512DB9CD4F6394CD3A899A8B25687B67BB28050B51A`.
+- yforge MTP=0: **58.50–58.57 t/s** против Q4_K_M 53.73–53.75 (+8.9%); prefill 3.945 s против 4.526 s; VRAM 7343 против 7698 MiB.
+- yforge MTP=1 W1: **47.58–47.76 t/s**, acceptance 80–85%.
+- llama.cpp `llama-bench`: QAMQ-A3 **tg128 59.85 t/s** против Q4_K_M 55.45 (+7.9%).
+- PPL held-out: QAMQ-A3 **15.3736** против Q4_K_M 15.2828 (+0.59%).
+- Провалы: QAMQ-A conservative (5562 MiB, −0.6%); QAMQ-A2 с Q3_K (медленнее Q4_K_M и в Candle, и в llama.cpp; PPL +4.0%).
+
+Gate Phase 1: decode ≥58 t/s — выполнен; качество +0.59% PPL — принято с оговоркой, нужны task evals.
+
 ## Рабочий журнал
 
 | Дата | Действие | Результат | Артефакт/лог |
 |---|---|---|---|
 | 2026-10-11 | Research теорий и методов | Отчёт с 40+ источниками | `docs/research/2026-10-11-quantization-theory-and-custom-schemes.md` |
 | 2026-10-11 | Создан рабочий план и T-010 | План зафиксирован | этот файл, `TASKS.md` |
-| 2026-10-11 | Начата Phase 0: подготовка инструментов | — | — |
+| 2026-10-11 | Phase 0: инструменты, калибровка, imatrix | `llama.cpp b11552`; 1715 chunks; `--nextn` failed (state embedding) | `2026-10-11-qamq-phase0.md` |
+| 2026-10-11 | Phase 1: QAMQ-A/A2/A3 | A3: 58.5 t/s vs 53.7; PPL +0.59%; A2 failed | `2026-10-11-qamq-a.md` |
+| 2026-10-11 | Phase 1 gate | Decode gate пройден; MTP=1 всё ещё медленнее MTP=0 | `qamq-a3-tensor-types.txt` |
 
 ## Риски и решения
 
