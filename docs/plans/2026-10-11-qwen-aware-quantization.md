@@ -2,7 +2,7 @@
 
 Дата: 2026-10-11.
 Контекст: [research](../research/2026-10-11-quantization-theory-and-custom-schemes.md).
-Задача в TASKS.md: **T-010**.
+Задача в TASKS.md: **T-011**.
 Цель: снизить bytes/token и/или увеличить tokens/pass для Qwen3.5-9B на `yttri-win` (RTX 3060 12 GB), сохранив качество на RU/EN/code/agent/long-context задачах.
 
 ## Статус
@@ -11,7 +11,8 @@
 |---|---|---|
 | Phase 0 — measurement/sensitivity | ✅ Done | [`2026-10-11-qamq-phase0.md`](../research/2026-10-11-qamq-phase0.md) |
 | Phase 1 — QAMQ-A mixed K-quant | ✅ Done: QAMQ-A3 | [`2026-10-11-qamq-a.md`](../research/2026-10-11-qamq-a.md) |
-| Phase 2 — QAMQ-B rotation/AWQ/low-rank W4 | 📝 Запланировано | — |
+| Phase 2.0 — валидация A3 (KLD/task evals) | 🔄 KLD к BF16 готов; task evals нет | [`qamq-a.md`](../research/2026-10-11-qamq-a.md) |
+| Phase 2.1 — QAMQ-B rotation/AWQ/low-rank W4 | 📝 Запланировано | — |
 | Phase 3 — QAMQ-C DeltaNet/SSM/KV/MTP | 📝 Запланировано | — |
 | Phase 4 — QAMQ-D VQ/TCQ 2–3 бита | 📝 Запланировано | — |
 
@@ -135,6 +136,7 @@ Gate Phase 1: decode ≥58 t/s — выполнен; качество +0.59% PPL
 | 2026-10-11 | Phase 0: инструменты, калибровка, imatrix | `llama.cpp b11552`; 1715 chunks; `--nextn` failed (state embedding) | `2026-10-11-qamq-phase0.md` |
 | 2026-10-11 | Phase 1: QAMQ-A/A2/A3 | A3: 58.5 t/s vs 53.7; PPL +0.59%; A2 failed | `2026-10-11-qamq-a.md` |
 | 2026-10-11 | Phase 1 gate | Decode gate пройден; MTP=1 всё ещё медленнее MTP=0 | `qamq-a3-tensor-types.txt` |
+| 2026-10-11 | Phase 2.0: KLD QAMQ-A3 vs BF16 (64 чанка) | A3 0.0536 против Q4_K_M 0.0508; quality ≈ Q4_K_M | `qamq\kld\kld-a3-64.log` |
 
 ## Риски и решения
 
