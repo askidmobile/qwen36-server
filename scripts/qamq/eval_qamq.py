@@ -17,7 +17,7 @@ LETTERS = ["A", "B", "C", "D"]
 
 
 API_KEY = None
-MODEL = "qwen3.5-9b-qamq"
+MODEL = None
 
 
 def _headers(extra):
@@ -57,7 +57,6 @@ def fetch_rows(dataset, config, split, n):
 
 def chat(base_url, messages, max_tokens, logprobs=False, top_logprobs=0):
     payload = {
-        "model": MODEL,
         "messages": messages,
         "max_tokens": max_tokens,
         "temperature": 0,
@@ -69,6 +68,8 @@ def chat(base_url, messages, max_tokens, logprobs=False, top_logprobs=0):
     if logprobs:
         payload["logprobs"] = True
         payload["top_logprobs"] = top_logprobs
+    if MODEL:
+        payload["model"] = MODEL
     return post_json(base_url.rstrip("/") + "/v1/chat/completions", payload)
 
 
