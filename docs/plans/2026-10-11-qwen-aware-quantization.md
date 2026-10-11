@@ -227,10 +227,30 @@ Gate Phase 1: decode ≥58 t/s — выполнен; качество +0.59% PPL
 - **Quality gate не проходит** → вернуться к sensitivity map, поднять битность sensitive tensors, либо перейти к QAMQ-B/C.
 - **Server занят/выключен** → зафиксировать паузу и продолжить локальную подготовку артефактов.
 
-## Definition of Done для T-010
+## Definition of Done (закрыт для Phase 0–2.1, T-011)
 
 - Phase 0 отчёт с sensitivity map.
 - QAMQ-A GGUF собран и загружается в `yforge`.
 - Полный A/B на `yttri-win`: decode/prefill/VRAM/PPL/KLD/task evals.
 - Phase 1 отчёт с выводом: прошёл/не прошёл gate, что делать в Phase 2/3.
 - Все артефакты и логи сохранены; коммит в репозитории; TASKS.md обновлён.
+
+### Статус по пунктам
+
+| Пункт | Статус | Доказательство |
+|---|---|---|
+| Phase 0 отчёт с sensitivity map | ✅ | `docs/research/2026-10-11-qamq-phase0.md` |
+| QAMQ GGUF собран и грузится в yforge | ✅ | A3/A5/A5L-AWQ2: `yforge: quant = …`, замеры decode |
+| Полный A/B: decode/prefill/VRAM/PPL/KLD/task evals | ✅ | 7 наборов (MMLU, GSM8K, ruMMLU, HumanEval, tool-calling, needle, PPL/KLD), замеры в обоих движках |
+| Phase 1 отчёт с выводом по gate | ✅ | `qamq-a.md`, gate пройден (A3 → A5L-AWQ2) |
+| Артефакты, логи, коммиты, TASKS.md | ✅ | скрипты в `scripts/qamq/`, модели в `D:\Models` и `X:\qamq`, коммиты в обоих репозиториях |
+
+### Открытые пункты T-011 (не входят в DoD)
+
+| Пункт | Статус | Обоснование |
+|---|---|---|
+| rotation (Hadamard) | не начат | не коммутирует с elementwise-операциями (SiLU-mul, RMSNorm-γ) — нужна перестройка графа модели, а не offline-фолдинг |
+| low-rank FP16 residual | не начат | нужна поддержка в рантайме (доп. матмул на слой) + новый формат тензоров |
+| DeltaNet/SSM state 8-bit | не начат | экономия 24 МиБ/слот — пренебрежимо |
+| 4-битный KV-пул | разведан, отложен | ~200–400 строк + пересборка ради ~1 ГБ VRAM, риск в критичном ядре |
+| VQ/TCQ 2–3 бита | разведан | IQ3_XXS показал: дешёвый прокси теряет больше на распаковке, чем выигрывает на байтах |
