@@ -6,8 +6,11 @@
 """
 import argparse
 import json
+import os
+import subprocess
 import re
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -393,6 +396,100 @@ def run_needle(base_url, context_lens, trials_per_len, chars_per_token=4.6, verb
     return {"task": "needle", "results": results}
 
 
+CODE_INSTRUCTION = (
+    "Complete the following Python function. Return the COMPLETE function "
+    "(signature, docstring and body) as valid Python, without markdown fences "
+    "and without any explanations.\n\n"
+)
+
+
+def _strip_fences(text):
+    """Убрать markdown-обёртку, если модель её добавила."""
+    t = text.strip()
+    m = re.search(r"```(?:python)?\s*\n(.*?)```", t, re.S)
+    if m:
+        t = m.group(1)
+    elif t.startswith("```"):
+        t = re.sub(r"^```(?:python)?\s*\n?", "", t)
+        t = re.sub(r"\n?```\s*$", "", t)
+    return t.strip()
+
+
+def _indent_body(body, entry):
+    """Дописать тело к промпту: привести отступы к 4 пробелам.
+
+    Чат-модели часто возвращают тело с нулевым отступом — тогда внутри функции
+    получается `return outside function`. Если строка начинается с `def`, считаем,
+    что модель вернула полную функцию, и берём её как есть.
+    """
+    if re.search(rf"^\s*def\s+{re.escape(entry)}\b", body, re.M):
+        return body
+    lines = body.split("\n")
+    if any(ln.startswith("    ") for ln in lines if ln.strip()):
+        return body          # отступы уже есть
+    return "\n".join(("    " + ln) if ln.strip() else ln for ln in lines)
+
+
+def _programs(prompt, body, row):
+    """Два варианта сборки: полный ответ модели и промпт + тело."""
+    test, entry = row["test"], row["entry_point"]
+    out = [f"{body}\n{test}\ncheck({entry})\n"]
+    out.append(f"{prompt}\n{_indent_body(body, entry)}\n{test}\ncheck({entry})\n")
+    return out
+
+
+def _run_program(program, workdir, timeout_s):
+    """Запуск в изолированном интерпретаторе: -I (без user site/PYTHON*),
+    отдельная папка, таймаут, урезанное окружение.
+
+    Ограничение: это не песочница — сеть и файловая система доступны процессу.
+    Для локальной модели-под-тестом риск принят; в отчёте отмечено.
+    """
+    path = os.path.join(workdir, "prog.py")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(program)
+    env = {"PATH": os.environ.get("PATH", ""),
+           "SYSTEMROOT": os.environ.get("SYSTEMROOT", ""),
+           "TEMP": workdir, "TMP": workdir}
+    try:
+        r = subprocess.run([sys.executable, "-I", path], capture_output=True,
+                           timeout=timeout_s, cwd=workdir, env=env)
+        return r.returncode == 0, (r.stderr or b"").decode("utf-8", "replace")[-300:]
+    except subprocess.TimeoutExpired:
+        return False, "timeout"
+    except Exception as e:  # noqa: BLE001
+        return False, str(e)[:200]
+
+
+def run_humaneval(base_url, n, timeout_s=10, verbose=False):
+    """HumanEval: модель дописывает функцию, тест из датасета её проверяет."""
+    rows = fetch_rows("openai/openai_humaneval", "openai_humaneval", "test", n)
+    passed, t0 = 0, time.time()
+    with tempfile.TemporaryDirectory() as workdir:
+        for i, row in enumerate(rows):
+            prompt = row["prompt"]
+            resp = chat(base_url, [{"role": "user",
+                                    "content": CODE_INSTRUCTION + prompt}],
+                        max_tokens=768)
+            body = _strip_fences(resp["choices"][0]["message"].get("content") or "")
+            ok, err = False, "no variant"
+            for prog in _programs(prompt, body, row):
+                ok, err = _run_program(prog, workdir, timeout_s)
+                if ok:
+                    break
+            passed += int(ok)
+            if verbose:
+                print(f"  humaneval {i} {row['task_id']} {'PASS' if ok else 'fail ' + err[:60]}",
+                      flush=True)
+    return {
+        "task": "humaneval",
+        "n": len(rows),
+        "passed": passed,
+        "pass1": passed / len(rows) if rows else 0.0,
+        "seconds": round(time.time() - t0, 1),
+    }
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--base-url", default="http://127.0.0.1:18099")
@@ -405,7 +502,9 @@ def main():
     ap.add_argument("--gsm8k-n", type=int, default=131)
     ap.add_argument("--gsm8k-max-tokens", type=int, default=768)
     ap.add_argument("--needle-ctx", default="1024,4096,16384")
-    ap.add_argument("--tasks", default="mmlu,gsm8k,rummlu,needle,toolcall")
+    ap.add_argument("--humaneval-n", type=int, default=164)
+    ap.add_argument("--code-timeout", type=int, default=10)
+    ap.add_argument("--tasks", default="mmlu,gsm8k,rummlu,needle,toolcall,humaneval")
     ap.add_argument("-v", "--verbose", action="store_true")
     a = ap.parse_args()
 
@@ -428,6 +527,10 @@ def main():
         ctxs = [int(x) for x in str(a.needle_ctx).split(",") if x.strip()]
         results["tasks"]["needle"] = run_needle(a.base_url, ctxs, 3, verbose=a.verbose)
         print(json.dumps(results["tasks"]["needle"]), flush=True)
+    if "humaneval" in a.tasks:
+        results["tasks"]["humaneval"] = run_humaneval(
+            a.base_url, a.humaneval_n, a.code_timeout, a.verbose)
+        print(json.dumps(results["tasks"]["humaneval"]), flush=True)
     if "toolcall" in a.tasks:
         results["tasks"]["toolcall"] = run_toolcall(a.base_url, a.verbose)
         tc = results["tasks"]["toolcall"]
