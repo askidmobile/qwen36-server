@@ -12,7 +12,7 @@
 | Phase 0 — measurement/sensitivity | ✅ Done | [`2026-10-11-qamq-phase0.md`](../research/2026-10-11-qamq-phase0.md) |
 | Phase 1 — QAMQ-A mixed K-quant | ✅ Done: QAMQ-A3 | [`2026-10-11-qamq-a.md`](../research/2026-10-11-qamq-a.md) |
 | Phase 2.0 — валидация качества | ✅ Done: KLD + MMLU/GSM8K/ruMMLU/needle/tool-calling для A3 и A5; imatrix-источник не влияет | [`qamq-a.md`](../research/2026-10-11-qamq-a.md) |
-| Phase 2.1 — QAMQ-B rotation/AWQ/W4 | 🔄 W4-пробники: **A5 — рабочий лидер yforge** (58.7 MTP=0, 62–74 MTP W3 на коротком ctx), B1/B2 — лидер llama.cpp. **MTP W3+ADAPTIVE+`MTP_MAX_CTX=8000` даёт +5…25% на коротком контексте и не вредит на длинном** (было −38% на 39k без гейта). rotation/AWQ не начаты | [`qamq-a.md`](../research/2026-10-11-qamq-a.md) |
+| Phase 2.1 — QAMQ-B AWQ/W4 | 🔄 **AWQ для FFN реализован** (`apply_awq_scale.py`): −0.6% PPL бесплатно, лучше Q4_K_M на GSM8K (+1.5 п.п.) и ruMMLU (+1.3 п.п.). **A5L-AWQ** (AWQ + снятие q5/q6-защиты) — новый лидер: 5.36 GB, 61.3 t/s MTP=0, 65.4 t/s с MTP W3. W4-пробники (B1/B2 IQ4_XS) — лидер llama.cpp, в yforge медленнее. rotation/low-rank не начаты | [`qamq-a.md`](../research/2026-10-11-qamq-a.md) |
 | Phase 3 — QAMQ-C DeltaNet/SSM/KV/MTP | 📝 Запланировано | — |
 | Phase 4 — QAMQ-D VQ/TCQ 2–3 бита | 📝 Запланировано | — |
 
@@ -144,6 +144,8 @@ Gate Phase 1: decode ≥58 t/s — выполнен; качество +0.59% PPL
 | 2026-10-11 | Найден баг методики: decode считался по SSE-чанкам | MTP W2/W3 = 65–73 t/s (было «38–44»); на 256/512 токенах — паритет с MTP=0 | `bench-live.ps1` (fix), `qamq-a.md` |
 | 2026-10-11 | MTP вредит на длинном ctx (39k: −38%) | Добавлен `MTP_MAX_CTX` в engine; yoga gate: <8k MTP, >8k baseline; 39k 31→50 t/s | `scheduler.rs` (yttri-forge `478aa72c`), пересобран `yforge.exe` |
 | 2026-10-11 | Phase 2.0: RU + needle + tool-calling | ruMMLU A5 69.33% против 69.67%; needle 4k/16k/32k 9/9 у обеих; tool-calling 10/10 | `eval_qamq.py`, `results/eval-*-ru/needle/tools.json` |
+| 2026-10-11 | Phase 2.1: AWQ per-channel scaling (FFN) | Фолдинг точен (BF16-AWQ 15.0176 ≈ база 15.0187); A5-AWQ PPL 15.3544 против 15.4476; лучше Q4_K_M на GSM8K/ruMMLU | `apply_awq_scale.py`, `X:\qamq\...A5-AWQ.gguf` |
+| 2026-10-11 | Phase 2.1: A5L-AWQ (AWQ + снятие q5/q6) | 5.36 GB, PPL 15.4079, llama.cpp 61.07, yforge 61.3 t/s; с MTP W3 — 65.4 t/s в среднем | `qamq-a5l-tensor-types.txt`, `results/eval-a5l-awq.json` |
 
 ## Следующие шаги (после Phase 2.1)
 
