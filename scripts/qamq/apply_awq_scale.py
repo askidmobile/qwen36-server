@@ -39,6 +39,56 @@ def store_bf16(arr_f32: np.ndarray) -> bytes:
     return out.tobytes()
 
 
+def fold_attention(mm, idx, stats, L, args):
+    """Точный фолдинг масштаба в attention: v-проекция <-> attn_output.
+
+    Attention для query-головы h читает V из kv-головы g = h // gqa. Если
+    масштабировать выход V (канал g*head_dim+d) на s, а вход attn_output
+    (канал h*head_dim+d) — на 1/s, результат не меняется. Статистика берётся из
+    imatrix attn_output (вход = выход attention), агрегируется по query-головам,
+    делящим одну kv-голову.
+    """
+    v_name = f"blk.{L}.attn_v.weight"
+    o_name = f"blk.{L}.attn_output.weight"
+    if v_name not in idx or o_name not in idx:
+        return ""
+    st = stats.get(o_name)
+    if st is None:
+        return " (attn: нет статистики)"
+    v_t, o_t = idx[v_name], idx[o_name]
+    v = load_bf16(np.frombuffer(v_t.data.tobytes(), dtype=np.uint8),
+                  v_t.n_elements).reshape(v_t.shape[1], v_t.shape[0])
+    o = load_bf16(np.frombuffer(o_t.data.tobytes(), dtype=np.uint8),
+                  o_t.n_elements).reshape(o_t.shape[1], o_t.shape[0])
+    n_in = o.shape[1]
+    if st.shape[0] != n_in:
+        return f" (attn: stats {st.shape[0]} != {n_in})"
+    n_kv_out = v.shape[0]
+    if n_in % n_kv_out != 0:
+        return f" (attn: {n_in} не делится на {n_kv_out})"
+    gqa = n_in // n_kv_out
+    hd = n_kv_out // args.kv_heads if args.kv_heads else 256
+    if n_kv_out % hd != 0:
+        return f" (attn: {n_kv_out} не делится на hd={hd})"
+    # in_sum2 по query-головам -> усредняем по gqa головам на kv-голову
+    per_head = st.reshape(n_in // hd, hd)
+    agg = per_head.reshape(n_kv_out // hd, gqa, hd).mean(axis=1)   # [kv_heads, hd]
+    e = np.maximum(agg.reshape(-1), 1e-12)
+    s_a = np.power(e, args.alpha / 2.0)
+    s_a = s_a / np.exp(np.mean(np.log(s_a)))
+    s_a = np.clip(s_a, args.smin, args.smax).astype(np.float32)
+
+    v = v / s_a[:, None]                 # выход V scala по kv-каналу
+    s_full = np.repeat(s_a.reshape(-1, hd), gqa, axis=0).reshape(-1)
+    o = o * s_full[None, :]              # вход attn_output компенсирует
+
+    mm[v_t.data_offset: v_t.data_offset + v_t.n_bytes] = np.frombuffer(
+        store_bf16(v), dtype=np.uint8)
+    mm[o_t.data_offset: o_t.data_offset + o_t.n_bytes] = np.frombuffer(
+        store_bf16(o), dtype=np.uint8)
+    return f", attn s in [{s_a.min():.3f}, {s_a.max():.3f}]"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", required=True, help="исходный BF16 GGUF")
@@ -47,6 +97,10 @@ def main():
     ap.add_argument("--alpha", type=float, default=0.5)
     ap.add_argument("--smin", type=float, default=0.25)
     ap.add_argument("--smax", type=float, default=4.0)
+    ap.add_argument("--attn", action="store_true",
+                    help="фолдить также масштаб v<->attn_output")
+    ap.add_argument("--kv-heads", type=int, default=4,
+                    help="число kv-голов (для расчёта hd)")
     ap.add_argument("--blocks", default="all",
                     help="'all' или список слоёв через запятую, напр. 29,30,31")
     args = ap.parse_args()
@@ -109,7 +163,10 @@ def main():
         mm[dn_t.data_offset: dn_t.data_offset + dn_t.n_bytes] = np.frombuffer(
             store_bf16(dn), dtype=np.uint8)
         patched += 1
-        print(f"  blk.{L}: s in [{s.min():.3f}, {s.max():.3f}], патч ок", flush=True)
+        note = ""
+        if args.attn:
+            note = fold_attention(mm, idx, stats, L, args)
+        print(f"  blk.{L}: s in [{s.min():.3f}, {s.max():.3f}], патч ок{note}", flush=True)
 
     mm.flush()
     del mm
