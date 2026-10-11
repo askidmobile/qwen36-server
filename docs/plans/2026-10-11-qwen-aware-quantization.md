@@ -142,6 +142,31 @@ Gate Phase 1: decode ≥58 t/s — выполнен; качество +0.59% PPL
 | 2026-10-11 | Phase 2.1: Q4_0-пробники A5/A6 + plain Q4_0 | decode-потолок ~60 t/s; A5 prefill 1991 против 1916, KLD 0.0604 | `qamq-a5-tensor-types.txt`, `kld-a5-64.log` |
 | 2026-10-11 | Phase 2.1: B1 (IQ4_XS ffn) + yforge A/B + evals | llama.cpp: B1 2030/61.94 (лидер); yforge: A5 58.7 (лидер), B1 51.3 (медленно) | `qamq-b1-tensor-types.txt`, `results/eval-a5.json` |
 
+## Следующие шаги (после Phase 2.1)
+
+Короткий вывод: **decode на этой GPU упёрся в bandwidth-предел (~60 t/s)** для 4-битных
+весов, поэтому вся оставшаяся работа делится на два независимых трека.
+
+Трек «скорость» (decode уже на пределе — нужны структурные рычаги):
+- [ ] MTP overhead: линейный MTP даёт 47.6 против 58.5 t/s у MTP=0. Рычаги: batched draft,
+      CUDA graph на draft-шаг, единый causal verify, убрать D2H/accept-rebuild.
+- [ ] KV-кэш: перейти с q8 на 4–5 бит даёт −1.5 ГиБ на 128k, но упирается в качество.
+      Reference llama.cpp на 512 ctx: q8_0 +0.16%, q4_0 +0.49% PPL. Нужен A/B на 64K/128K.
+- [ ] DeltaNet/SSM state: 8-bit per-tensor + Hadamard на выходе (Phase 3).
+
+Трек «качество при том же размере» (не даёт скорости, но открывает W3/W4):
+- [ ] Rotation (Hadamard/learned) перед квантизацией: сглаживает outliers, позволяет
+      опустить битность без роста PPL. Требует правок в `llama-quantize` (или своего
+      offline-пайплайна) и в Candle-загрузчике.
+- [ ] AWQ-подобное per-channel масштабирование `ffn_down`/`ssm_out` — самые чувствительные
+      тензоры по sensitivity map.
+- [ ] Low-rank FP16 residual: хранить ошибку квантизации как `U·V^T` для самых чувствительных
+      тензоров (blk.29–31.ffn_down).
+
+Отдельно: IQ4_XS в нашем Candle медленнее Q4_0 (51.3 против 58.7 t/s), хотя в llama.cpp —
+наоборот. Ядро `mul_mat_vec_iq4_xs_q8_1_cuda*` есть (`VDR_IQ4_XS_Q8_1_MMVQ=4`), но, судя по
+замеру, не попадает в горячий путь или не оптимально. Это отдельная задача для `yttri-forge`.
+
 ## Риски и решения
 
 - **BF16 не влезает в 12 GB для imatrix** → использовать Q4_K_M/Q8_0 для статистики, BF16 для quantize; либо partial offload.
