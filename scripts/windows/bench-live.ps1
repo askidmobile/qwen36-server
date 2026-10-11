@@ -56,8 +56,12 @@ function Invoke-Streaming([string]$prompt, [int]$maxTokens) {
   }
   $sw.Stop()
   $reader.Dispose(); $resp.Dispose(); $client.Dispose()
+  # decode t/s — по completion_tokens, а не по числу SSE-чанков: при MTP
+  # (MTP_WIDTH>1) один delta несёт несколько токенов, и подсчёт чанков
+  # систематически занижает скорость (2026-10-11).
+  $toks = if ($usage -and $usage.completion_tokens) { $usage.completion_tokens } else { $n }
   $dec = 0.0
-  if ($n -gt 1 -and $last -gt $first) { $dec = [math]::Round(($n - 1) / ($last - $first), 2) }
+  if ($toks -gt 1 -and $last -gt $first) { $dec = [math]::Round(($toks - 1) / ($last - $first), 2) }
   return [pscustomobject]@{ chunks=$n; ttft=[math]::Round($first,3); total=[math]::Round($sw.Elapsed.TotalSeconds,3); decode_tps=$dec; usage=$usage; timings=$tps }
 }
 
