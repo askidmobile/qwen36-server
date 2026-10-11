@@ -11,7 +11,7 @@
 |---|---|---|
 | Phase 0 — measurement/sensitivity | ✅ Done | [`2026-10-11-qamq-phase0.md`](../research/2026-10-11-qamq-phase0.md) |
 | Phase 1 — QAMQ-A mixed K-quant | ✅ Done: QAMQ-A3 | [`2026-10-11-qamq-a.md`](../research/2026-10-11-qamq-a.md) |
-| Phase 2.0 — валидация A3 (KLD/imatrix/task evals) | ✅ Done: KLD + task evals (MMLU/GSM8K), imatrix-источник не влияет | [`qamq-a.md`](../research/2026-10-11-qamq-a.md) |
+| Phase 2.0 — валидация качества | ✅ Done: KLD + MMLU/GSM8K/ruMMLU/needle/tool-calling для A3 и A5; imatrix-источник не влияет | [`qamq-a.md`](../research/2026-10-11-qamq-a.md) |
 | Phase 2.1 — QAMQ-B rotation/AWQ/W4 | 🔄 W4-пробники: **A5 — рабочий лидер yforge** (58.7 MTP=0, 62–74 MTP W3 на коротком ctx), B1/B2 — лидер llama.cpp. **MTP W3+ADAPTIVE+`MTP_MAX_CTX=8000` даёт +5…25% на коротком контексте и не вредит на длинном** (было −38% на 39k без гейта). rotation/AWQ не начаты | [`qamq-a.md`](../research/2026-10-11-qamq-a.md) |
 | Phase 3 — QAMQ-C DeltaNet/SSM/KV/MTP | 📝 Запланировано | — |
 | Phase 4 — QAMQ-D VQ/TCQ 2–3 бита | 📝 Запланировано | — |
@@ -143,6 +143,7 @@ Gate Phase 1: decode ≥58 t/s — выполнен; качество +0.59% PPL
 | 2026-10-11 | Phase 2.1: B1 (IQ4_XS ffn) + yforge A/B + evals | llama.cpp: B1 2030/61.94 (лидер); yforge: A5 58.7 (лидер), B1 51.3 (медленно) | `qamq-b1-tensor-types.txt`, `results/eval-a5.json` |
 | 2026-10-11 | Найден баг методики: decode считался по SSE-чанкам | MTP W2/W3 = 65–73 t/s (было «38–44»); на 256/512 токенах — паритет с MTP=0 | `bench-live.ps1` (fix), `qamq-a.md` |
 | 2026-10-11 | MTP вредит на длинном ctx (39k: −38%) | Добавлен `MTP_MAX_CTX` в engine; yoga gate: <8k MTP, >8k baseline; 39k 31→50 t/s | `scheduler.rs` (yttri-forge `478aa72c`), пересобран `yforge.exe` |
+| 2026-10-11 | Phase 2.0: RU + needle + tool-calling | ruMMLU A5 69.33% против 69.67%; needle 4k/16k/32k 9/9 у обеих; tool-calling 10/10 | `eval_qamq.py`, `results/eval-*-ru/needle/tools.json` |
 
 ## Следующие шаги (после Phase 2.1)
 
