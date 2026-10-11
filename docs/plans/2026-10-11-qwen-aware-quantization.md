@@ -227,7 +227,7 @@ Gate Phase 1: decode ≥58 t/s — выполнен; качество +0.59% PPL
 - **Quality gate не проходит** → вернуться к sensitivity map, поднять битность sensitive tensors, либо перейти к QAMQ-B/C.
 - **Server занят/выключен** → зафиксировать паузу и продолжить локальную подготовку артефактов.
 
-## Definition of Done (закрыт для Phase 0–2.1, T-011)
+## Definition of Done (закрыт, T-011)
 
 - Phase 0 отчёт с sensitivity map.
 - QAMQ-A GGUF собран и загружается в `yforge`.
