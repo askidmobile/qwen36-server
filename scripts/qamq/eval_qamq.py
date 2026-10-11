@@ -16,15 +16,28 @@ HF = "https://datasets-server.huggingface.co/rows"
 LETTERS = ["A", "B", "C", "D"]
 
 
+API_KEY = None
+MODEL = "qwen3.5-9b-qamq"
+
+
+def _headers(extra):
+    h = dict(extra)
+    if API_KEY:
+        h["Authorization"] = f"Bearer {API_KEY}"
+    return h
+
+
 def post_json(url, payload, timeout=600):
     data = json.dumps(payload).encode()
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(url, data=data,
+                                 headers=_headers({"Content-Type": "application/json"}))
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode())
 
 
 def get_json(url, timeout=120):
-    with urllib.request.urlopen(url, timeout=timeout) as r:
+    req = urllib.request.Request(url, headers=_headers({}))
+    with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode())
 
 
@@ -44,6 +57,7 @@ def fetch_rows(dataset, config, split, n):
 
 def chat(base_url, messages, max_tokens, logprobs=False, top_logprobs=0):
     payload = {
+        "model": MODEL,
         "messages": messages,
         "max_tokens": max_tokens,
         "temperature": 0,
@@ -381,6 +395,9 @@ def run_needle(base_url, context_lens, trials_per_len, chars_per_token=4.6, verb
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--base-url", default="http://127.0.0.1:18099")
+    ap.add_argument("--api-key", default=None,
+                    help="Bearer-ключ для серверов с авторизацией (yforge)")
+    ap.add_argument("--model", default=None, help="имя модели в запросе")
     ap.add_argument("--label", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--mmlu-n", type=int, default=300)
@@ -390,6 +407,11 @@ def main():
     ap.add_argument("--tasks", default="mmlu,gsm8k,rummlu,needle,toolcall")
     ap.add_argument("-v", "--verbose", action="store_true")
     a = ap.parse_args()
+
+    global API_KEY, MODEL
+    API_KEY = a.api_key
+    if a.model:
+        MODEL = a.model
 
     results = {"label": a.label, "base_url": a.base_url, "tasks": {}}
     if "mmlu" in a.tasks:
