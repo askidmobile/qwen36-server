@@ -145,7 +145,9 @@ fn top_k_indices(logits: &[f32], k: usize) -> Vec<u32> {
     // батчей/будущих словарей), 1 или не задано — последовательный.
     static FORCED: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
     let forced: Option<usize> = *FORCED.get_or_init(|| {
-        std::env::var("TOP_K_THREADS").ok().and_then(|v| v.trim().parse::<usize>().ok())
+        std::env::var("TOP_K_THREADS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
     });
     let nthreads = match forced {
         Some(t) if t > 1 => t.min(n.max(1)).max(1),
@@ -362,7 +364,11 @@ fn apply_penalty(v: f32, presence: f32, repetition: f32) -> f32 {
         v -= presence;
     }
     if repetition != 0.0 && repetition != 1.0 {
-        v = if v < 0.0 { v * repetition } else { v / repetition };
+        v = if v < 0.0 {
+            v * repetition
+        } else {
+            v / repetition
+        };
     }
     v
 }
@@ -381,7 +387,10 @@ fn argmax_with_penalties(
     repetition_penalty: f32,
 ) -> u32 {
     let mut best = argmax(logits);
-    let mut best_v = logits.get(best as usize).copied().unwrap_or(f32::NEG_INFINITY);
+    let mut best_v = logits
+        .get(best as usize)
+        .copied()
+        .unwrap_or(f32::NEG_INFINITY);
     for &t in seen {
         let i = t as usize;
         let Some(&v) = logits.get(i) else { continue };
@@ -665,13 +674,17 @@ mod tests {
         for case in 0..40 {
             let n = 200 + case * 53;
             let logits: Vec<f32> = (0..n).map(|_| next() * 30.0 - 15.0).collect();
-            let seen: HashSet<u32> = (0..n)
-                .filter(|_| next() < 0.05)
-                .map(|i| i as u32)
-                .collect();
+            let seen: HashSet<u32> = (0..n).filter(|_| next() < 0.05).map(|i| i as u32).collect();
             for (presence, repetition) in [(0.0f32, 1.0f32), (1.5, 1.0), (0.0, 1.2), (1.5, 1.2)] {
                 let fast = sample_with_seen(
-                    &logits, 0.0, 20, 0.95, 0.0, presence, repetition, &seen,
+                    &logits,
+                    0.0,
+                    20,
+                    0.95,
+                    0.0,
+                    presence,
+                    repetition,
+                    &seen,
                     &mut Rng::new(7),
                 );
                 // эталон: независимая арифметика штрафов + argmax
@@ -682,7 +695,11 @@ mod tests {
                             *v -= presence;
                         }
                         if repetition != 0.0 && repetition != 1.0 {
-                            *v = if *v < 0.0 { *v * repetition } else { *v / repetition };
+                            *v = if *v < 0.0 {
+                                *v * repetition
+                            } else {
+                                *v / repetition
+                            };
                         }
                     }
                 }
@@ -694,7 +711,10 @@ mod tests {
                         best = i as u32;
                     }
                 }
-                assert_eq!(fast, best, "case={case} presence={presence} repetition={repetition}");
+                assert_eq!(
+                    fast, best,
+                    "case={case} presence={presence} repetition={repetition}"
+                );
             }
         }
     }

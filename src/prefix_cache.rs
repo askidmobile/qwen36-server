@@ -92,7 +92,10 @@ impl HostSnapshotWorker {
         if let Err(err) = spawned {
             eprintln!("[pcache] воркер переноса в host не запустился: {err}");
         }
-        Self { tx: job_tx, rx: res_rx }
+        Self {
+            tx: job_tx,
+            rx: res_rx,
+        }
     }
 
     /// Отдать снимки воркеру (не блокирует). `logits` — логиты последней
@@ -308,7 +311,11 @@ impl PrefixCache {
                 continue;
             }
             // Логиты относятся только к записи во всю длину промпта.
-            let entry_logits = if pos == tokens.len() { logits.clone() } else { None };
+            let entry_logits = if pos == tokens.len() {
+                logits.clone()
+            } else {
+                None
+            };
             if self.put_with_logits(tokens[..pos].to_vec(), snap, entry_logits, meta) {
                 saved += 1;
             }

@@ -53,8 +53,12 @@ fn main() -> candle_core::Result<()> {
         .to_device(&Device::Cpu)?;
     let y_ref = x_cpu.matmul(&w_ref.t()?.contiguous()?)?;
 
-    let y_mma = run(&qm, &x, false)?.to_device(&Device::Cpu)?.to_dtype(candle_core::DType::F32)?;
-    let y_dp4a = run(&qm, &x, true)?.to_device(&Device::Cpu)?.to_dtype(candle_core::DType::F32)?;
+    let y_mma = run(&qm, &x, false)?
+        .to_device(&Device::Cpu)?
+        .to_dtype(candle_core::DType::F32)?;
+    let y_dp4a = run(&qm, &x, true)?
+        .to_device(&Device::Cpu)?
+        .to_dtype(candle_core::DType::F32)?;
 
     let (mma_max, mma_mean) = max_abs_diff(&y_mma, &y_ref)?;
     let (dp4a_max, dp4a_mean) = max_abs_diff(&y_dp4a, &y_ref)?;

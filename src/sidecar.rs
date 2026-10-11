@@ -17,7 +17,9 @@ use futures::future::BoxFuture;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, Notify};
 
-use crate::engine::{CancelFlag, ChatMessage, ContentBlock, GenParams, InferenceRequest, MediaSource, StreamEvent};
+use crate::engine::{
+    CancelFlag, ChatMessage, ContentBlock, GenParams, InferenceRequest, MediaSource, StreamEvent,
+};
 use crate::engine_batched::{BatchConfig, BatchedEngine, RawRequest};
 use crate::sidecar_protocol::{Event, GenerateReq, Request, PROTOCOL_VERSION};
 
@@ -156,8 +158,9 @@ impl Vram {
 
 /// Точка входа `yforge --sidecar`.
 pub async fn run() -> Result<()> {
-    let loader: Loader =
-        Arc::new(|spec: LoadSpec| -> BoxFuture<'static, Result<Loaded>> { Box::pin(load_batched(spec)) });
+    let loader: Loader = Arc::new(|spec: LoadSpec| -> BoxFuture<'static, Result<Loaded>> {
+        Box::pin(load_batched(spec))
+    });
     serve(tokio::io::stdin(), tokio::io::stdout(), loader).await
 }
 
@@ -177,14 +180,19 @@ async fn load_batched(spec: LoadSpec) -> Result<Loaded> {
 
     // План памяти — как у сервера (Config::apply_vram_plan): окно не режется,
     // общий бюджет KV движок держит сам допуском и очередью.
-    let (mut ctx, mut slots, mut kv_budget_mib, mut kv_per_tok_mib) = (spec.ctx, spec.slots, 0.0, 0.0);
+    let (mut ctx, mut slots, mut kv_budget_mib, mut kv_per_tok_mib) =
+        (spec.ctx, spec.slots, 0.0, 0.0);
     if let Some(total) = crate::vram_plan::total_vram_mib() {
         let path = std::path::Path::new(&spec.model_path);
         let fp = crate::vram_plan::footprint_from_gguf_with(path, "auto")?;
         let plan = crate::vram_plan::compute_dynamic(total, &fp, ctx, slots, "auto")?;
         eprintln!("{}", plan.report);
-        (ctx, slots, kv_budget_mib, kv_per_tok_mib) =
-            (plan.ctx, plan.slots, plan.kv_budget_mib, plan.kv_per_tok_mib);
+        (ctx, slots, kv_budget_mib, kv_per_tok_mib) = (
+            plan.ctx,
+            plan.slots,
+            plan.kv_budget_mib,
+            plan.kv_per_tok_mib,
+        );
     }
     let cfg = BatchConfig {
         model_path: spec.model_path,
@@ -213,11 +221,15 @@ async fn load_batched(spec: LoadSpec) -> Result<Loaded> {
 /// Vision-артефакт рядом с моделью: Yttri кладёт `mmproj-*.gguf` в её каталог.
 fn find_mmproj(model_path: &str) -> Option<std::path::PathBuf> {
     let dir = std::path::Path::new(model_path).parent()?;
-    std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).find(|p| {
-        p.file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.starts_with("mmproj") && n.ends_with(".gguf"))
-    })
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("mmproj") && n.ends_with(".gguf"))
+        })
 }
 
 /// Картинка с диска + вопрос → чат-запрос. Жадно и без штрафов, как у MLX.
@@ -308,7 +320,11 @@ where
         if let Some(len) = json.get("blob_bytes").and_then(|v| v.as_u64()) {
             tokio::io::copy(&mut (&mut input).take(len), &mut tokio::io::sink()).await?;
         }
-        let op = json.get("op").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let op = json
+            .get("op")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let req_id = json.get("req_id").and_then(|v| v.as_u64()).unwrap_or(0);
         let request: Request = match serde_json::from_value(json) {
             Ok(request) => request,
@@ -338,7 +354,8 @@ where
                     let vision = match (mode.as_str(), find_mmproj(&model_path)) {
                         ("vlm", None) => {
                             let _ = tx.send(Event::Error {
-                                message: "load: mode vlm, but no mmproj-*.gguf next to the model".into(),
+                                message: "load: mode vlm, but no mmproj-*.gguf next to the model"
+                                    .into(),
                                 req_id: 0,
                             });
                             continue;
@@ -418,7 +435,10 @@ where
                 tokio::spawn(async move {
                     let id = req.req_id;
                     forward(l, req, cancel, wake, &tx).await;
-                    running.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+                    running
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&id);
                 });
             }
             Request::DescribeImage {
@@ -451,7 +471,10 @@ where
                         Err(e) => Err(e),
                     };
                     pump(&l, req_id, started, rx, cancel, wake, &tx).await;
-                    running.lock().unwrap_or_else(|e| e.into_inner()).remove(&req_id);
+                    running
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&req_id);
                 });
             }
             Request::Cancel { req_id } => {
@@ -553,7 +576,8 @@ async fn pump(
     let mut deltas = 0usize;
     let mut first_at: Option<Instant> = None;
     let mut steps = l.engine.steps();
-    let mut heartbeat = tokio::time::interval_at(tokio::time::Instant::now() + HEARTBEAT, HEARTBEAT);
+    let mut heartbeat =
+        tokio::time::interval_at(tokio::time::Instant::now() + HEARTBEAT, HEARTBEAT);
     let cancelled = |text: String, deltas: usize, first_at: Option<Instant>| Event::Done {
         req_id: id,
         text,
@@ -701,14 +725,21 @@ mod tests {
             });
             Ok(rx)
         }
-        async fn generate_chat(&self, req: InferenceRequest) -> Result<mpsc::Receiver<StreamEvent>> {
+        async fn generate_chat(
+            &self,
+            req: InferenceRequest,
+        ) -> Result<mpsc::Receiver<StreamEvent>> {
             let (tx, rx) = mpsc::channel(4);
             let has_image = req.messages[0]
                 .content
                 .iter()
                 .any(|b| matches!(b, ContentBlock::Media { .. }));
             let _ = tx.try_send(StreamEvent::Delta {
-                text: if has_image { "a cat".into() } else { "no image".into() },
+                text: if has_image {
+                    "a cat".into()
+                } else {
+                    "no image".into()
+                },
                 logprobs: None,
             });
             let _ = tx.try_send(StreamEvent::Done {
@@ -746,18 +777,20 @@ mod tests {
             let (output, from) = tokio::io::duplex(1 << 16);
             let mock = Arc::new(Mock::default());
             let engine = mock.clone();
-            let loader: Loader = Arc::new(move |spec: LoadSpec| -> BoxFuture<'static, Result<Loaded>> {
-                let engine: Arc<dyn RawEngine> = engine.clone();
-                Box::pin(async move {
-                    Ok(Loaded {
-                        engine,
-                        slots: spec.slots,
-                        ctx: spec.ctx,
-                        vram: Vram::default(),
-                        vision: spec.vision.is_some(),
+            let loader: Loader = Arc::new(
+                move |spec: LoadSpec| -> BoxFuture<'static, Result<Loaded>> {
+                    let engine: Arc<dyn RawEngine> = engine.clone();
+                    Box::pin(async move {
+                        Ok(Loaded {
+                            engine,
+                            slots: spec.slots,
+                            ctx: spec.ctx,
+                            vram: Vram::default(),
+                            vision: spec.vision.is_some(),
+                        })
                     })
-                })
-            });
+                },
+            );
             tokio::spawn(serve(input, output, loader));
             Self {
                 to,
@@ -841,7 +874,10 @@ mod tests {
         assert_eq!(raw.prefix_tokens, Some(2));
         assert_eq!(raw.max_prompt_tokens, 16384);
         let p = &raw.params;
-        assert_eq!((p.max_tokens, p.max_thinking_tokens, p.top_k), (64, 512, 20));
+        assert_eq!(
+            (p.max_tokens, p.max_thinking_tokens, p.top_k),
+            (64, 512, 20)
+        );
         assert_eq!(p.suppress_tokens, vec![248068]);
         assert_eq!(p.stop, vec!["</tool_call>".to_string()]);
         assert_eq!(p.penalty_window, PENALTY_WINDOW);
@@ -852,11 +888,15 @@ mod tests {
     async fn unknown_op_blob_and_overflow_keep_process_alive() {
         let mut h = Harness::start();
         h.load().await;
-        h.send(json!({"op": "asr_load", "req_id": 9, "kind": "gigaam", "path": "/x"})).await;
+        h.send(json!({"op": "asr_load", "req_id": 9, "kind": "gigaam", "path": "/x"}))
+            .await;
         let err = h.next().await;
         assert_eq!(err["event"], "error");
         assert_eq!(err["req_id"], 9);
-        assert!(err["message"].as_str().unwrap().contains("asr_load"), "{err}");
+        assert!(
+            err["message"].as_str().unwrap().contains("asr_load"),
+            "{err}"
+        );
 
         // Кадр с блобом: байты после заголовка не должны сломать следующий.
         h.to.write_all(b"{\"op\":\"asr_transcribe\",\"req_id\":10,\"blob_bytes\":5}\n\x00\x01\n{}")
@@ -868,7 +908,10 @@ mod tests {
         let err = h.next().await;
         assert_eq!(err["req_id"], 11);
         assert!(
-            err["message"].as_str().unwrap().starts_with("промпт не помещается в контекст:"),
+            err["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("промпт не помещается в контекст:"),
             "{err}"
         );
 
@@ -909,20 +952,26 @@ mod tests {
 
         // Без mmproj режим vlm не поднимается, процесс жив.
         let mut h = Harness::start();
-        h.send(json!({"op": "load", "model_path": model, "mode": "vlm"})).await;
+        h.send(json!({"op": "load", "model_path": model, "mode": "vlm"}))
+            .await;
         let err = h.next().await;
         assert_eq!(err["event"], "error");
         assert!(err["message"].as_str().unwrap().contains("mmproj"), "{err}");
         // Текстовый режим: подписи нет.
-        h.send(json!({"op": "load", "model_path": model, "mode": "text"})).await;
+        h.send(json!({"op": "load", "model_path": model, "mode": "text"}))
+            .await;
         assert_eq!(h.next().await["event"], "loaded");
         h.send(json!({"op": "describe_image", "req_id": 3, "image_path": image, "prompt": "Опиши", "max_tokens": 64})).await;
         let err = h.next().await;
-        assert_eq!((err["event"].as_str(), err["req_id"].as_u64()), (Some("error"), Some(3)));
+        assert_eq!(
+            (err["event"].as_str(), err["req_id"].as_u64()),
+            (Some("error"), Some(3))
+        );
 
         std::fs::write(dir.join("mmproj-Qwen3.5-4B-F16.gguf"), b"gguf").unwrap();
         let mut h = Harness::start();
-        h.send(json!({"op": "load", "model_path": model, "mode": "vlm"})).await;
+        h.send(json!({"op": "load", "model_path": model, "mode": "vlm"}))
+            .await;
         assert_eq!(h.next().await["event"], "loaded");
         h.send(json!({"op": "health"})).await;
         assert_eq!(h.next().await["vision"], true);

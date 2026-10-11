@@ -205,7 +205,13 @@ pub async fn ctx_matrix(
         let fp = vram_plan::footprint_from_gguf_cached(&p)?;
         let (kv_budget_mib, kv_per_tok_mib) = match total {
             Some(t) => {
-                let plan = vram_plan::compute_dynamic(t, &fp, 262144, 4, &crate::config::moe_placement_from_env())?;
+                let plan = vram_plan::compute_dynamic(
+                    t,
+                    &fp,
+                    262144,
+                    4,
+                    &crate::config::moe_placement_from_env(),
+                )?;
                 (plan.kv_budget_mib, plan.kv_per_tok_mib)
             }
             None => (0.0, 0.0),
@@ -696,7 +702,13 @@ pub async fn do_switch(
     let fp = vram_plan::footprint_from_gguf_cached(&path)?;
     let (ctx, slots, kv_budget_mib, kv_per_tok_mib) = match vram_plan::total_vram_mib() {
         Some(total) => {
-            let plan = vram_plan::compute_dynamic(total, &fp, req_ctx, req_slots, &crate::config::moe_placement_from_env())?;
+            let plan = vram_plan::compute_dynamic(
+                total,
+                &fp,
+                req_ctx,
+                req_slots,
+                &crate::config::moe_placement_from_env(),
+            )?;
             eprintln!("[switch] {}", plan.report);
             (
                 plan.ctx,

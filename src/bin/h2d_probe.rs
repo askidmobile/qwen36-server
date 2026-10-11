@@ -31,9 +31,7 @@ fn main() -> candle_core::Result<()> {
     use candle_core::cuda_backend::cudarc;
     let bytes = n * std::mem::size_of::<f32>();
     let mut host_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
-    let res = unsafe {
-        cudarc::driver::sys::cuMemHostAlloc(&mut host_ptr, bytes, 0)
-    };
+    let res = unsafe { cudarc::driver::sys::cuMemHostAlloc(&mut host_ptr, bytes, 0) };
     if res != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
         println!("pageable: {page_ms:.3} ms; pinned недоступен (cuMemHostAlloc={res:?})");
         return Ok(());

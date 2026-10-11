@@ -101,7 +101,11 @@ impl Engine for SwappableEngine {
             .unwrap_or(false)
     }
     fn moe_info(&self) -> Option<crate::engine::MoeInfo> {
-        self.inner.read().expect("engine lock").as_ref().and_then(|e| e.moe_info())
+        self.inner
+            .read()
+            .expect("engine lock")
+            .as_ref()
+            .and_then(|e| e.moe_info())
     }
     fn model_info(&self) -> ModelInfo {
         let (path, ctx, slots) = self.current.read().expect("current lock").clone();
