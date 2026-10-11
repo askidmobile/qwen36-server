@@ -37,7 +37,7 @@ IQ4_XS в нашем движке (медленнее Q4_0 на ~13%, хотя �
 | Phase 2.0 — валидация качества | ✅ Done: KLD + MMLU/GSM8K/ruMMLU/needle/tool-calling для A3 и A5; imatrix-источник не влияет | [`qamq-a.md`](../research/2026-10-11-qamq-a.md) |
 | Phase 2.1 — QAMQ-B AWQ/W4 | ✅ **AWQ реализован для FFN и attention** (`apply_awq_scale.py`, GQA-aware): фолдинг точен, даёт −0.46% PPL и лучше Q4_K_M на MMLU/GSM8K. **A5L-AWQ2 — финальный лидер**: 5.36 GB, 61.2 t/s MTP=0, **65.9 t/s с MTP W3**. W4-пробники (B1/B2 IQ4_XS) — лидер по скорости в llama.cpp, но медленнее в yforge. rotation/low-rank — не начаты (отложены) | [`qamq-a.md`](../research/2026-10-11-qamq-a.md) |
 | Phase 3 — QAMQ-C DeltaNet/SSM/KV/MTP | 🔄 Разведка сделана: KV q4_0 на 32k/64k почти бесплатен по PPL (+0.09% на 64k) → 4-битный пул в движке дал бы −1 ГиБ на 128k; **точность MTP-головы не узкое место** (MTP6: PPL идентичен, средняя скорость хуже); **`MTP_MAX_CTX` реализован** (MTP на <8k, baseline на длинном). Осталось: 4-битный KV-пул (нужен новый вариант в FA-шаблоне `Is_kv_n`), DeltaNet/SSM state 8-bit (экономия 24 МиБ/слот — мало) | [`qamq-a.md`](../research/2026-10-11-qamq-a.md) |
-| Phase 4 — QAMQ-D VQ/TCQ 2–3 бита | 📝 Запланировано (не начато: требует квантайзера и ядер вне llama.cpp) | — |
+| Phase 4 — QAMQ-D VQ/TCQ 2–3 бита | 🔄 Разведка сделана через существующие IQ3_XXS: −10.4% размера дали только +1.9% скорости при +2.9% PPL — распаковка съедает bandwidth-выигрыш. **Собственный VQ/TCQ должен решить именно это** (дешёвая распаковка), иначе смысла нет | [`qamq-a.md`](../research/2026-10-11-qamq-a.md) |
 
 ## Артефакты и пути
 
@@ -170,6 +170,7 @@ Gate Phase 1: decode ≥58 t/s — выполнен; качество +0.59% PPL
 | 2026-10-11 | Phase 2.1: AWQ per-channel scaling (FFN) | Фолдинг точен (BF16-AWQ 15.0176 ≈ база 15.0187); A5-AWQ PPL 15.3544 против 15.4476; лучше Q4_K_M на GSM8K/ruMMLU | `apply_awq_scale.py`, `X:\qamq\...A5-AWQ.gguf` |
 | 2026-10-11 | Phase 2.1: A5L-AWQ (AWQ + снятие q5/q6) | 5.36 GB, PPL 15.4079, llama.cpp 61.07, yforge 61.3 t/s; с MTP W3 — 65.4 t/s в среднем | `qamq-a5l-tensor-types.txt`, `results/eval-a5l-awq.json` |
 | 2026-10-11 | Phase 2.1: AWQ2 (attention-фолдинг, GQA-aware) | PPL 15.3767 (лучше A5L-AWQ), MMLU 75.67%, GSM8K 96.18%; с MTP W3 — 65.9 t/s среднее | `apply_awq_scale.py --attn`, `results/eval-a5l-awq2.json` |
+| 2026-10-11 | Phase 4-разведка: IQ3_XXS на FFN | 4.80 GB (−10.4%), но tg128 +1.9% и PPL +2.9% — невыгодно | `qamq-d1-tensor-types.txt` |
 
 ## Следующие шаги (после Phase 2.1)
 
