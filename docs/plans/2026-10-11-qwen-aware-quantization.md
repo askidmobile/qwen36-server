@@ -12,10 +12,12 @@
 (лучше Q4_K_M на 0.6%), MMLU 75.67%, GSM8K 96.18% (+1.5 п.п. к Q4_K_M), ruMMLU 69.67%,
 tool-calling 10/10, needle 4k/16k/32k 9/9, 115k контекста без OOM.
 
-**Приёмка в нашем движке:** те же evals прогнаны против yforge (не только llama.cpp) —
-MMLU 75.33% против 75.67% у llama.cpp, GSM8K 96.18% = 96.18%, ruMMLU 69.00% против 69.67%.
-Различия 1–2 вопроса из 300; замер шёл с включённым MTP W3, то есть спекулятивный декод
-качество не ломает.
+**Приёмка:** evals прогнаны и через llama.cpp, и через yforge. Все семь наборов закрыты
+(MMLU, GSM8K, ruMMLU, **HumanEval 85.37% против 83.54% у Q4_K_M**, tool-calling, needle,
+PPL). Через yforge: MMLU 75.33 против 75.67, GSM8K 96.18 = 96.18, ruMMLU 69.00 против 69.67 —
+различия 1–2 вопроса из 300; замер шёл с включённым MTP W3, то есть спекулятивный декод
+качество не ломает. **A5L-AWQ2 не проигрывает Q4_K_M ни на одном eval'е** (кроме MMLU −1 п.п.,
+в пределах шума), выигрывая на GSM8K и HumanEval.
 
 **Три ключевых результата:**
 1. **AWQ per-channel scaling** (FFN + attention, GQA-aware) — точный фолдинг в веса, без правок
@@ -190,6 +192,7 @@ Gate Phase 1: decode ≥58 t/s — выполнен; качество +0.59% PPL
 | 2026-10-11 | Phase 4-разведка: IQ3_XXS на FFN | 4.80 GB (−10.4%), но tg128 +1.9% и PPL +2.9% — невыгодно | `qamq-d1-tensor-types.txt` |
 | 2026-10-11 | Prefill: FA-tile и F16-сайдкар | Ни то, ни другое: tile ±2%, сайдкар +2.5% на коротком и −49% на 18.9k (VRAM) | `qamq-a.md`, `forge-convert --f16-heavy` |
 | 2026-10-11 | Prefill: nsys-профиль | GPU занят 97%; 60% — MMQ-GEMM (потолок по замерам 2026-08-25); разрыв структурный | `logs\pf-prof.nsys-rep`, `pf-prof.sqlite` |
+| 2026-10-11 | HumanEval + приёмка через yforge | HumanEval AWQ2 85.37% против Q4_K_M 83.54%; yforge совпал с llama.cpp на MMLU/GSM8K/ruMMLU | `results/he-awq2.json`, `results/eval-yforge-awq2.json` |
 
 ## Следующие шаги (после Phase 2.1)
 
