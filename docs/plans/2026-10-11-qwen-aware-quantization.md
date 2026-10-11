@@ -11,7 +11,7 @@
 |---|---|---|
 | Phase 0 — measurement/sensitivity | ✅ Done | [`2026-10-11-qamq-phase0.md`](../research/2026-10-11-qamq-phase0.md) |
 | Phase 1 — QAMQ-A mixed K-quant | ✅ Done: QAMQ-A3 | [`2026-10-11-qamq-a.md`](../research/2026-10-11-qamq-a.md) |
-| Phase 2.0 — валидация A3 (KLD/task evals) | 🔄 KLD к BF16 готов; task evals нет | [`qamq-a.md`](../research/2026-10-11-qamq-a.md) |
+| Phase 2.0 — валидация A3 (KLD/imatrix/task evals) | 🔄 KLD к BF16 + BF16-imatrix готовы; task evals нет | [`qamq-a.md`](../research/2026-10-11-qamq-a.md) |
 | Phase 2.1 — QAMQ-B rotation/AWQ/low-rank W4 | 📝 Запланировано | — |
 | Phase 3 — QAMQ-C DeltaNet/SSM/KV/MTP | 📝 Запланировано | — |
 | Phase 4 — QAMQ-D VQ/TCQ 2–3 бита | 📝 Запланировано | — |
@@ -137,6 +137,7 @@ Gate Phase 1: decode ≥58 t/s — выполнен; качество +0.59% PPL
 | 2026-10-11 | Phase 1: QAMQ-A/A2/A3 | A3: 58.5 t/s vs 53.7; PPL +0.59%; A2 failed | `2026-10-11-qamq-a.md` |
 | 2026-10-11 | Phase 1 gate | Decode gate пройден; MTP=1 всё ещё медленнее MTP=0 | `qamq-a3-tensor-types.txt` |
 | 2026-10-11 | Phase 2.0: KLD QAMQ-A3 vs BF16 (64 чанка) | A3 0.0536 против Q4_K_M 0.0508; quality ≈ Q4_K_M | `qamq\kld\kld-a3-64.log` |
+| 2026-10-11 | Phase 2.0: BF16-imatrix + QAMQ-A4 | Эффекта нет: PPL 15.3957 против A3 15.3736, KLD 0.05366 против 0.05357 | `bf16-imatrix.gguf`, `qamq-ppl-a4.log` |
 
 ## Риски и решения
 
