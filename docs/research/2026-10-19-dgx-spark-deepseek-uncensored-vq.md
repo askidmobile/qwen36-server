@@ -112,7 +112,7 @@ sidecar отсутствует. Сам artifact card также предупре
 
 ## Ограничения
 
-- VTuber/uncensored behavior после VQ не проверялся: это performance-тест,
+- Uncensored behavior после VQ не проверялся: это performance-тест,
   а не quality gate.
 - Нет сравнимого llama.cpp/vLLM прогона того же VQ-артефакта.
 - `nvidia-smi` не даёт VRAM на GB10; RSS/MemAvailable — прокси.
