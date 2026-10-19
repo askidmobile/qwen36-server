@@ -1,0 +1,3 @@
+engine,model,phase,target_context,repeat,ok,error,prompt_tokens,completion_tokens,cached_tokens,ttft_s,last_token_s,prefill_tok_s,decode_tok_s,wall_s,mem_available_before_mib,mem_available_after_mib,mem_available_min_mib,proc_rss_mib,proc_hwm_mib,prompt_sha256,output_text
+ds4-unc-no-engram,deepseek-v4.1-flash-1017-uncensored-vq,context,2048,1,False,no generated tokens or usage,0,0,0,,,,,0.01170136802829802,5209.633,5209.633,5209.633,0.0,0.0,53ae1488b8c7bf9a31097c4400539e470589976a7b19eee1e5375f5d85d5c5f5,
+ds4-unc-no-engram,deepseek-v4.1-flash-1017-uncensored-vq,context,8192,1,False,no generated tokens or usage,0,0,0,,,,,0.013943850994110107,5209.199,5209.48,5209.199,0.0,0.0,25773da67466495ad661516945689d22c04886cded5df074963f253e509c96fb,

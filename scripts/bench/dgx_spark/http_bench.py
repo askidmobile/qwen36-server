@@ -86,9 +86,16 @@ class Sampler:
             return self.mem_min, self.rss_max, self.hwm_max
 
 
-def make_prompt(target, nonce, ordinal):
-    # Английский текст даёт около 1.3 токена на слово; 0.72 оставляет запас
-    # под chat-template и токенизацию необычных идентификаторов.
+def make_prompt(target, nonce, ordinal, prompt_file=None):
+    if prompt_file:
+        text = Path(prompt_file).read_text(encoding="utf-8", errors="replace")
+        # Natural Italian prose is about 3.15 characters/token. Keep the
+        # request below the model context and rotate the window per run.
+        chars = min(max(512, int(target * 3.15)), len(text))
+        offset = (ordinal * 104729 + sum(map(ord, nonce))) % max(1, len(text) - chars + 1)
+        body = text[offset:offset + chars]
+        return f"run-{nonce}-{ordinal}.\n{body}\nEND-{nonce}. Reply with one short sentence."
+    # Fallback for synthetic microbenchmarks where no corpus is provided.
     count = max(1, int(target * 0.90))
     words = [f"run-{nonce}-{ordinal}"]
     words.extend(WORDS[(ordinal + i) % len(WORDS)] for i in range(count))
@@ -219,6 +226,7 @@ def main():
     parser.add_argument("--repeat-context", type=int, default=0)
     parser.add_argument("--repeat-count", type=int, default=0)
     parser.add_argument("--warmup", type=int, default=1)
+    parser.add_argument("--prompt-file", default="")
     parser.add_argument("--outdir", type=Path, required=True)
     args = parser.parse_args()
     args.outdir.mkdir(parents=True, exist_ok=True)
@@ -229,12 +237,12 @@ def main():
     csv_path = args.outdir / f"{args.engine}.csv"
     with jsonl_path.open("w", encoding="utf-8") as raw_log:
         for warmup in range(args.warmup):
-            warmup_prompt = make_prompt(512, f"{nonce}-warmup", warmup)
+            warmup_prompt = make_prompt(512, f"{nonce}-warmup", warmup, args.prompt_file)
             warmup_row = one_case(args, model, 512, warmup, warmup_prompt, "warmup")
             print(json.dumps(warmup_row, ensure_ascii=False), flush=True)
         for target in [int(v) for v in args.contexts.split(",") if v]:
             for repeat in range(1, args.repeats + 1):
-                prompt = make_prompt(target, nonce, repeat)
+                prompt = make_prompt(target, nonce, repeat, args.prompt_file)
                 row = one_case(args, model, target, repeat, prompt, "context")
                 rows.append(row)
                 raw_log.write(json.dumps({"prompt_tokens_estimate": target, **row,
@@ -243,7 +251,7 @@ def main():
                 raw_log.flush()
                 print(json.dumps(row, ensure_ascii=False), flush=True)
         if args.repeat_context and args.repeat_count:
-            prompt = make_prompt(args.repeat_context, nonce, 900000)
+            prompt = make_prompt(args.repeat_context, nonce, 900000, args.prompt_file)
             for repeat in range(1, args.repeat_count + 1):
                 row = one_case(args, model, args.repeat_context, repeat, prompt, "engram-repeat")
                 rows.append(row)

@@ -30,3 +30,10 @@ python3 scripts/bench/dgx_spark/http_bench.py \
 не попадает в итоговую команду линкера на aarch64. Для CUDA 13 PTX-модули
 `sm_121f` должны сохранять `.version 9.x`; понижение до `.version 8.6`
 приводит к `CUDA_ERROR_INVALID_PTX`.
+
+## DeepSeek V4.1 Flash 1017 UNCENSORED VQ
+
+`start_ds41_unc.sh` запускает `ds4-server` на
+`/workspace/models/ds41-1017-unc` с MTP auto, одним sequence lane и отключённым
+KV reuse. Это важно для повторного Engram-замера: иначе второй запрос с тем же
+prompt будет обслуживаться из prefix cache.
