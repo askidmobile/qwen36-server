@@ -1,0 +1,4 @@
+-rwxr-xr-x 1 root root 42M Oct 19 12:41 ds4
+-rwxr-xr-x 1 root root 41M Oct 19 12:41 ds4-agent
+-rwxr-xr-x 1 root root 41M Oct 19 12:41 ds4-bench
+-rwxr-xr-x 1 root root 45M Oct 19 12:41 ds4-server
