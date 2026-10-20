@@ -6,7 +6,7 @@ Open WebUI работает **на сервере** (порт 8080), модел�
 ## Запуск
 
 ```bash
-# 1. модель (если не запущена)
+# 1. модель
 ssh -i ~/.ssh/id_ed25519_gpuwerk root@dgx-forge.gpuwerk.com \
   'tmux new-session -d -s ds4 /workspace/forge-run/serve_win.sh'
 
@@ -14,35 +14,59 @@ ssh -i ~/.ssh/id_ed25519_gpuwerk root@dgx-forge.gpuwerk.com \
 ssh -i ~/.ssh/id_ed25519_gpuwerk root@dgx-forge.gpuwerk.com \
   'tmux new-session -d -s owuirun "bash /workspace/run_owui.sh"'
 
-# 3. туннель на порт 8080
+# 3. туннель
 ssh -N -L 8080:127.0.0.1:8080 -i ~/.ssh/id_ed25519_gpuwerk \
     root@dgx-forge.gpuwerk.com
 ```
 
 Открыть <http://127.0.0.1:8080> — авторизации нет.
 
-## Что настроено
+## Две модели в списке
 
-`/workspace/run_owui.sh`:
-
-| Переменная | Значение |
+| Модель | Что делает |
 |---|---|
-| `OPENAI_API_BASE_URL` | `http://127.0.0.1:8000/v1` |
-| `DEFAULT_MODELS` | `deepseek-v4.1-flash-1017-uncensored-vq` |
-| `WEBUI_AUTH` | `false` (без логина) |
-| `ENABLE_OLLAMA_API` | `false` |
-| `OFFLINE_MODE` | `true` (без обращений в интернет) |
-| `DATA_DIR` | `/workspace/owui-data` |
+| **чат (без рассуждений)** | `reasoning_effort: none`, отвечает сразу. Для обычных вопросов. |
+| **reasoner (с рассуждениями)** | `reasoning_effort: high`, сначала думает (блок «Думаю…» раскрывается). Для сложных задач. |
 
-Установлен в `/workspace/owui-venv` (Python venv, без Docker — на сервере
-Docker нет). Версия 0.12.3.
+Обе созданы в таблице `model` Open WebUI с preset-параметрами
+(`scripts/mkmodels.py`), потому что ds4-server по умолчанию включает
+thinking и `effort=high` — без этого модель уходила в многостраничные
+рассуждения даже на «2+2» и интерфейс выглядел зависшим.
 
-Ошибка `SentenceTransformer` в логе при старте безвредна: это RAG-эмбеддинги,
-они выключены (`OFFLINE_MODE=1`), чат от них не зависит.
+## Скорость генерации
+
+Клик по времени сообщения (например «20 окт., 14:29») раскрывает панель с
+метриками от ds4-server:
+
+```
+prompt_tokens: 6327      completion_tokens: 678
+prefill_tok_s: 574.9     decode_tok_s: 40.4      tok_per_step: 3
+ttft_ms: 19720
+```
+
+Этого не было: ds4-server отдавал `timings` только в non-streaming ответах,
+а Open WebUI всегда стримит. Патч в `crates/ds4-server/src/stream.rs`
+(`sse_usage_chunk`) добавляет тот же `timings` в финальный usage-чанк.
+
+## RAG включён
+
+`RAG_EMBEDDING_ENGINE=sentence-transformers` с локальной моделью
+`all-MiniLM-L6-v2` (скачана один раз в `/root/.cache/huggingface`).
+Работает поиск по загруженным файлам. Веб-поиск выключен
+(`ENABLE_RAG_WEB_SEARCH=false`) — включается в Settings → Web Search.
+
+## Файлы на сервере
+
+| Путь | Что |
+|---|---|
+| `/workspace/owui-venv` | venv с Open WebUI 0.12.3 |
+| `/workspace/owui-data` | база, настройки, загруженные файлы |
+| `/workspace/run_owui.sh` | запуск Open WebUI |
+| `/workspace/forge-run/serve_win.sh` | запуск ds4-server |
+| `/workspace/mkmodels.py` | создание двух моделей с preset-параметрами |
 
 ## Ограничения
 
-- RAG/веб-поиск/embeddings не работают (offline). Для чата с моделью не нужны.
 - Один пользователь, авторизация выключена. Слушает `127.0.0.1`, снаружи
   доступен только через SSH-туннель.
-- Прокси `serve.py` и `index.html` удалены — они больше не нужны.
+- Docker на сервере нет, поэтому venv. На Mac Docker удалён.
