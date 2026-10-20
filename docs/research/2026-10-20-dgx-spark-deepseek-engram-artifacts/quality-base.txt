@@ -1,0 +1,5 @@
+Speculative decoding preserves the exact greedy output because the acceptance/rejection rule is designed so that the final sampled sequence is distributionally identical to the target model’s greedy (or sampling) sequence—under the target model’s own distribution—and, in the greedy case, identical token-for-token to ordinary greedy decoding.
+
+Here is the precise mechanism, including the verify step:
+
+1. **Draft phase (speculation).** A small draft model (or heuristic) proposes
