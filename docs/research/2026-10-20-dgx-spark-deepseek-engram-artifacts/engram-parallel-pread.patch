@@ -1,0 +1,229 @@
+diff --git a/crates/ds4-core/src/engram.rs b/crates/ds4-core/src/engram.rs
+index 21b955a5..30fed825 100644
+--- a/crates/ds4-core/src/engram.rs
++++ b/crates/ds4-core/src/engram.rs
+@@ -202,6 +202,105 @@ pub struct EngramRow {
+     pub scale: Vec<u8>,
+ }
+ 
++/// One read the parallel row reader must issue: `len` bytes at `off`
++/// straight into the caller's pinned slot at `dst`.
++#[derive(Clone, Copy)]
++pub struct Span {
++    pub off: u64,
++    pub len: u32,
++    pub dst: usize,
++}
++
++impl EngramShard {
++    /// Issue every span through at most `threads` scoped worker threads. The
++    /// serial chain this replaces costs one disk latency per 264-byte row
++    /// (~100 us on the Spark's NVMe); the same reads in flight cost about one
++    /// disk latency for the whole round.
++    ///
++    /// O_DIRECT preserves the engine's bounce-buffer contract: each worker
++    /// owns one aligned bounce and copies the requested span out. Buffered
++    /// shards (the fallback open) read straight into the destination.
++    pub fn read_spans(&self, spans: &[Span], threads: usize) -> Result<(), EngramError> {
++        if spans.is_empty() {
++            return Ok(());
++        }
++        let threads = threads.max(1).min(spans.len());
++        let chunk = spans.len().div_ceil(threads);
++        let direct = self.dio;
++        let file = &self.file;
++        let mut first_err: Option<String> = None;
++        std::thread::scope(|scope| {
++            let mut handles = Vec::with_capacity(threads);
++            for t in 0..threads {
++                let lo = t * chunk;
++                if lo >= spans.len() {
++                    break;
++                }
++                let hi = (lo + chunk).min(spans.len());
++                let part = &spans[lo..hi];
++                handles.push(scope.spawn(move || -> Result<(), EngramError> {
++                    let mut bounce = if direct {
++                        Some(
++                            Bounce::new(EDIO_ALIGN * 2)
++                                .ok_or_else(|| EngramError::Io("bounce alloc".into()))?,
++                        )
++                    } else {
++                        None
++                    };
++                    for sp in part {
++                        if let Some(b) = bounce.as_mut() {
++                            let a = sp.off & !(EDIO_ALIGN as u64 - 1);
++                            let need = (sp.off - a) as usize + sp.len as usize;
++                            let nb = need.div_ceil(EDIO_ALIGN) * EDIO_ALIGN;
++                            if nb > b.len {
++                                *b = Bounce::new(nb)
++                                    .ok_or_else(|| EngramError::Io("bounce alloc".into()))?;
++                            }
++                            let buf = b.as_mut_slice();
++                            file.read_exact_at(&mut buf[..nb], a)
++                                .map_err(|e| EngramError::Io(e.to_string()))?;
++                            unsafe {
++                                std::ptr::copy_nonoverlapping(
++                                    buf.as_ptr().add((sp.off - a) as usize),
++                                    sp.dst as *mut u8,
++                                    sp.len as usize,
++                                );
++                            }
++                        } else {
++                            let dst = unsafe {
++                                std::slice::from_raw_parts_mut(sp.dst as *mut u8, sp.len as usize)
++                            };
++                            file.read_exact_at(dst, sp.off)
++                                .map_err(|e| EngramError::Io(e.to_string()))?;
++                        }
++                    }
++                    Ok(())
++                }));
++            }
++            for h in handles {
++                match h.join() {
++                    Ok(Ok(())) => {}
++                    Ok(Err(e)) => {
++                        if first_err.is_none() {
++                            first_err = Some(e.to_string());
++                        }
++                    }
++                    Err(_) => {
++                        if first_err.is_none() {
++                            first_err = Some("engram reader panicked".into());
++                        }
++                    }
++                }
++            }
++        });
++        match first_err {
++            Some(e) => Err(EngramError::Io(e)),
++            None => Ok(()),
++        }
++    }
++}
++
++
+ pub struct EngramShard {
+     file: File,
+     dio: bool,
+diff --git a/crates/ds4-core/src/v41_run.rs b/crates/ds4-core/src/v41_run.rs
+index 098ea47f..3ba5233f 100644
+--- a/crates/ds4-core/src/v41_run.rs
++++ b/crates/ds4-core/src/v41_run.rs
+@@ -273,6 +273,36 @@ impl EngramAssets {
+     }
+ }
+ 
++/// `DS41_ENGRAM_READ_THREADS`: worker threads for one engram round. The
++/// serial path the port inherited issues one pread per 264-byte row, so a
++/// 64-row decode round costs 64 disk latencies; the same rows in flight cost
++/// roughly one. Defaults to 16 (the measured knee on the Spark's NVMe: 1
++/// thread 29.6 ms, 16 threads 3.65 ms for 288 reads). 0 or 1 restores the
++/// serial path.
++fn engram_read_threads() -> usize {
++    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
++    *N.get_or_init(|| {
++        std::env::var("DS41_ENGRAM_READ_THREADS")
++            .ok()
++            .and_then(|v| v.parse::<usize>().ok())
++            .unwrap_or(16)
++    })
++}
++
++/// `DS41_ADMIT_X1024`: the serving admission's multiplier over the prefill's
++/// peak, in thousandths (default 2048 = the engine's 2x). The prefill refuses
++/// when MemAvailable is below `mult/1024 * peak`.
++fn admit_multiplier() -> u64 {
++    static M: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
++    *M.get_or_init(|| {
++        std::env::var("DS41_ADMIT_X1024")
++            .ok()
++            .and_then(|v| v.parse::<u64>().ok())
++            .filter(|&v| v >= 1024)
++            .unwrap_or(2048)
++    })
++}
++
+ fn setup_cache_on() -> bool {
+     std::env::var_os("DS41_NO_SETUP_CACHE").is_none()
+ }
+@@ -1089,6 +1119,10 @@ impl FeedCore {
+         base: *mut u8,
+     ) -> std::result::Result<(), String> {
+         let k = ei as usize;
++        let hd = self.head_dim as u64;
++        let nsc = hd / 32;
++        let mut spans: Vec<crate::engram::Span> =
++            Vec::with_capacity((end - start) * self.cols as usize * 2);
+         for (i, p) in (start..end).enumerate() {
+             let rows = self.hash.rows(&self.hist, p as i64, ei);
+             for (c, &row_id) in rows.iter().enumerate() {
+@@ -1098,27 +1132,24 @@ impl FeedCore {
+                         self.rows[k]
+                     ));
+                 }
+-                let row = self.shards[k]
+-                    .row(
+-                        self.weight_off[k],
+-                        self.scale_off[k],
+-                        row_id as u64,
+-                        self.head_dim,
+-                    )
+-                    .map_err(|e| e.to_string())?;
++                let r = row_id as u64;
+                 let slot = (i * self.cols as usize + c) * self.stride as usize;
+-                unsafe {
+-                    let dst = base.add(slot);
+-                    std::ptr::copy_nonoverlapping(row.weights.as_ptr(), dst, row.weights.len());
+-                    std::ptr::copy_nonoverlapping(
+-                        row.scale.as_ptr(),
+-                        dst.add(row.weights.len()),
+-                        row.scale.len(),
+-                    );
+-                }
++                let wdst = unsafe { base.add(slot) };
++                spans.push(crate::engram::Span {
++                    off: self.weight_off[k] + r * hd,
++                    len: hd as u32,
++                    dst: wdst as usize,
++                });
++                spans.push(crate::engram::Span {
++                    off: self.scale_off[k] + r * nsc,
++                    len: nsc as u32,
++                    dst: unsafe { wdst.add(hd as usize) } as usize,
++                });
+             }
+         }
+-        Ok(())
++        self.shards[k]
++            .read_spans(&spans, engram_read_threads())
++            .map_err(|e| e.to_string())
+     }
+ }
+ 
+@@ -1881,9 +1912,21 @@ impl Model {
+                 + unsafe { ds4_bridge_v41_images_bytes(images_ptr) };
+             let peak_mb = peak >> 20;
+             if let Some(avail_mb) = mem_available_mb() {
+-                if avail_mb >= 0 && (avail_mb as u64) < 2u64 * peak_mb {
++                // The engine's 2x margin covers backend scratch and the index
++                // draft's transient. It is conservative: on GB10 the model is
++                // already resident, so the peak is the per-request workspace,
++                // not a second copy of the weights. DS41_ADMIT_X1024 lowers the
++                // multiplier for runs that need the tight fit (e.g. a second
++                // request right after a decode graph capture left MemAvailable
++                // just under 2x); the bound is the prompt's own peak either way.
++                let mult = admit_multiplier();
++                // mult is in thousandths: 2048 = 2x, 1024 = 1x. Compare
++                // avail*1024 against mult*peak without losing the fraction.
++                if avail_mb >= 0 && (avail_mb as u64) * 1024 < mult * peak_mb {
+                     return Err(asset_error(&format!(
+-                        "prefill needs {peak_mb} MB peak (admission 2x), only {avail_mb} MB available"
++                        "prefill needs {peak_mb} MB peak (admission {}.{:03}x), only {avail_mb} MB available",
++                        mult / 1024,
++                        (mult % 1024) * 1000 / 1024
+                     )));
+                 }
+             }
