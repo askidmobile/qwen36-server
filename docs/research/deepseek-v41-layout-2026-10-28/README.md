@@ -168,10 +168,10 @@ layer-uniform 12-битной раскладке; mixed map пока reference-o
 
 ## Загрузка и конвертация
 
-Проверено 2026-10-28 22:40 на `yttri-win`:
+Проверено 2026-10-28 23:25 на `yttri-win`:
 
 - backbone: 4 шарда, 138.24 GB, все `.done`;
-- Engram: 52.6 GB из 110.6 GB, ещё качается.
+- Engram: 85.6 GB из 110.6 GB, ещё качается.
 
 `scripts/qamq/preflight_shards.py` подтверждает, что скачанный backbone — **старый
 layout до 27 октября**: 6 тензоров `engram_q`/`engram_k`/`engram_wkv`, нет
