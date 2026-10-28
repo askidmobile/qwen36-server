@@ -1,0 +1,221 @@
+{
+  "reference_bits": 12,
+  "dim": 8,
+  "blocks": 40000,
+  "experts": [
+    {
+      "meta": {
+        "tensor": "blk.0.ffn_up_exps.weight",
+        "shard": "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf",
+        "data_offset": 1987581504,
+        "ggml_type": 29,
+        "expert": 0,
+        "experts_total": 384,
+        "shape": [
+          2304,
+          5120
+        ],
+        "intermediate": 2304,
+        "hidden": 5120
+      },
+      "curve": {
+        "9": 0.23590567708015442,
+        "10": 0.17202645540237427,
+        "11": 0.10939377546310425,
+        "12": 0.05619961768388748,
+        "13": 0.024205168709158897
+      }
+    },
+    {
+      "meta": {
+        "tensor": "blk.20.ffn_up_exps.weight",
+        "shard": "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00002-of-00004.gguf",
+        "data_offset": 26135472864,
+        "ggml_type": 29,
+        "expert": 7,
+        "experts_total": 384,
+        "shape": [
+          2304,
+          5120
+        ],
+        "intermediate": 2304,
+        "hidden": 5120
+      },
+      "curve": {
+        "9": 0.2268408089876175,
+        "10": 0.16296613216400146,
+        "11": 0.10216125100851059,
+        "12": 0.05177052319049835,
+        "13": 0.021702542901039124
+      }
+    },
+    {
+      "meta": {
+        "tensor": "blk.39.ffn_up_exps.weight",
+        "shard": "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00004-of-00004.gguf",
+        "data_offset": 14364758144,
+        "ggml_type": 17,
+        "expert": 383,
+        "experts_total": 384,
+        "shape": [
+          2304,
+          5120
+        ],
+        "intermediate": 2304,
+        "hidden": 5120
+      },
+      "curve": {
+        "9": 0.2645534574985504,
+        "10": 0.21135587990283966,
+        "11": 0.16294322907924652,
+        "12": 0.11914869397878647,
+        "13": 0.07915603369474411
+      }
+    },
+    {
+      "meta": {
+        "tensor": "blk.20.ffn_down_exps.weight",
+        "shard": "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00002-of-00004.gguf",
+        "data_offset": 25144568544,
+        "ggml_type": 29,
+        "expert": 7,
+        "experts_total": 384,
+        "shape": [
+          5120,
+          2304
+        ],
+        "intermediate": 5120,
+        "hidden": 2304
+      },
+      "curve": {
+        "9": 0.23144811391830444,
+        "10": 0.16756199300289154,
+        "11": 0.10392703860998154,
+        "12": 0.05314219743013382,
+        "13": 0.021971862763166428
+      }
+    },
+    {
+      "meta": {
+        "tensor": "blk.3.ffn_gate_exps.weight",
+        "shard": "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf",
+        "data_offset": 9181959744,
+        "ggml_type": 29,
+        "expert": 100,
+        "experts_total": 384,
+        "shape": [
+          2304,
+          5120
+        ],
+        "intermediate": 2304,
+        "hidden": 5120
+      },
+      "curve": {
+        "9": 0.2281123250722885,
+        "10": 0.16376623511314392,
+        "11": 0.10230815410614014,
+        "12": 0.05244952812790871,
+        "13": 0.0218009315431118
+      }
+    },
+    {
+      "meta": {
+        "tensor": "blk.12.ffn_up_exps.weight",
+        "shard": "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00002-of-00004.gguf",
+        "data_offset": 760322784,
+        "ggml_type": 16,
+        "expert": 250,
+        "experts_total": 384,
+        "shape": [
+          2304,
+          5120
+        ],
+        "intermediate": 2304,
+        "hidden": 5120
+      },
+      "curve": {
+        "9": 0.25584447383880615,
+        "10": 0.2010909467935562,
+        "11": 0.1515558958053589,
+        "12": 0.10654988139867783,
+        "13": 0.06723010540008545
+      }
+    },
+    {
+      "meta": {
+        "tensor": "blk.25.ffn_down_exps.weight",
+        "shard": "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00003-of-00004.gguf",
+        "data_offset": 2463439456,
+        "ggml_type": 16,
+        "expert": 42,
+        "experts_total": 384,
+        "shape": [
+          5120,
+          2304
+        ],
+        "intermediate": 5120,
+        "hidden": 2304
+      },
+      "curve": {
+        "9": 0.26104873418807983,
+        "10": 0.20571933686733246,
+        "11": 0.1551593691110611,
+        "12": 0.10947328805923462,
+        "13": 0.0691029354929924
+      }
+    },
+    {
+      "meta": {
+        "tensor": "blk.33.ffn_gate_exps.weight",
+        "shard": "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00003-of-00004.gguf",
+        "data_offset": 29294717536,
+        "ggml_type": 16,
+        "expert": 300,
+        "experts_total": 384,
+        "shape": [
+          2304,
+          5120
+        ],
+        "intermediate": 2304,
+        "hidden": 5120
+      },
+      "curve": {
+        "9": 0.2556280791759491,
+        "10": 0.20128217339515686,
+        "11": 0.1517414152622223,
+        "12": 0.10641148686408997,
+        "13": 0.06676387786865234
+      }
+    },
+    {
+      "meta": {
+        "tensor": "blk.37.ffn_up_exps.weight",
+        "shard": "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00004-of-00004.gguf",
+        "data_offset": 5500625024,
+        "ggml_type": 16,
+        "expert": 5,
+        "experts_total": 384,
+        "shape": [
+          2304,
+          5120
+        ],
+        "intermediate": 2304,
+        "hidden": 5120
+      },
+      "curve": {
+        "9": 0.259147047996521,
+        "10": 0.2031901776790619,
+        "11": 0.15307673811912537,
+        "12": 0.10779467970132828,
+        "13": 0.06738059967756271
+      }
+    }
+  ],
+  "median_ratio_to_reference": {
+    "9": 2.4041,
+    "10": 1.8915,
+    "11": 1.426,
+    "12": 1.0,
+    "13": 0.6251
+  }
+}
