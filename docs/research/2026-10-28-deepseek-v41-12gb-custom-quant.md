@@ -140,8 +140,11 @@ DQVP v4 (index-expert pack)
    `error(layer, expert, codec)` на held-out токенах после GPTQ/refit и принять её
    только при ≥2% выигрыша над uniform на тех же байтах. Weight-only статистика не
    годится: у YoungAi разброс 1.9%, у нас mixed-план проигрывает +64%.
-4. **DQVL v4 — только если калибровка даст выигрыш.** Per-slot codec descriptor,
+4. **DQVL v4 — только если калибровка даст выигрыш.** Пер-slot codec descriptor,
    индекс, fused dispatch по группам codec. Иначе это работа без прибыли.
+   Важно: dsx уже умеет activation-калиброванную раскладку скалярных типов
+   (`quant/v41/v41_alloc.py` по `stats/L*.json`), но это **другие кодеки** — его
+   ошибки нельзя подавать в VQ-аллокатор, и скрипт теперь явно отвергает такой вход.
 5. **Замер.** 128K needle, KLD/top-1, decode/prefill, `nvidia-smi` VRAM и Shared Usage.
 
 ## 6. Честные ограничения
