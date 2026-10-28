@@ -18,6 +18,11 @@ NAMES = {0:'F32',1:'F16',2:'Q4_0',3:'Q4_1',6:'Q5_0',7:'Q5_1',8:'Q8_0',9:'Q8_1',1
  19:'IQ3_XXS',20:'IQ4_NL',21:'IQ3_S',22:'IQ2_M',23:'IQ4_XS',24:'I8',25:'I16',26:'I32',
  27:'I64',28:'F64',29:'IQ1_S',30:'BF16',34:'TQ1_0',39:'MXFP4'}
 
+def read_names(path):
+    """Just the tensor names, for layout checks that do not need shapes."""
+    return [t[0] for t in read(path)]
+
+
 def read(path):
     with open(path,'rb') as f:
         buf = f.read(64 << 20)  # 64 MiB: the 129k-token vocabulary alone is ~4 MB

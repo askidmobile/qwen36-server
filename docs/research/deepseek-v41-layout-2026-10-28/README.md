@@ -161,22 +161,39 @@ layer-uniform 12-битную раскладку, а не доказанное �
 
 ## Загрузка и конвертация
 
-Проверено 2026-10-28 20:31 на `yttri-win`: шард 1 (39.08 GB) и шард 2 (39.39 GB)
-готовы, шард 3 скачан на 38.5 GB из ~39.1 GB. Остался хвост шарда 3 и весь шард 4
-(~39 GB), то есть примерно час при текущей скорости.
+Проверено 2026-10-28 22:40 на `yttri-win`:
 
-**Важно:** имена файлов `-0000N-of-00004.gguf` означают раскладку до 27 октября.
-llama.cpp b11870 и текущий Strata читают только новый 6-шарочный layout, поэтому
-после загрузки обязателен `convert_ds41_upstream.py` из репозитория ISTA-DASLab:
+- backbone: 4 шарда, 138.24 GB, все `.done`;
+- Engram: 52.6 GB из 110.6 GB, ещё качается.
+
+`scripts/qamq/preflight_shards.py` подтверждает, что скачанный backbone — **старый
+layout до 27 октября**: 6 тензоров `engram_q`/`engram_k`/`engram_wkv`, нет
+`per_layer_token_embd`, нет `engram_gate`/`engram_kv`. llama.cpp b11870+ и текущий
+Strata такой набор не откроют.
+
+Нужна конвертация:
 
 ```sh
-hf download ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF convert_ds41_upstream.py --local-dir .
-python convert_ds41_upstream.py X:\Strata\data\models\deepseek-v4.1-flash-IST-DAS-2.00bpw --delete-old
+# once, in the model folder
+hf download ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF \
+  convert_ds41_upstream.py chat_template.jinja exp_probs_b_vl.f32 --local-dir .
+
+# Engram must be complete first: the converter rewrites its header in place
+python convert_ds41_upstream.py X:\Strata\data\models\deepseek-v4.1-flash-IST-DAS-2.00bpw
 ```
 
-Конвертеру нужно свободное место под новые шарды (138 GB для 2.00bpw). На `C:` сейчас
-217 GB free, на `X:` около 969 GB, поэтому `--out` на `C:` и затем junction обратно.
-Без конвертации `strata-dsv41` не откроет pack, и все замеры ниже недействительны.
+Требования и ограничения:
+
+- нужно **138 GB свободного места** под новые шарды рядом со старыми; на `C:` 178 GB,
+  на `X:` около 930 GB;
+- без `--delete-old` старые шарды остаются, то есть операция обратима;
+- конвертер переписывает только заголовок Engram-файла, 110 GB таблиц остаются на месте,
+  но файл должен быть **докачан и проверен**;
+- перед запуском повторить `preflight_shards.py` — он должен сказать
+  `ready: current layout`.
+
+**Диск важнее конвертации.** Backbone сейчас на `X:` (SATA HDD). При 456 MB трафика
+на токен это 0.3 tok/s. Перенос на `C:` NVMe — обязательное условие, а не оптимизация.
 
 ## Обязательная приёмка после загрузки
 
