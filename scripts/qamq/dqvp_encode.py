@@ -7,10 +7,11 @@ tensor whose row length is a multiple of the VQ dimension, so a real FFN matrix
 of another model can validate the pipeline before V4.1 weights are available.
 
     python scripts/qamq/dqvp_encode.py MODEL.gguf --tensor NAME \
-        --groups 8 --plan 13,12,10,9 --out pack.bin
+        --plan 13,12,10,9 --out pack.bin
 
-Each row group gets the next width from ``--plan`` (cyclic), which is how a
-hot/warm/cold tier map looks once it is flattened onto real matrices.
+The matrix is split into ``len(plan)`` contiguous row groups, one per tier.
+This is a reference encoder for validating the container, not the all-expert
+builder; it deliberately handles one matrix at a time.
 """
 from __future__ import annotations
 
@@ -174,7 +175,6 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"{matrix.shape[0]} rows do not split into {len(plan)} groups")
     tensor = type("T", (), {"name": label})()
 
-    codecs, slots, recon = encode(matrix, plan, args.dim, args.iters, args.seed)
     codecs, slots, recon = encode(matrix, plan, args.dim, args.iters, args.seed)
     n_rows = {slot.expert: matrix.shape[0] // len(plan) for slot in slots}
     accounting = dq.write_container(args.out, slots, codecs)

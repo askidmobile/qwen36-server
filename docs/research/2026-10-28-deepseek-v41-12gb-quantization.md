@@ -117,12 +117,12 @@ codec, чтобы routing не добавлял новую ветку на ка�
 
 | Компонент | Измерено/посчитано |
 |---|---:|
-| dense/attention/shared/router/head | 5.69 GB (5.30 GiB) по RCO |
-| dequant/GEMM workspace dense-слоёв | ~573 MiB |
+| dense/attention/shared/router/head/hc | 5.96 GB (5.55 GiB) по RCO |
+| dequant/GEMM workspace dense-слоёв | ~600 MiB |
 | compressed KV + indexer + window @128K | 130 MiB при `q8_0` (245 при `f16`) |
 | prefill workspace | 1 024 MiB |
 | CUDA context, WDDM | 512 MiB |
-| **hot expert cache** | **4 452 MiB** |
+| **hot expert cache** | **4 172 MiB** |
 
 Уточнение 2026-10-28: ранняя оценка «dense 4.5 GiB и hot cache 5–6 GiB» была
 неверной. Dense посчитан пересчётом всех 1043 тензоров официальной
@@ -186,8 +186,8 @@ python scripts/qamq/ds41_vram_alloc.py \
   --routing-format auto \
   --stats calibration/stats-*.txt \
   --budget-gb 120 \
-  --dense-mib 4608 --kv-mib 256 --workspace-mib 1024 --reserve-mib 512 \
-  --ram-mib 32768 --min-improvement 0.02 --min-stats-coverage 1.0 \
+  --dense-mib 6280 --kv-mib 300 --workspace-mib 1024 --reserve-mib 512 \
+  --ram-mib 31744 --min-improvement 0.02 --min-stats-coverage 1.0 \
   --out-table calibration/ds41-nc.txt \
   --profile-format ds4-counts \
   --out-profile calibration/ds41-expert-profile.bin \
@@ -223,22 +223,22 @@ expert.
 
 ## Сухая проверка аллокатора на опубликованной hotness-карте
 
-Для uniform 12-битного DQVL-варианта и бюджета `4 452 MiB` под experts аллокатор
+Для uniform 12-битного DQVL-варианта и бюджета `4 172 MiB` под experts аллокатор
 на карте `dsx-2bit` прогнозирует:
 
 | Параметр | Значение |
 |---|---:|
 | всего experts | 15 360 |
-| VRAM experts | 701 |
-| покрытие всех routed picks | 26.1% |
+| VRAM experts | 657 |
+| покрытие всех routed picks | 25.2% |
 | RAM budget | 31 GiB |
 | RAM experts | 5 001 |
-| VRAM + RAM coverage | 71.8% |
-| experts только на SSD | 9 646 |
+| VRAM + RAM coverage | 71.5% |
+| experts только на SSD | 9 702 |
 | routed expert payload | 95.2 GiB |
 
 Это арифметика выбранных offsets и profile, а не замер скорости нового runtime.
-Она показывает, почему индексный формат полезен: 701 expert помещается в 4 452 MiB
+Она показывает, почему индексный формат полезен: 657 experts помещаются в 4 172 MiB
 только потому, что средний 12-битный VQ expert занимает 6.66 MB.
 При scalar Q2 размере около 9–10 MB в тот же бюджет вошло бы примерно на 30% меньше
 experts.

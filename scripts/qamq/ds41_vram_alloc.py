@@ -11,13 +11,11 @@ small and concrete:
   (or an optional ranked ``STRP`` profile for the generic Strata engine);
 * a JSON report with byte accounting and predicted cache coverage.
 
-Weight-only allocation is not trusted here. Existing DeepSeek measurements
-show that expert weights are almost equally sensitive. Non-uniform precision
-requires measured tier statistics covering the configured fraction of experts
-and a routing-weighted proxy gain over the uniform baseline. YoungAi text stats
-are weight-error measurements; activation-calibrated errors need a separate
-adapter or the dsx/Xolotl allocator. Missing measurements stay explicit, and
-the theoretical 8-D VQ curve requires an experimental opt-in.
+Weight-only allocation is not trusted here. Precision tiers require measured
+error evidence: either per-expert stats or a measured VQ curve from real
+DeepSeek-V4.1 experts (``vq_curve_v41.py``). Without one, the allocator stays
+uniform. The default budget matches an RTX 3060 12 GB with a 128K cache:
+6 280 MiB dense, 300 MiB KV, 4 172 MiB experts, 31 GiB host RAM.
 """
 
 from __future__ import annotations
@@ -57,11 +55,11 @@ class Shape:
 @dataclass(frozen=True)
 class Budgets:
     vram_mib: int = 12288
-    dense_mib: int = 4608
-    kv_mib: int = 256
+    dense_mib: int = 6280
+    kv_mib: int = 300
     workspace_mib: int = 1024
     reserve_mib: int = 512
-    ram_mib: int = 49152
+    ram_mib: int = 31744
 
     @property
     def vram_expert_bytes(self) -> int:
@@ -902,11 +900,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--codebook-bytes", type=int, default=1)
     parser.add_argument("--slot-overhead", type=int, default=0)
     parser.add_argument("--vram-mib", type=int, default=12288)
-    parser.add_argument("--dense-mib", type=int, default=4608)
-    parser.add_argument("--kv-mib", type=int, default=256)
+    parser.add_argument("--dense-mib", type=int, default=6280)
+    parser.add_argument("--kv-mib", type=int, default=300)
     parser.add_argument("--workspace-mib", type=int, default=1024)
     parser.add_argument("--reserve-mib", type=int, default=512)
-    parser.add_argument("--ram-mib", type=int, default=49152)
+    parser.add_argument("--ram-mib", type=int, default=31744)
     parser.add_argument(
         "--curve",
         type=Path,

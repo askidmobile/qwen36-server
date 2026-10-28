@@ -1,10 +1,12 @@
 {
-  "layout": {
+  "uniform": {
     "mode": "uniform",
     "histogram": {
       "12": 15360
     },
     "selected_gb": 102.22,
+    "weighted_error": 40.0,
+    "improvement_vs_uniform": 0.0,
     "vram_experts": 657,
     "vram_coverage": 0.2518,
     "ram_experts": 5001,
@@ -12,11 +14,10 @@
     "ssd_experts": 9702,
     "ssd_mb_per_token": 455.6,
     "moe_cache_mib": 4171,
-    "layer_placement_useful": false,
     "safe_for_build": true,
     "runtime_note": "layer-uniform 12/13-bit map is representable by current DQVL v3"
   },
-  "layout-hotness": {
+  "hotness": {
     "mode": "hotness",
     "histogram": {
       "9": 8756,
@@ -27,6 +28,8 @@
       "14": 0
     },
     "selected_gb": 81.4,
+    "weighted_error": 31.8489,
+    "improvement_vs_uniform": 0.0,
     "vram_experts": 643,
     "vram_coverage": 0.245,
     "ram_experts": 6009,
@@ -34,8 +37,28 @@
     "ssd_experts": 8708,
     "ssd_mb_per_token": 312.5,
     "moe_cache_mib": 4170,
-    "layer_placement_useful": false,
     "safe_for_build": false,
     "runtime_note": "index widths [9, 10] need DQVL v4 kernels; current v3 covers 12/13 bits"
+  },
+  "calibrated": {
+    "mode": "nonuniform",
+    "histogram": {
+      "10": 4454,
+      "11": 543,
+      "12": 915,
+      "13": 9448
+    },
+    "selected_gb": 102.22,
+    "weighted_error": 29.5302,
+    "improvement_vs_uniform": 0.2617,
+    "vram_experts": 606,
+    "vram_coverage": 0.2411,
+    "ram_experts": 4618,
+    "vram_ram_coverage": 0.6902,
+    "ssd_experts": 10136,
+    "ssd_mb_per_token": 536.0,
+    "moe_cache_mib": 4170,
+    "safe_for_build": false,
+    "runtime_note": "index widths [10, 11] need DQVL v4 kernels; current v3 covers 12/13 bits"
   }
 }

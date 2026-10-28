@@ -395,6 +395,36 @@ class Ds41VramAllocTest(unittest.TestCase):
         self.assertEqual(db.nbytes((5120,), "F32"), 5120 * 4)
         self.assertEqual(db.nbytes((5120, 384), "BF16"), 5120 * 384 * 2)
 
+    def test_default_budget_matches_the_3060_128k_plan(self):
+        budgets = alloc.Budgets()
+        self.assertEqual(budgets.dense_mib, 6280)
+        self.assertEqual(budgets.kv_mib, 300)
+        self.assertEqual(budgets.ram_mib, 31744)
+        self.assertEqual(budgets.vram_expert_bytes, 4172 * alloc.MIB)
+
+    def test_measured_curve_allocation_beats_uniform_at_the_same_size(self):
+        base = ROOT / "docs" / "research" / "deepseek-v41-layout-2026-10-28"
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "calibrated.json"
+            code = alloc.main([
+                "--routing", str(base / "reference" / "expert-rank.json"),
+                "--curve", str(base / "vq-curve-v41-9experts.json"),
+                "--candidates", "10,11,12,13",
+                "--mode", "calibrated",
+                "--out-report", str(report),
+            ])
+            self.assertEqual(code, 0)
+            data = json.loads(report.read_text())
+        allocation = data["allocation"]
+        self.assertEqual(allocation["mode"], "nonuniform")
+        self.assertLessEqual(
+            allocation["selected_bytes"], allocation["uniform_bytes"] + (1 << 20)
+        )
+        self.assertGreaterEqual(
+            allocation["predicted_weighted_error"]["selected_improvement"], 0.20
+        )
+        self.assertFalse(allocation["runtime"]["build_compatible"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -24,17 +24,18 @@
 
 | Компонент | MiB |
 |---|---:|
-| dense/attention/router/shared/head | 5 427 |
-| dequant/GEMM workspace dense-слоёв | 573 |
-| 128K KV, index keys, scratch | 225 |
+| dense/attention/router/shared/head/hc | 5 680 |
+| dequant/GEMM workspace dense-слоёв | 600 |
+| 128K KV, index keys, scratch | 300 |
 | workspace и prompt buffers | 1 024 |
 | WDDM/CUDA/reserve | 512 |
-| routed expert cache | 4 713 |
+| routed expert cache | 4 172 |
 
 Dense посчитан пересчётом официальной `rco-allocation.txt` по таблице блоков GGML:
-5.69 GB, а не оценка. При 12-битном VQ expert 6.66 MiB это 701 эксперт и 26.1%
-routing-weighted покрытия; при 10 битах 5.55 MiB — 841 эксперт и 28.7%. Scalar
-IQ2_XXS expert весит 8.60 MB, поэтому его в тот же VRAM влезает 542 (22.7%).
+5.96 GB, и модель сходится с реальными шардами до 210 MB. При 12-битном VQ expert
+6.66 MB это 657 экспертов и 25.2% routing-weighted покрытия; при 10 битах 5.55 MB —
+788 экспертов и 27.7%. Scalar IQ2_XXS expert весит 8.60 MB, поэтому в тот же VRAM
+влезает 542 эксперта (22.7%).
 
 128K KV у DeepSeek V4.1 дешёвый, и это подтверждено реализацией, а не только
 расчётом. В `src/llama-kv-cache-dsv4.cpp` у V4.1 `n_embd_comp = n_embd_head_k +
@@ -80,10 +81,11 @@ indexer_head_size = 640`, index-K хранится в той же строке, 
   `strata-dsv41 --expert-profile`; не `STRP`.
 - `expert-profile.strp` - тот же ranking в `STRP` version 1 для generic Strata
   expert cache; это отдельный формат и другой runtime.
-- `summary.json` - компактная сводка обеих раскладок (uniform 12 бит и 13/10/9).
-- `recipe.txt`, `recipe-hotness.txt` - готовые команды llama.cpp/Strata.
-- `nc-table.txt`, `nc-hotness.txt` - `L e nc` map для YoungAi.
-- `expert-profile-hotness.bin` - counts для mixed-раскладки.
+- `summary.json` - сводка uniform, hotness и measured-curve раскладок.
+- `layout-calibrated.json`, `recipe-calibrated.txt`, `nc-calibrated.txt`,
+  `expert-profile-calibrated.bin` - раскладка по измеренной VQ-кривой.
+- `vq-curve-v41-9experts.json` - измерения ошибки на реальных expert V4.1.
+- `recipe.txt`, `recipe-hotness.txt` - команды для uniform и tier-plan.
 
 Проверенные SHA-256:
 
@@ -92,7 +94,10 @@ indexer_head_size = 640`, index-K хранится в той же строке, 
 6c3682cbaefccf2417cf6891d74e9a4054314ea759bc92fb590618e4163c9114  expert-profile.bin
 367cbf053deb4cdd13953f648467a08452a81d74d594404cbc798839a254c66c  expert-profile.strp
 ce097d4355d4fb5e4318dbf323f7bb1618d289dd2963ae0b194e74335cf953b3  nc-table.txt
-8e0645934cd5b0da8f7a0b3c2236d291bb50888479089f9db382f5602c14fefe  summary.json
+53f19b7bc2c9eb0c61baddac2b2a275ae6b46ad8c29b348e00c79dd62113915c  nc-calibrated.txt
+2e44a6c78ea345e0126f2b33ac0ba77a41e2b36da424820e0733c01909cbc6d1  summary.json
+2303ca491049fd048a843509f90956c93718da1e8a157a92724d7923af2cafe2  recipe-calibrated.txt
+ddce3900edd2d09ccbe3b000746d7be51371ebff5bddb4c7552b2894f4b5aa09  vq-curve-v41-9experts.json
 ```
 
 Профиль воспроизводится командой:
@@ -101,7 +106,7 @@ ce097d4355d4fb5e4318dbf323f7bb1618d289dd2963ae0b194e74335cf953b3  nc-table.txt
 python3 scripts/qamq/ds41_vram_alloc.py \
   --routing reference/expert-rank.json \
   --candidates 12 --reference-bits 12 --mode uniform \
-  --vram-mib 12288 --dense-mib 6000 --kv-mib 225 \
+  --vram-mib 12288 --dense-mib 6280 --kv-mib 300 \
   --workspace-mib 1024 --reserve-mib 512 --ram-mib 31744 \
   --out-recipe recipe.txt \
   --out-profile expert-profile.bin \
@@ -122,7 +127,7 @@ python3 scripts/qamq/ds41_vram_alloc.py \
   --routing reference/expert-rank.json \
   --candidates 9,10,11,12,13,14 --min-bits 9 --max-bits 14 \
   --mode hotness --tier-plan 13,10,9 \
-  --vram-mib 12288 --dense-mib 6000 --kv-mib 225 \
+  --vram-mib 12288 --dense-mib 6280 --kv-mib 300 \
   --workspace-mib 1024 --reserve-mib 512 --ram-mib 31744 \
   --out-profile expert-profile-hotness.bin \
   --out-table nc-hotness.txt \
@@ -130,8 +135,10 @@ python3 scripts/qamq/ds41_vram_alloc.py \
   --out-report /tmp/layout-hotness.json
 ```
 
-Она даёт `safe_for_build=false`: 9 и 10 бит требуют DQVL v4, а по измеренной кривой
-ошибки ещё и проигрывают uniform 12 битам (см. `docs/research/2026-10-28-deepseek-v41-12gb-custom-quant.md`).
+Она даёт `safe_for_build=false`: tier-plan не использует измеренную кривую.
+Рабочая mixed-раскладка строится через `--mode calibrated --curve
+vq-curve-v41-9experts.json`; она снижает routing-weighted ошибку на 26.2% при том же
+размере, но требует DQVL v4 и увеличивает SSD traffic на 10%.
 
 ## Почему не per-expert precision «на глаз»
 
@@ -142,9 +149,9 @@ per-expert allocation без activation-calibrated sidecar. Поэтому hotne
 только размещением. Точность меняется лишь по измеренной output error.
 
 Текущий DQVL v3 принимает 12/13-битные индексы и одну ширину на слой. Смешанные
-ширины отдельных experts требуют DQVL v4 с per-slot codec descriptor и fused dispatch
-по группам одинаковых codecs. `safe_for_build=true` в текущем отчёте означает только
-layer-uniform 12-битную раскладку, а не доказанное превосходство mixed VQ.
+ширины отдельных experts требуют DQVP/DQVL v4 с per-slot codec descriptor и fused
+dispatch по группам одинаковых codecs. Поэтому `safe_for_build=true` относится к
+layer-uniform 12-битной раскладке; mixed map пока reference-only.
 
 ## Сравнение с Qwen3.8 27B
 

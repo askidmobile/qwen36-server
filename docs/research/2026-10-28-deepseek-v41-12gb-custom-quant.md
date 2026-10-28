@@ -95,11 +95,8 @@ GGUF хранит разных экспертов в разных типах, и
 сильно искажены, поэтому повторное квантование на 12 битах выглядит «лучше», чем есть.
 **Наименее загрязнённая оценка — эксперты, хранящиеся в IQ2_XXS**: 2.40 / 1.89 / 1.42 / 0.63.
 
-Главное следствие одно и то же для всех трёх вариантов кривой: полный перебор
-3-уровневых раскладок не находит **ни одной**, которая выигрывает у uniform 12 бит
-одновременно по размеру и по routing-weighted ошибке.
-
-Дальше перебираются все 3-уровневые раскладки (hot/warm/cold × положения границ,
+Дальше сравниваются uniform, трёхуровневые раскладки и жадная rate-distortion
+аллокация (hot/warm/cold × положения границ,
 18 000 комбинаций). Для каждой считается routing-weighted ошибка по 15 360 экспертам,
 размер и кэш-покрытие при VRAM 4 172 MiB / RAM 31 GiB:
 
@@ -183,37 +180,89 @@ DQVP v4 (index-expert pack)
 - `scripts/qamq/dqvp_pack.py` — reference-контейнер DQVP v4: заголовок, таблица
   codec'ов с per-expert шириной, битовая упаковка индексов, round-trip проверка
   (`--self-check`) и инспекция (`--inspect`). Это то, чего GGUF выразить не может.
-- `scripts/qamq/vq_error.py` — измеренная кривая ошибки VQ на реальных тензорах.
-- `scripts/qamq/ds41_vram_alloc.py` — аллокатор (24 теста): `--mode uniform|hotness|calibrated`,
-  чтение Strata/DS4/JSON routing, `L e nc` таблица, `STRP` и raw `uint32` профили,
-  расчёт placement с `ssd_bytes_per_token` и потолком декода.
+- `scripts/qamq/vq_error.py` — измерение кривой ошибки VQ по одному тензору.
+- `scripts/qamq/extract_expert.py` — вырезает одного expert из GGUF по byte range.
+- `scripts/qamq/vq_curve_v41.py` — строит `--curve` JSON по нескольким реальным expert.
+- `scripts/qamq/dqvp_encode.py` — кодирует реальную матрицу и проверяет decode из файла.
+- `scripts/qamq/dense_budget.py` — проверяет dense/expert bytes против RCO allocation.
+- `scripts/qamq/preflight_shards.py` — проверяет старый/новый layout до конвертации.
+- `scripts/qamq/ds41_vram_alloc.py` — аллокатор (25 тестов): `--mode uniform|hotness|calibrated`,
+  `--curve`, чтение Strata/DS4/JSON routing, `L e nc` таблица, `STRP` и raw `uint32`
+  профили, расчёт placement с `ssd_bytes_per_token` и потолком декода.
 - `docs/research/deepseek-v41-layout-2026-10-28/expert-profile.bin` — 61 440 B, 15 360
   `uint32` counts для `strata-dsv41`.
 - `.../nc-table.txt` — 15 360 строк `L e nc` для `--vq-nc-table`.
-- `.../layout.json` — полный отчёт с байтами, иерархией tier и покрытием.
-- `.../ista/*.rco-allocation.txt` + `shard1.gguf` — официальная база для пересчёта.
+- `.../layout.json`, `.../layout-calibrated.json` — uniform и measured-curve раскладки.
+- `.../nc-calibrated.txt` и `.../expert-profile-calibrated.bin` — mixed map и cache profile.
+- `.../vq-curve-v41-9experts.json` — сырые измерения ошибки на реальных expert.
+- `.../ista/*.rco-allocation.txt` — официальная база для пересчёта dense/expert bytes.
 
-## 5. Порядок работ
+## 5. Как это собрать
 
-0. **Перенести backbone с HDD на NVMe.** При 456 MB/токен SATA HDD даёт 0.3 tok/s —
-   это не медленно, это неработоспособно. `C:` имеет 178 GB свободно, backbone 138 GB.
-   Без этого шага все остальные бессмысленны.
-1. **Сейчас, без нового кода.** `llama-server -m <shard1> -ngl 99 -cmoe --moe-cache-mib 4171
-   --ctx 131072 --cache-type-k q8_0 --cache-type-v q8_0`. Профиль `expert-profile.bin`
-   задаёт Strata порядок кэша. Это единственный шаг, дающий выигрыш без нового формата.
-2. **Замер uniform 12/13 бит на 128K.** Это текущий оптимум по ошибке, и он уже
-   выражается в DQVL v3 (12/13 бит, одна ширина на слой). Никакого нового формата для
-   первого прогона не нужно.
-3. **Калибровка активациями.** Единственный способ оправдать mixed-схему: измерить
-   `error(layer, expert, codec)` на held-out токенах после GPTQ/refit и принять её
-   только при ≥2% выигрыша над uniform на тех же байтах. Weight-only статистика не
-   годится: у YoungAi разброс 1.9%, у нас mixed-план проигрывает +64%.
-4. **DQVL v4 — только если калибровка даст выигрыш.** Пер-slot codec descriptor,
-   индекс, fused dispatch по группам codec. Иначе это работа без прибыли.
-   Важно: dsx уже умеет activation-калиброванную раскладку скалярных типов
-   (`quant/v41/v41_alloc.py` по `stats/L*.json`), но это **другие кодеки** — его
-   ошибки нельзя подавать в VQ-аллокатор, и скрипт теперь явно отвергает такой вход.
-5. **Замер.** 128K needle, KLD/top-1, decode/prefill, `nvidia-smi` VRAM и Shared Usage.
+### 5.1. Вариант, который работает без нового runtime
+
+GGUF не умеет per-expert type. Поэтому максимум, что можно получить из стандартного
+файла сегодня, — это сохранить dense в VRAM и кэшировать горячие expert:
+
+```sh
+# 1. файлы обязаны быть на NVMe; HDD даёт 0.3 tok/s
+# 2. конвертировать старый 4-shard layout (см. раздел загрузки ниже)
+python scripts/qamq/preflight_shards.py X:\Strata\data\models\deepseek-v4.1-flash-IST-DAS-2.00bpw
+
+# 3. построить placement profile по ЦЕЛЕВОЙ нагрузке
+python scripts/qamq/ds41_vram_alloc.py \
+  --routing docs/research/deepseek-v41-layout-2026-10-28/reference/expert-rank.json \
+  --candidates 12 --reference-bits 12 --mode uniform \
+  --vram-mib 12288 --dense-mib 6280 --kv-mib 300 \
+  --workspace-mib 1024 --reserve-mib 512 --ram-mib 31744 \
+  --out-profile expert-profile.bin \
+  --profile-format ds4-counts \
+  --out-report layout.json \
+  --out-table nc-table.txt \
+  --out-recipe recipe.txt
+
+# 4. запуск: dense на GPU, expert на CPU, горячие — в GPU cache
+llama-server -m <shard1> -ngl 99 -cmoe --moe-cache-mib 4171 \
+  --ctx 131072 --cache-type-k q8_0 --cache-type-v q8_0
+```
+
+Это даёт 657 hot expert в VRAM, 25.2% routing hits и около 456 MB disk traffic на
+токен. Для Strata тот же GGUF использует `expert-profile.bin` и даёт тот же порядок
+кэша.
+
+### 5.2. Оптимальный собственный квант: DQVP v4
+
+Порядок создания артефакта:
+
+1. **Снять routing целевой нагрузки.** `DS4_TRACE`/`DS4_DUMP_R` или `expert-rank.json`.
+   Это определяет, какие expert попадают в VRAM, RAM и холодный хвост.
+2. **Измерить VQ-кривую на реальных весах.** `extract_expert.py` вырезает expert по
+   byte range; `vq_curve_v41.py` пишет JSON. Нельзя использовать теоретическую
+   `2^(-b/4)`: на V4.1 9 бит стоят 2.4× ошибки 12 бит, а не 2×.
+3. **Запустить аллокатор с `--curve` и `--mode calibrated`.** Он выдаёт `L e nc`
+   (`nc-calibrated.txt`), hotness profile и точный byte accounting.
+4. **Собрать codebooks.** Один shared nested codebook на `(слой, nc)`, а не на каждого
+   expert: private codebook при 13 битах стоил бы 131 KB × 15 360.
+5. **Закодировать каждый routed expert.** Первый проверенный формат:
+   index stream `nc` бит на 8-весовой блок + один f16 row-gain на строку.
+   Round-trip уже проверен на реальном `blk.20.ffn_up_exps`.
+6. **Упаковать DQVP v4.** Индекс `(layer, role, expert) -> codec, offset`, fused
+   dispatch по группам одинакового codec. Dense остаётся в обычном GGUF.
+7. **Загрузить гибридно.** GGUF для attention/router/head, DQVP для routed expert,
+   VRAM cache по профилю.
+
+Текущее состояние: шаги 1–3 и 5 реализованы и проверены; контейнер шага 6
+реализован как reference (`dqvp_pack.py`); полный all-expert builder и CUDA-загрузчик
+шага 7 ещё не написаны. Поэтому `safe_for_build` для mixed map пока `false`.
+
+### 5.3. Что выбирать
+
+- **Максимум качества при текущем GGUF:** uniform VQ-12.
+- **Максимум скорости/кэша:** uniform VQ-10, но ошибка 1.89×.
+- **Максимум качества при тех же 102.22 GB:** calibrated 13/12/11/10, ошибка 0.738×,
+  но нужен DQVP v4 и теряется 1.1 п.п. VRAM coverage.
+- **Скалярный IQ2_XXS:** 8.60 MB на expert против 6.66 MB у VQ-12; проще, но хуже
+  использует и VRAM, и RAM.
 
 ## 6. Догоним ли Qwen3.8 27B: ответ числами
 
