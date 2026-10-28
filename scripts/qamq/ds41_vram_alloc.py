@@ -151,6 +151,22 @@ def total_model_bytes(bits: Sequence[int], shape: Shape) -> int:
     )
 
 
+def read_curve(path: Path) -> dict[int, float]:
+    """Median error ratio per index width from ``vq_curve_v41.py --out``."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    ratios = data.get("median_ratio_to_reference")
+    if not ratios:
+        raise ValueError(f"{path}: no median_ratio_to_reference")
+    curve = {int(k): float(v) for k, v in ratios.items()}
+    if any(v <= 0 for v in curve.values()):
+        raise ValueError(f"{path}: non-positive error ratio")
+    reference = int(data.get("reference_bits", min(curve, key=lambda b: abs(curve[b] - 1.0))))
+    if reference not in curve:
+        raise ValueError(f"{path}: reference width {reference} missing from the curve")
+    scale = curve[reference]
+    return {b: v / scale for b, v in curve.items()}
+
+
 def expand_input_paths(values: Iterable[str]) -> list[Path]:
     """Expand shell-style patterns here so Windows cmd wildcards work too."""
     paths: list[Path] = []
@@ -741,6 +757,8 @@ def _report(
             "estimated_error_curve": estimated,
             "skipped_stats_rows": skipped_stats,
             "evidence": {
+                "per_expert_measured": stats_coverage > 0,
+                "curve_measured": estimated is False,
                 "measured_experts": measured_experts,
                 "fully_measured_experts": fully_measured_experts,
                 "coverage": stats_coverage,
@@ -889,6 +907,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workspace-mib", type=int, default=1024)
     parser.add_argument("--reserve-mib", type=int, default=512)
     parser.add_argument("--ram-mib", type=int, default=49152)
+    parser.add_argument(
+        "--curve",
+        type=Path,
+        help=(
+            "measured VQ curve JSON (vq_curve_v41.py --out); replaces the "
+            "2^(-b/4) estimate with real DeepSeek-V4.1 numbers"
+        ),
+    )
     parser.add_argument("--default-error", type=float, default=1.0)
     parser.add_argument("--out-table", type=Path)
     parser.add_argument("--out-profile", type=Path)
@@ -953,6 +979,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     curves, estimated = fill_error_curves(
         measured, candidates, shape, args.default_error
     )
+    curve_source = "estimated"
+    if args.curve:
+        measured_curve = read_curve(args.curve)
+        missing = [b for b in candidates if b not in measured_curve]
+        if missing:
+            raise ValueError(
+                f"--curve {args.curve} has no width for {missing}; "
+                f"measured widths are {sorted(measured_curve)}"
+            )
+        for layer in range(shape.layers):
+            for expert in range(shape.experts):
+                curves[layer][expert] = {
+                    bits: ErrorPoint(measured_curve[bits], True) for bits in candidates
+                }
+        estimated = False
+        curve_source = str(args.curve)
 
     budget = None if args.budget_gb is None else int(args.budget_gb * 1_000_000_000)
     uniform_bits = _uniform_width(candidates, budget, args.reference_bits, shape)
@@ -981,11 +1023,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     stats_coverage = fully_measured / shape.expert_count
     evidence_ready = stats_coverage >= args.min_stats_coverage
-    evidence_allowed = evidence_ready or args.allow_estimated_tiers
+    # A measured VQ curve is real evidence, just not per-expert: it says how each
+    # width costs error on actual V4.1 weights, so the 2% gate can be evaluated.
+    evidence_allowed = evidence_ready or args.allow_estimated_tiers or args.curve is not None
     if args.mode == "calibrated" and not evidence_allowed:
         raise ValueError(
-            "--mode calibrated requires measured tier stats (--stats) "
-            f"covering >= {args.min_stats_coverage:.0%} of experts; got {stats_coverage:.0%}"
+            "--mode calibrated needs either --stats covering "
+            f">= {args.min_stats_coverage:.0%} of experts (got {stats_coverage:.0%}) "
+            "or a measured --curve"
         )
     if args.mode == "hotness":
         tier_plan = [int(v) for v in args.tier_plan.split(",") if v.strip()]
