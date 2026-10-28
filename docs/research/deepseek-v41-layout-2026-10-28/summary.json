@@ -1,0 +1,41 @@
+{
+  "layout": {
+    "mode": "uniform",
+    "histogram": {
+      "12": 15360
+    },
+    "selected_gb": 102.22,
+    "vram_experts": 701,
+    "vram_coverage": 0.2606,
+    "ram_experts": 5001,
+    "vram_ram_coverage": 0.7172,
+    "ssd_experts": 9658,
+    "ssd_mb_per_token": 451.7,
+    "moe_cache_mib": 4451,
+    "layer_placement_useful": false,
+    "safe_for_build": true,
+    "runtime_note": "layer-uniform 12/13-bit map is representable by current DQVL v3"
+  },
+  "layout-hotness": {
+    "mode": "hotness",
+    "histogram": {
+      "9": 8715,
+      "10": 5998,
+      "11": 0,
+      "12": 0,
+      "13": 647,
+      "14": 0
+    },
+    "selected_gb": 81.49,
+    "vram_experts": 685,
+    "vram_coverage": 0.2536,
+    "ram_experts": 6007,
+    "vram_ram_coverage": 0.7673,
+    "ssd_experts": 8668,
+    "ssd_mb_per_token": 309.9,
+    "moe_cache_mib": 4450,
+    "layer_placement_useful": false,
+    "safe_for_build": false,
+    "runtime_note": "index widths [9, 10] need DQVL v4 kernels; current v3 covers 12/13 bits"
+  }
+}

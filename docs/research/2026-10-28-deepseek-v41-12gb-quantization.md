@@ -29,7 +29,7 @@ expert. Новый `--moe-cache-mib` уже кэширует отдельных 
 использовать как замену измерению чувствительности:
 
 - верхние 1 000 из 15 360 experts покрывают 31.4% маршрутов;
-- precision tier и routing frequency имеют лишь умеренную correlation 0.319;
+- precision tier и routing frequency имеют лишь умеренную Spearman correlation 0.305;
 - только 12.8% experts получили `Q3_K`, но на них пришлось 23.8% маршрутов;
 - без активационной калибровки YoungAi получил почти равномерное оптимальное
   распределение: относительные ошибки experts различаются только на 1.9%.
@@ -51,8 +51,8 @@ VRAM-размещение решается отдельно по ожидаем�
 rank(layer, expert) = routed_picks / (codec_bytes + cache_slot_overhead)
 ```
 
-На опубликованной hotness-карте при бюджете около 6 GiB сортировка только по
-частоте дала 23.98% покрытия маршрутов, а сортировка по `hits / bytes` — 25.09%.
+На опубликованной hotness-карте при бюджете около 5.1 GiB сортировка только по
+частоте дала 23.99% покрытия маршрутов, а сортировка по `hits / bytes` — 25.26%.
 Profile должен строиться на routing traces целевой рабочей нагрузки, а не только
 на общем code/agent-корпусе.
 
@@ -98,7 +98,10 @@ domain sidecar
 ```
 
 Для первой версии достаточно output `L e nc` для YoungAi и hotness profile для
-Strata. Полный per-expert mix требует DQVL v4 или эквивалентного indexed формата:
+одного из двух Strata runtime. `strata-dsv41` принимает raw little-endian массив
+`uint32` counts размером `layers × experts`; generic Strata engine принимает
+ранжированный `STRP` version 1. Полный per-expert mix требует DQVL v4 или
+эквивалентного indexed формата:
 текущий v3 имеет одну геометрию/codebook слоя, а shared-codebook path в YoungAi
 ожидает одну ширину на слой. Ядра должны обрабатывать experts группами одинакового
 codec, чтобы routing не добавлял новую ветку на каждого эксперта.
@@ -163,7 +166,8 @@ codec, чтобы routing не добавлял новую ветку на ка�
 - безопасный mixed allocation только по статистике (`routing-only` — отдельный
   experimental режим);
 - `L e nc` таблицу для YoungAi;
-- бинарный `STRP` ranking для expert cache;
+- raw `uint32` counts для `strata-dsv41` (формат по умолчанию);
+- опциональный `STRP` ranking для generic Strata expert cache;
 - JSON с байтами, tier histogram, predicted error и VRAM/RAM/SSD coverage.
 
 Пример запуска для подготовленного calibration/stats набора:
@@ -171,22 +175,43 @@ codec, чтобы routing не добавлял новую ветку на ка�
 ```sh
 python scripts/qamq/ds41_vram_alloc.py \
   --routing calibration/expert-rank.json \
+  --routing-format auto \
   --stats calibration/stats-*.txt \
   --budget-gb 120 \
   --dense-mib 4608 --kv-mib 256 --workspace-mib 1024 --reserve-mib 512 \
   --ram-mib 32768 --min-improvement 0.02 --min-stats-coverage 1.0 \
   --out-table calibration/ds41-nc.txt \
+  --profile-format ds4-counts \
   --out-profile calibration/ds41-expert-profile.bin \
   --out-report calibration/ds41-layout.json
 ```
 
+Для прямого DS4 engine можно снять `DS4_TRACE` или `DS4_DUMP_R`. Первый компактнее
+и содержит ids маршрутов: укажите `--routing-format ds4-trace --ds4-top-k 6`
+для Full quality либо `--ds4-top-k 5` для Faster. `DS4_DUMP_R` выбирается через
+`--routing-format ds4-dump-r`; из каждого токена учитываются только первые `k` из
+`kPicks` кандидатов, а не весь look-ahead bucket. `auto` сначала проверяет обычный
+Strata trace, затем `DS4_DUMP_R` и `DS4_TRACE`, поэтому для повреждённого файла
+формат лучше задать явно.
+
+Различие профилей проверено по Strata commit `46c152a1310f`: `ds4_model.cu`
+читает `(layers + MTP) × experts` как `uint32` counts, тогда как
+`src/core/expert_cache.cpp` читает `STRP` для generic engine. Поэтому
+`--profile-format strata-ranked` предназначен для второго runtime, а не для
+`strata-dsv41`.
+
 Routing-only эксперимент возможен только с явным `--allow-estimated-tiers`; такой
 report помечается `safe_for_build=false` и не должен становиться основой релиза.
 
-Он пока не создаёт готовый model artifact. Следующий обязательный инженерный шаг —
-DQVL v4 с per-slot codec descriptor и fused dispatch по группам experts. Без этого
-нельзя одновременно использовать mixed precision и существующие v3-ядра без
-дорогих отдельных codebook на каждого expert.
+Он пока не создаёт готовый model artifact. Текущий текстовый parser принимает
+YoungAi `sse/energy`; для activation-calibrated ошибок нужен adapter к
+`stats/LNN.json` из dsx/Xolotl либо использование их `v41_alloc.py`. Нельзя
+подменять эти два вида ошибки без отдельного пересчёта.
+
+Следующий обязательный инженерный шаг — DQVL v4 с per-slot codec descriptor
+и fused dispatch по группам experts. Без этого нельзя одновременно использовать
+mixed precision и существующие v3-ядра без дорогих отдельных codebook на каждого
+expert.
 
 ## Сухая проверка аллокатора на опубликованной hotness-карте
 

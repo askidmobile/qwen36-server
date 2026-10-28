@@ -7,20 +7,23 @@ files measured at several VQ codebook widths.  The output is deliberately
 small and concrete:
 
 * ``L e nc`` rows for YoungAi's ``--vq-nc-table``;
-* a ranked Strata ``STRP`` expert profile;
+* a raw ``uint32`` expert-count profile for the ``strata-dsv41`` engine
+  (or an optional ranked ``STRP`` profile for the generic Strata engine);
 * a JSON report with byte accounting and predicted cache coverage.
 
 Weight-only allocation is not trusted here. Existing DeepSeek measurements
 show that expert weights are almost equally sensitive. Non-uniform precision
-is selected only when the routing-weighted proxy beats the uniform baseline by
-the requested gate. Measured YoungAi stats replace the theoretical 8-D VQ
-curve; missing measurements stay explicit in the report. Otherwise every
-expert gets the same width.
+requires measured tier statistics covering the configured fraction of experts
+and a routing-weighted proxy gain over the uniform baseline. YoungAi text stats
+are weight-error measurements; activation-calibrated errors need a separate
+adapter or the dsx/Xolotl allocator. Missing measurements stay explicit, and
+the theoretical 8-D VQ curve requires an experimental opt-in.
 """
 
 from __future__ import annotations
 
 import argparse
+import glob
 import heapq
 import json
 import math
@@ -148,23 +151,34 @@ def total_model_bytes(bits: Sequence[int], shape: Shape) -> int:
     )
 
 
-def read_routing(path: Path, shape: Shape) -> list[int]:
-    """Read JSON ranks (``[layer, expert, count]``) or a Strata routing trace."""
-    raw = path.read_bytes()
-    counts = [0] * shape.expert_count
-    first = next((b for b in raw if b not in b" \t\r\n"), None)
-    if first == ord("["):
-        data = json.loads(raw.decode("utf-8"))
-        if not isinstance(data, list):
-            raise ValueError(f"{path}: routing JSON must be a list")
-        for row in data:
-            if not isinstance(row, list) or len(row) != 3:
-                raise ValueError(f"{path}: routing rows must be [layer, expert, count]")
-            layer, expert, count = (int(v) for v in row)
-            _routing_index(layer, expert, count, path, shape)
-            counts[layer * shape.experts + expert] += count
-        return counts
+def expand_input_paths(values: Iterable[str]) -> list[Path]:
+    """Expand shell-style patterns here so Windows cmd wildcards work too."""
+    paths: list[Path] = []
+    for value in values:
+        matches = sorted(glob.glob(value))
+        if not matches:
+            raise FileNotFoundError(value)
+        paths.extend(Path(match) for match in matches)
+    return paths
 
+
+def _read_json_routing(raw: bytes, path: Path, shape: Shape) -> list[int]:
+    counts = [0] * shape.expert_count
+    data = json.loads(raw.decode("utf-8"))
+    if not isinstance(data, list):
+        raise ValueError(f"{path}: routing JSON must be a list")
+    for row in data:
+        if not isinstance(row, list) or len(row) != 3:
+            raise ValueError(f"{path}: routing rows must be [layer, expert, count]")
+        layer, expert, count = (int(v) for v in row)
+        _routing_index(layer, expert, count, path, shape)
+        counts[layer * shape.experts + expert] += count
+    return counts
+
+
+def _read_strata_trace(raw: bytes, path: Path, shape: Shape) -> list[int]:
+    """Read the generic Strata ``layer, k, ids, weights`` trace."""
+    counts = [0] * shape.expert_count
     off = 0
     while off < len(raw):
         if off + 8 > len(raw):
@@ -179,9 +193,163 @@ def read_routing(path: Path, shape: Shape) -> list[int]:
         ids = struct.unpack_from(f"<{k}i", raw, off) if k else ()
         off += need  # ids followed by equally many f32 routing weights
         for expert in ids:
-            _routing_index(layer, expert, 1, path, shape)
-            counts[layer * shape.experts + expert] += 1
+            _count_routing_id(counts, layer, expert, path, shape)
     return counts
+
+
+def _read_ds4_trace(
+    raw: bytes, path: Path, shape: Shape, top_k: int
+) -> list[int]:
+    """Read ``strata-dsv41``'s ``DS4_TRACE`` byte stream.
+
+    Decode records are ``u8 layer, u8 T, T x k int16 ids``.  Chunk records
+    mark the layer's high bit and use ``u16 T``.  Decode records may carry
+    look-ahead ids when ``DS4_TRACE_AHEAD`` was set; those ids are skipped.
+    """
+    if not 1 <= top_k <= 64:
+        raise ValueError(f"{path}: DS4 top-k must be in 1..64, got {top_k}")
+    counts = [0] * shape.expert_count
+    off = 0
+    records = 0
+    while off < len(raw):
+        layer_byte = raw[off]
+        off += 1
+        chunk = bool(layer_byte & 0x80)
+        layer = layer_byte & 0x7F
+        ahead = False
+        if chunk:
+            if off + 2 > len(raw):
+                raise ValueError(
+                    f"{path}: truncated DS4 chunk header at offset {off - 1}"
+                )
+            tokens = struct.unpack_from("<H", raw, off)[0]
+            off += 2
+        else:
+            if off + 1 > len(raw):
+                raise ValueError(
+                    f"{path}: truncated DS4 decode header at offset {off - 1}"
+                )
+            tokens = raw[off] & 0x7F
+            ahead = bool(raw[off] & 0x80)
+            off += 1
+        ids_bytes = tokens * top_k * 2
+        if off + ids_bytes > len(raw):
+            raise ValueError(f"{path}: truncated DS4 ids at offset {off}")
+        ids = (
+            struct.unpack_from(f"<{tokens * top_k}h", raw, off)
+            if ids_bytes
+            else ()
+        )
+        off += ids_bytes
+        for expert in ids:
+            _count_routing_id(counts, layer, expert, path, shape)
+        if ahead:
+            if off + 2 > len(raw):
+                raise ValueError(
+                    f"{path}: truncated DS4 look-ahead header at offset {off}"
+                )
+            ahead_ids = tokens * (raw[off] + raw[off + 1]) * 2
+            off += 2
+            if off + ahead_ids > len(raw):
+                raise ValueError(
+                    f"{path}: truncated DS4 look-ahead ids at offset {off}"
+                )
+            off += ahead_ids
+        records += 1
+    if records == 0:
+        raise ValueError(f"{path}: empty DS4 trace")
+    return counts
+
+
+def _read_ds4_dump_r(raw: bytes, path: Path, shape: Shape) -> list[int]:
+    """Read the rich ``DS4_DUMP_R`` chunk-routing record stream.
+
+    Each record starts with eight little-endian ``int64`` fields:
+    ``layer, p0, tokens, k, experts, virtual_slots, vram_slots, picks``.
+    The first ``k`` of each token's ``picks`` expert ids are the true route.
+    """
+    counts = [0] * shape.expert_count
+    off = 0
+    records = 0
+    while off < len(raw):
+        if off + 64 > len(raw):
+            raise ValueError(f"{path}: truncated DS4_DUMP_R header at offset {off}")
+        layer, _p0, tokens, k, experts, virtual_slots, _vram_slots, picks = (
+            struct.unpack_from("<8q", raw, off)
+        )
+        off += 64
+        if layer < 0 or layer >= shape.layers:
+            raise ValueError(f"{path}: DS4_DUMP_R layer {layer} is out of range")
+        if experts != shape.experts:
+            raise ValueError(
+                f"{path}: DS4_DUMP_R has {experts} experts, expected {shape.experts}"
+            )
+        if tokens <= 0 or k <= 0 or picks < k or experts <= 0 or virtual_slots < 0:
+            raise ValueError(
+                f"{path}: invalid DS4_DUMP_R dimensions at offset {off - 64}"
+            )
+        pick_ids = tokens * picks
+        payload_ints = (
+            pick_ids
+            + experts
+            + virtual_slots
+            + 1
+            + tokens * k
+            + tokens * experts
+            + experts
+        )
+        payload_bytes = payload_ints * 4
+        if off + payload_bytes > len(raw):
+            raise ValueError(
+                f"{path}: truncated DS4_DUMP_R record at offset {off - 64}"
+            )
+        ids = struct.unpack_from(f"<{pick_ids}i", raw, off)
+        for token in range(tokens):
+            start = token * picks
+            for expert in ids[start : start + k]:
+                _count_routing_id(counts, layer, expert, path, shape)
+        off += payload_bytes
+        records += 1
+    if records == 0:
+        raise ValueError(f"{path}: empty DS4_DUMP_R trace")
+    return counts
+
+
+def _count_routing_id(
+    counts: list[int], layer: int, expert: int, path: Path, shape: Shape
+) -> None:
+    _routing_index(layer, expert, 1, path, shape)
+    counts[layer * shape.experts + expert] += 1
+
+
+def read_routing(
+    path: Path,
+    shape: Shape,
+    routing_format: str = "auto",
+    ds4_top_k: int = 6,
+) -> list[int]:
+    """Read a JSON, Strata, ``DS4_TRACE``, or ``DS4_DUMP_R`` route stream."""
+    raw = path.read_bytes()
+    first = next((b for b in raw if b not in b" \t\r\n"), None)
+    if routing_format == "json" or (routing_format == "auto" and first == ord("[")):
+        return _read_json_routing(raw, path, shape)
+    parsers = {
+        "strata": lambda: _read_strata_trace(raw, path, shape),
+        "ds4-trace": lambda: _read_ds4_trace(raw, path, shape, ds4_top_k),
+        "ds4-dump-r": lambda: _read_ds4_dump_r(raw, path, shape),
+    }
+    if routing_format != "auto":
+        if routing_format not in parsers:
+            raise ValueError(f"unsupported routing format: {routing_format}")
+        return parsers[routing_format]()
+
+    errors = []
+    for name in ("strata", "ds4-dump-r", "ds4-trace"):
+        try:
+            return parsers[name]()
+        except (ValueError, struct.error) as exc:
+            errors.append(f"{name}: {exc}")
+    raise ValueError(f"{path}: cannot identify routing format; " + "; ".join(errors))
 
 
 def _routing_index(
@@ -456,6 +624,41 @@ def write_strata_profile(path: Path, ranked: Sequence[dict], shape: Shape) -> No
             handle.write(struct.pack(f"<{shape.experts}i", *layer))
 
 
+def write_ds4_profile(path: Path, counts: Sequence[int], shape: Shape) -> None:
+    """Write ``strata-dsv41``'s raw little-endian ``uint32`` count profile."""
+    if len(counts) != shape.expert_count:
+        raise ValueError(
+            f"expected {shape.expert_count} DS4 profile counts, got {len(counts)}"
+        )
+    if any(count < 0 or count > 0xFFFFFFFF for count in counts):
+        raise ValueError("DS4 profile counts must fit uint32")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(struct.pack(f"<{len(counts)}I", *counts))
+
+
+def runtime_build_compatibility(
+    widths: Sequence[int], shape: Shape
+) -> tuple[bool, str]:
+    """Whether the current DQVL v3 converter/runtime can represent this map."""
+    unsupported = sorted({bits for bits in widths if bits not in (12, 13)})
+    mixed_layers = [
+        layer
+        for layer in range(shape.layers)
+        if len(set(widths[layer * shape.experts : (layer + 1) * shape.experts])) > 1
+    ]
+    if unsupported:
+        return False, (
+            f"index widths {unsupported} need DQVL v4 kernels; "
+            "current v3 covers 12/13 bits"
+        )
+    if mixed_layers:
+        return False, (
+            "per-expert widths within a layer need a DQVL v4 per-slot codec; "
+            f"current v3 cannot build layers {mixed_layers[:8]}"
+        )
+    return True, "layer-uniform 12/13-bit map is representable by current DQVL v3"
+
+
 def _report(
     *,
     shape: Shape,
@@ -479,10 +682,12 @@ def _report(
     ranked: Sequence[dict],
     tiered: Sequence[dict],
     tier_summary: Mapping[str, object],
+    placement: Mapping[str, object],
 ) -> dict:
     total_picks = sum(counts)
     coverage = tier_summary["vram_coverage"]
     total = total_model_bytes(widths, shape)
+    build_compatible, runtime_note = runtime_build_compatibility(widths, shape)
     histogram = {
         str(bits): sum(1 for value in widths if value == bits) for bits in candidates
     }
@@ -534,22 +739,14 @@ def _report(
                 "ready_for_nonuniform": evidence_ready,
                 "allow_estimated_tiers": allow_estimated_tiers,
             },
-            "safe_for_build": mode == "uniform" or evidence_ready,
-            "runtime_note": (
-                "current DQVL v3 GPU kernels cover 12/13-bit indices; other widths need a v4 kernel. "
-                "Mixed widths also need a nested shared-codebook path, while YoungAi's current "
-                "--vq-shared-cb expects one width per layer."
-                if any(b not in (12, 13) for b in widths)
-                or any(
-                    len(
-                        set(widths[layer * shape.experts : (layer + 1) * shape.experts])
-                    )
-                    > 1
-                    for layer in range(shape.layers)
-                )
-                else "uniform v2/v3 widths are representable subject to normal codebook loading"
-            ),
+            "safe_for_build": (mode == "uniform" or evidence_ready)
+            and build_compatible,
+            "runtime": {
+                "build_compatible": build_compatible,
+                "note": runtime_note,
+            },
         },
+        "placement": placement,
         "routing": {
             "picks": total_picks,
             "hot_coverage": coverage,
@@ -564,6 +761,32 @@ def _report(
     }
 
 
+def write_recipe(path: Path, report: Mapping[str, object], shape: Shape) -> None:
+    """Human-runnable placement recipe for the runtimes we can drive today."""
+    allocation = report["allocation"]
+    placement = report["placement"]
+    routing = report["routing"]
+    lines = [
+        "# generated by ds41_vram_alloc.py",
+        f"# allocation mode: {allocation['mode']}  bits: {allocation['histogram']}",
+        f"# routed-expert payload: {allocation['selected_mib']:.0f} MiB",
+        f"# predicted VRAM coverage: {routing['hot_coverage']:.1%} of routed picks",
+        f"# predicted VRAM+RAM coverage: {routing['vram_ram_coverage']:.1%}",
+        f"# predicted disk traffic: {placement['ssd_bytes_per_token']/1e6:.0f} MB/token",
+        "",
+        "# llama.cpp: all experts on CPU, hottest ones cached in VRAM",
+        placement["llama_cpp_command"],
+        "",
+        "# Strata: same GGUF, expert profile drives the cache order",
+        placement["strata_command"],
+        "",
+        f"# layer placement is useful: {placement['layer_placement_useful']}",
+        f"# {placement['reason']}",
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument(
@@ -571,6 +794,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         help="routing JSON or Strata trace (repeatable)",
+    )
+    parser.add_argument(
+        "--routing-format",
+        choices=("auto", "json", "strata", "ds4-trace", "ds4-dump-r"),
+        default="auto",
+        help="route file format; auto tries the binary formats safely",
+    )
+    parser.add_argument(
+        "--ds4-top-k",
+        type=int,
+        default=6,
+        help="experts per token for DS4_TRACE (6 for full quality, 5 for faster)",
     )
     parser.add_argument(
         "--stats",
@@ -588,6 +823,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="uniform width when --budget-gb is omitted",
     )
     parser.add_argument(
+        "--mode",
+        choices=("auto", "uniform", "hotness", "calibrated"),
+        default="auto",
+        help=(
+            "auto keeps the conservative behaviour; hotness emits the "
+            "placement recipe without changing precision; calibrated "
+            "requires measured tier stats"
+        ),
+    )
+    parser.add_argument(
+        "--tier-plan",
+        default="13,10,9",
+        help=(
+            "hot,warm,cold VQ index widths for --mode hotness: hot experts fill "
+            "VRAM, warm fill RAM, cold is the SSD tail"
+        ),
+    )
+    parser.add_argument(
         "--budget-gb", type=float, help="total routed-expert storage budget"
     )
     parser.add_argument(
@@ -600,12 +853,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--min-stats-coverage",
         type=float,
         default=1.0,
-        help="fraction of experts needing at least two measured widths for non-uniform tiers",
+        help=(
+            "fraction of experts needing at least two measured widths "
+            "for non-uniform tiers"
+        ),
     )
     parser.add_argument(
         "--allow-estimated-tiers",
         action="store_true",
-        help="allow the theoretical 8-D VQ curve without full activation calibration (experimental)",
+        help=(
+            "allow the theoretical 8-D VQ curve without complete measured "
+            "tier stats (experimental)"
+        ),
     )
     parser.add_argument("--min-bits", type=int, default=10)
     parser.add_argument("--max-bits", type=int, default=14)
@@ -625,6 +884,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--default-error", type=float, default=1.0)
     parser.add_argument("--out-table", type=Path)
     parser.add_argument("--out-profile", type=Path)
+    parser.add_argument(
+        "--profile-format",
+        choices=("ds4-counts", "strata-ranked"),
+        default="ds4-counts",
+        help="DS4 raw counts, or an STRP ranking for the generic Strata engine",
+    )
+    parser.add_argument(
+        "--out-recipe",
+        type=Path,
+        help="write the runtime placement recipe (llama.cpp/Strata) next to the report",
+    )
     parser.add_argument("--out-report", type=Path)
     return parser
 
@@ -665,11 +935,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("--min-stats-coverage must be in [0, 1]")
 
     counts = [0] * shape.expert_count
-    for path in map(Path, args.routing):
-        for index, value in enumerate(read_routing(path, shape)):
+    for path in expand_input_paths(args.routing):
+        for index, value in enumerate(
+            read_routing(path, shape, args.routing_format, args.ds4_top_k)
+        ):
             counts[index] += value
     probabilities = route_probabilities(counts, shape)
-    measured, skipped = read_stats(args.stats)
+    measured, skipped = read_stats(expand_input_paths(args.stats))
     curves, estimated = fill_error_curves(
         measured, candidates, shape, args.default_error
     )
@@ -702,12 +974,51 @@ def main(argv: Sequence[str] | None = None) -> int:
     stats_coverage = fully_measured / shape.expert_count
     evidence_ready = stats_coverage >= args.min_stats_coverage
     evidence_allowed = evidence_ready or args.allow_estimated_tiers
-    mode = (
-        "nonuniform"
-        if evidence_allowed and improvement >= args.min_improvement
-        else "uniform"
-    )
-    widths = proposed if mode == "nonuniform" else uniform_widths
+    if args.mode == "calibrated" and not evidence_allowed:
+        raise ValueError(
+            "--mode calibrated requires measured tier stats (--stats) "
+            f"covering >= {args.min_stats_coverage:.0%} of experts; got {stats_coverage:.0%}"
+        )
+    if args.mode == "hotness":
+        tier_plan = [int(v) for v in args.tier_plan.split(",") if v.strip()]
+        if len(tier_plan) != 3 or any(b not in candidates for b in tier_plan):
+            raise ValueError(
+                f"--tier-plan needs three widths from --candidates {candidates}"
+            )
+        budgets_pre = Budgets(
+            vram_mib=args.vram_mib,
+            dense_mib=args.dense_mib,
+            kv_mib=args.kv_mib,
+            workspace_mib=args.workspace_mib,
+            reserve_mib=args.reserve_mib,
+            ram_mib=args.ram_mib,
+        )
+        hot, warm, cold = tier_plan
+        order = sorted(
+            range(shape.expert_count),
+            key=lambda i: (-probabilities[i], i),
+        )
+        vram_bytes = budgets_pre.vram_expert_bytes
+        ram_bytes = budgets_pre.ram_expert_bytes
+        hot_n = min(shape.expert_count, vram_bytes // expert_payload_bytes(hot, shape))
+        warm_n = min(
+            shape.expert_count - hot_n,
+            ram_bytes // expert_payload_bytes(warm, shape),
+        )
+        by_rank = {index: hot for index in order[:hot_n]}
+        by_rank.update({index: warm for index in order[hot_n : hot_n + warm_n]})
+        widths = [by_rank.get(index, cold) for index in range(shape.expert_count)]
+        mode = "hotness"
+    elif args.mode == "uniform":
+        mode = "uniform"
+        widths = uniform_widths
+    else:  # mode == "calibrated" or "auto"
+        mode = (
+            "nonuniform"
+            if evidence_allowed and improvement >= args.min_improvement
+            else "uniform"
+        )
+        widths = proposed if mode == "nonuniform" else uniform_widths
     selected_bytes = total_model_bytes(widths, shape)
     if total_cap and selected_bytes > total_cap:
         raise ValueError(
@@ -728,6 +1039,59 @@ def main(argv: Sequence[str] | None = None) -> int:
     tiered, tier_summary = _select_tiers(
         ranked, vram_cache_budget, budgets.ram_expert_bytes
     )
+    # --- Placement analysis (hotness-driven, independent of precision) ---
+    layer_mass = [
+        sum(counts[layer * shape.experts : (layer + 1) * shape.experts])
+        for layer in range(shape.layers)
+    ]
+    max_mass, min_mass, avg_mass = max(layer_mass), min(layer_mass), sum(layer_mass) / len(layer_mass)
+    mass_std = (sum((m - avg_mass) ** 2 for m in layer_mass) / len(layer_mass)) ** 0.5
+    layer_placement_useful = mass_std > 0.02 * avg_mass  # <2%% spread => per-layer placement buys nothing
+    # GPU budget for MoE cache = vram expert bytes minus codebooks
+    moe_cache_mib = max(0, budgets.vram_expert_bytes // (1024 * 1024) - fixed_codebooks // (1024 * 1024))
+    # predicted experts in GPU cache from routing hotness (all experts, same layout)
+    avg_expert_bytes = expert_payload_bytes(widths[0], shape)
+    predicted_vram_experts = moe_cache_mib * 1024 * 1024 // avg_expert_bytes
+    placement = {
+        "placement_mode": "layer-uniform",
+        "layer_routing_spread": {
+            "min_tokens": min_mass,
+            "max_tokens": max_mass,
+            "mean_tokens_per_layer": round(avg_mass, 3),
+            "std_tokens": round(mass_std, 3),
+            "layer_variance_pct_of_mean": round(100.0 * mass_std / avg_mass, 3),
+        },
+        "layer_placement_useful": layer_placement_useful,
+        "reason": (
+            "all 40 layers route 6 experts per token; per-layer routing mass differs by "
+            f"{100.0*mass_std/avg_mass:.2f}% of the mean, so per-layer type overrides buy "
+            "nothing. Use the per-expert cache instead."
+        ),
+        "moe_cache_mib": moe_cache_mib,
+        "moe_cache_bytes": moe_cache_mib * 1024 * 1024,
+        "predicted_vram_experts": predicted_vram_experts,
+        "avg_expert_bytes": avg_expert_bytes,
+        "ssd_experts": tier_summary["ssd_experts"],
+        "ssd_bytes_per_token": None,  # filled below
+        "llama_cpp_command": (
+            f"llama-server -m <shard1> -ngl 99 -cmoe --moe-cache-mib {moe_cache_mib} "
+            f"--ctx 131072 --cache-type-k q8_0 --cache-type-v q8_0"
+        ),
+        "strata_command": f"strata invoke DeepSeekV41Flash <model> --expert-profile {args.out_profile or 'expert-profile.bin'}",
+    }
+
+    active_experts = 6 * shape.layers
+    ssd_fraction = 1.0 - (tier_summary["vram_ram_coverage"] or 0.0)
+    ssd_bytes_per_token = int(active_experts * ssd_fraction * avg_expert_bytes)
+    placement["ssd_bytes_per_token"] = ssd_bytes_per_token
+    placement["decode_ceiling"] = {
+        "ssd_mb_per_token": round(ssd_bytes_per_token / 1e6, 1),
+        "tok_s_hdd_150mb_s": round(150e6 / ssd_bytes_per_token, 2) if ssd_bytes_per_token else None,
+        "tok_s_sata_550mb_s": round(550e6 / ssd_bytes_per_token, 2) if ssd_bytes_per_token else None,
+        "tok_s_nvme_3gb_s": round(3e9 / ssd_bytes_per_token, 2) if ssd_bytes_per_token else None,
+        "note": "upper bound: assumes one miss per active expert per token and perfect IO overlap",
+    }
+
     report = _report(
         shape=shape,
         budgets=budgets,
@@ -750,12 +1114,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         ranked=ranked,
         tiered=tiered,
         tier_summary=tier_summary,
+        placement=placement,
     )
 
     if args.out_table:
         write_nc_table(args.out_table, widths, shape)
     if args.out_profile:
-        write_strata_profile(args.out_profile, ranked, shape)
+        if args.profile_format == "ds4-counts":
+            write_ds4_profile(args.out_profile, counts, shape)
+        else:
+            write_strata_profile(args.out_profile, ranked, shape)
+    if args.out_recipe:
+        write_recipe(args.out_recipe, report, shape)
     if args.out_report:
         args.out_report.parent.mkdir(parents=True, exist_ok=True)
         args.out_report.write_text(

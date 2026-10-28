@@ -59,6 +59,12 @@ class Ds41VramAllocTest(unittest.TestCase):
         self.assertAlmostEqual(summary["vram_coverage"], 30 / 40)
         self.assertAlmostEqual(summary["vram_ram_coverage"], 38 / 40)
 
+    def test_runtime_compatibility_rejects_widths_current_v3_cannot_read(self):
+        shape = alloc.Shape(layers=2, experts=2, hidden=8, intermediate=8)
+        self.assertTrue(alloc.runtime_build_compatibility([12, 12, 13, 13], shape)[0])
+        self.assertFalse(alloc.runtime_build_compatibility([12, 13, 12, 12], shape)[0])
+        self.assertFalse(alloc.runtime_build_compatibility([11, 11, 12, 12], shape)[0])
+
     def test_cache_ranking_uses_hits_per_byte_not_raw_hotness(self):
         shape = alloc.Shape(layers=1, experts=2, hidden=512, intermediate=256, vq_dim=8)
         ranked = alloc._rank_for_cache([90, 80], [14, 12], shape, 0)
@@ -79,6 +85,14 @@ class Ds41VramAllocTest(unittest.TestCase):
         self.assertEqual(struct.unpack_from("<HH", blob, 24), (0, 1))
         table_off = 24 + 2 * 4
         self.assertEqual(struct.unpack_from("<2i", blob, table_off), (1, 0))
+
+    def test_ds4_profile_is_raw_uint32_counts(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "ds4-profile.bin"
+            alloc.write_ds4_profile(path, [0, 7], self.small)
+            self.assertEqual(struct.unpack("<2I", path.read_bytes()), (0, 7))
+            with self.assertRaises(ValueError):
+                alloc.write_ds4_profile(path, [-1, 0], self.small)
 
     def test_uniform_when_errors_are_equal(self):
         curves, _ = alloc.fill_error_curves({}, [10, 11, 12], self.small, 1.0)
@@ -115,6 +129,57 @@ class Ds41VramAllocTest(unittest.TestCase):
             trace_path.write_bytes(record + struct.pack("<ii1i1f", 0, 1, 0, 1.0))
             self.assertEqual(alloc.read_routing(json_path, self.small), [2, 1])
             self.assertEqual(alloc.read_routing(trace_path, self.small), [2, 1])
+
+    def test_ds4_trace_parses_decode_chunk_and_lookahead_records(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "ds4-trace.bin"
+            decode = bytes((0, 1 | 0x80)) + struct.pack("<2h", 0, 1)
+            decode += bytes((1, 0)) + struct.pack("<h", 0)
+            chunk = bytes((0x80, 2, 0)) + struct.pack("<4h", 1, 1, 0, 1)
+            path.write_bytes(decode + chunk)
+            self.assertEqual(
+                alloc.read_routing(path, self.small, "ds4-trace", ds4_top_k=2),
+                [2, 4],
+            )
+            self.assertEqual(
+                alloc.read_routing(path, self.small, ds4_top_k=2), [2, 4]
+            )
+
+    def test_ds4_dump_r_parses_only_the_true_top_k(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "ds4-dump-r.bin"
+            header = struct.pack("<8q", 0, 0, 1, 2, 2, 1, 1, 3)
+            picks = struct.pack("<3i", 0, 1, 0)
+            virtual_slots = struct.pack("<2i", 0, 1)
+            bounds = struct.pack("<2i", 0, 2)
+            row_tokens = struct.pack("<2i", 0, 0)
+            logits = struct.pack("<2f", 0.5, 0.5)
+            bias = struct.pack("<2f", 0.0, 0.0)
+            path.write_bytes(
+                header + picks + virtual_slots + bounds + row_tokens + logits + bias
+            )
+            self.assertEqual(alloc.read_routing(path, self.small, "ds4-dump-r"), [1, 1])
+            self.assertEqual(alloc.read_routing(path, self.small), [1, 1])
+
+    def test_cli_writes_ds4_counts_by_default_and_strp_on_request(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            routing = td / "routing.json"
+            routing.write_text(json.dumps([[0, 0, 3], [0, 1, 2]]), encoding="utf-8")
+            common = [
+                "--routing", str(routing), "--layers", "1", "--experts", "2",
+                "--hidden", "512", "--intermediate", "256", "--candidates", "12",
+                "--out-profile",
+            ]
+            ds4 = td / "ds4.bin"
+            self.assertEqual(alloc.main(common + [str(ds4)]), 0)
+            self.assertEqual(struct.unpack("<2I", ds4.read_bytes()), (3, 2))
+            stfp = td / "strata.bin"
+            self.assertEqual(
+                alloc.main(common + [str(stfp), "--profile-format", "strata-ranked"]),
+                0,
+            )
+            self.assertEqual(stfp.read_bytes()[:4], b"STRP")
 
     def test_routing_only_allocation_is_uniform_by_default(self):
         with tempfile.TemporaryDirectory() as td:
@@ -159,12 +224,110 @@ class Ds41VramAllocTest(unittest.TestCase):
             self.assertEqual(data["allocation"]["mode"], "nonuniform")
             self.assertFalse(data["allocation"]["safe_for_build"])
 
+    def test_input_globs_expand_for_windows_cmd(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            (td / "stats-1.txt").write_text("0 0 4096 1.0 2.0\n", encoding="utf-8")
+            (td / "stats-2.txt").write_text("0 0 8192 0.5 2.0\n", encoding="utf-8")
+            paths = alloc.expand_input_paths([str(td / "stats-*.txt")])
+            self.assertEqual([p.name for p in paths], ["stats-1.txt", "stats-2.txt"])
+
     def test_cli_rejects_nan_stats(self):
         with tempfile.TemporaryDirectory() as td:
             stats = Path(td) / "stats.txt"
             stats.write_text("0 0 4096 nan 1.0\n", encoding="utf-8")
             with self.assertRaises(ValueError):
                 alloc.read_stats([stats])
+
+    def test_placement_detects_uniform_layer_mass(self):
+        shape = alloc.Shape(layers=2, experts=2)
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            routing = td / "routing.json"
+            routing.write_text(json.dumps([[0, 0, 5], [0, 1, 5], [1, 0, 5], [1, 1, 5]]))
+            report = td / "r.json"
+            self.assertEqual(
+                alloc.main([
+                    "--routing", str(routing), "--layers", "2", "--experts", "2",
+                    "--hidden", "512", "--intermediate", "256", "--candidates", "12",
+                    "--mode", "hotness", "--tier-plan", "12,12,12",
+                    "--out-report", str(report),
+                ]), 0)
+            data = json.loads(report.read_text())
+            self.assertEqual(data["allocation"]["mode"], "hotness")
+            self.assertFalse(data["placement"]["layer_placement_useful"])
+            self.assertEqual(data["placement"]["layer_routing_spread"]["std_tokens"], 0.0)
+            self.assertGreater(data["placement"]["moe_cache_mib"], 0)
+            self.assertIn("--moe-cache-mib", data["placement"]["llama_cpp_command"])
+
+    def test_calibrated_mode_rejects_missing_stats(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            routing = td / "routing.json"
+            routing.write_text(json.dumps([[0, 0, 1], [0, 1, 1]]))
+            with self.assertRaises(ValueError):
+                alloc.main([
+                    "--routing", str(routing), "--layers", "1", "--experts", "2",
+                    "--hidden", "512", "--intermediate", "256", "--candidates", "12",
+                    "--mode", "calibrated", "--out-report", str(td / "r.json"),
+                ])
+
+    def test_hotness_tier_plan_puts_hottest_in_vram_and_tail_in_cold(self):
+        shape = alloc.Shape(
+            layers=1, experts=4, hidden=512, intermediate=256, vq_dim=8
+        )
+        counts = [90, 8, 1, 1]
+        order = sorted(range(4), key=lambda i: (-counts[i] / sum(counts), i))
+        self.assertEqual(order[0], 0)
+        hot, warm, cold = 12, 10, 9
+        self.assertGreater(
+            alloc.expert_payload_bytes(hot, shape),
+            alloc.expert_payload_bytes(cold, shape),
+        )
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            routing = td / "routing.json"
+            routing.write_text(
+                json.dumps([[0, e, c] for e, c in enumerate(counts)]), encoding="utf-8"
+            )
+            report = td / "r.json"
+            table = td / "nc.txt"
+            self.assertEqual(
+                alloc.main([
+                    "--routing", str(routing), "--layers", "1", "--experts", "4",
+                    "--hidden", "512", "--intermediate", "256",
+                    "--candidates", "9,10,12", "--min-bits", "9", "--max-bits", "12",
+                    "--mode", "hotness", "--tier-plan", "12,10,9",
+                    "--vram-mib", "4096", "--dense-mib", "0", "--kv-mib", "0",
+                    "--workspace-mib", "0", "--reserve-mib", "0",
+                    "--out-table", str(table), "--out-report", str(report),
+                ]), 0)
+            data = json.loads(report.read_text())
+            self.assertEqual(data["allocation"]["mode"], "hotness")
+            widths = [int(l.split()[2]) for l in table.read_text().splitlines() if not l.startswith("#")]
+            self.assertGreaterEqual(widths[0], widths[-1])
+            self.assertIn("placement", data)
+
+    def test_vq_error_shrinks_monotonically_with_width(self):
+        import numpy as np
+
+        spec = importlib.util.spec_from_file_location(
+            "vq_error", ROOT / "scripts" / "qamq" / "vq_error.py"
+        )
+        vq = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[spec.name] = vq
+        spec.loader.exec_module(vq)
+
+        rng = np.random.default_rng(5)
+        matrix = rng.standard_normal((256, 256)).astype(np.float32)
+        errors = [
+            vq.vq_error(matrix, 8, bits, blocks=4096, iters=4, seed=1)
+            for bits in (8, 10, 12)
+        ]
+        self.assertGreater(errors[0], errors[1])
+        self.assertGreater(errors[1], errors[2])
+        self.assertGreater(errors[0], 0.0)
 
 
 if __name__ == "__main__":
