@@ -38,23 +38,23 @@ GGUF хранит routed experts одним тензором на слой и р
 KV-кеш V4.1 при 128K считается не как у обычной MLA-модели — attention сжат:
 
 ```text
-window KV   40 слоёв × 128 слотов × 512 (head_dim) × 1 B (fp8)      ≈   2.5 MiB
+window KV   40 слоёв × 128 слотов × 512 (head_dim) × 1 B (fp8)      ≈   2.6 MiB
 compressed  kv_source [2,8,14,20], ratios [2,2,2,1]
-            65536×512×1B ×3 + 131072×512×1B                          ≈ 160.0 MiB
+            65536×512×1B ×3 + 131072×512×1B                          ≈ 167.8 MiB
 indexer k   [2,8,14,20,24,28,32,36], index_head_dim 128, fp4
-            65536×64B ×3 + 131072×64B ×5                              ≈  52.0 MiB
+            65536×64B ×3 + 131072×64B ×5                              ≈  54.5 MiB
 compressor state (ratio, 512) fp32 ×2, batch 1                        ≈   0.02 MiB
-                                                             итого    ≈ 215 MiB
+                                                             итого    ≈ 224.9 MiB
 ```
 
-То есть 128K стоит **~215 MiB VRAM**, а не гигабайты. Это и делает 12 GB реальными.
+То есть 128K стоит **225 MiB VRAM**, а не гигабайты. Это и делает 12 GB реальными.
 
 Бюджет:
 
 ```text
 12 288 MiB VRAM
 - 6 000 MiB  dense: 5 427 MiB весов по RCO (5.69 GB) + ~573 MiB dequant/GEMM workspace
--   300 MiB  KV + indexer + scratch (расчёт 215 MiB, берём 300 с запасом)
+-   300 MiB  KV + indexer + scratch (расчёт 225 MiB, берём 300 с запасом)
 - 1 024 MiB  workspace/prefill
 -   512 MiB  reserve (WDDM, CUDA ctx)
 = 4 452 MiB  под кэш экспертов
