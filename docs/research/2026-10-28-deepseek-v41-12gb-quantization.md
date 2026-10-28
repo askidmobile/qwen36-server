@@ -119,15 +119,16 @@ codec, чтобы routing не добавлял новую ветку на ка�
 |---|---:|
 | dense/attention/shared/router/head | 5.69 GB (5.30 GiB) по RCO |
 | dequant/GEMM workspace dense-слоёв | ~573 MiB |
-| compressed KV + indexer + window @128K | 225 MiB |
+| compressed KV + indexer + window @128K | 130 MiB при `q8_0` (245 при `f16`) |
 | prefill workspace | 1 024 MiB |
 | CUDA context, WDDM | 512 MiB |
 | **hot expert cache** | **4 452 MiB** |
 
 Уточнение 2026-10-28: ранняя оценка «dense 4.5 GiB и hot cache 5–6 GiB» была
 неверной. Dense посчитан пересчётом всех 1043 тензоров официальной
-`rco-allocation.txt`, KV — по `config.json` и форме кэшей в reference
-`inference/model.py`. Детали: `2026-10-28-deepseek-v41-12gb-custom-quant.md`.
+`rco-allocation.txt`, KV — по `src/llama-kv-cache-dsv4.cpp`, а не по reference
+`inference/model.py`: у llama.cpp index-K делит строку со сжатым KV
+(`n_embd_comp = 640`). Детали: `2026-10-28-deepseek-v41-12gb-custom-quant.md`.
 
 Активный путь токена выбирает 240 experts: 6 experts × 40 слоёв. При среднем
 сериализованном размере около 6.7–9 MB это 1.6–2.2 GiB активных expert weights
