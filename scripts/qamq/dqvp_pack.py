@@ -13,8 +13,13 @@ Layout (little endian)::
     codecs    codec_count × (nc u8, dim u8, codebook_bytes u32, offset u64)
     codebooks concatenated (one nested codebook per layer, widest tier first)
     index     expert_count × (layer u16, expert u16, role u8, codec_id u8,
-                               length u32, offset u64)
-    payload   VQ index streams, each ``ceil(blocks * nc / 8)`` bytes, 16-aligned
+                               length u32, offset u64, n_scales u32, scale_offset u64)
+    payload   VQ index streams, each ``ceil(blocks * nc / 8)`` bytes, 16-aligned,
+              followed by that slot's f16 block scales
+
+Block scales live in the container, not beside it: without them the index stream
+is not invertible, and GGUF's per-block scale is exactly what makes its tensors
+self-contained.
 
 The role byte is 0=gate, 1=up, 2=down, 3=shared, so one expert entry per matrix.
 Only index streams are packed here; the quantizer that produces them is a
@@ -33,8 +38,8 @@ MAGIC = b"DQVP"
 VERSION = 4
 ALIGN = 16
 HEADER = struct.Struct("<4s6I")
-CODEC = struct.Struct("<BBII")
-ENTRY = struct.Struct("<HHBBIQ")
+CODEC = struct.Struct("<BBBBIQ")
+ENTRY = struct.Struct("<HHBBIQII")
 ROLES = ("gate", "up", "down", "shared")
 
 
@@ -43,6 +48,7 @@ class Codec:
     nc: int
     dim: int
     codebook: bytes
+    elem_bytes: int = 2  # f16 by default; 1 = E4M3, 4 = f32
 
 
 @dataclass(frozen=True)
@@ -52,6 +58,7 @@ class ExpertSlot:
     role: int
     codec_id: int
     indices: bytes
+    scales: bytes = b""  # f16 per VQ block; empty means scale-free codec
 
 
 def _align(value: int, alignment: int = ALIGN) -> int:
@@ -106,8 +113,14 @@ def write_container(path: Path, slots, codecs) -> dict:
         raise ValueError("at least one codec is required")
     if any(c.nc < 1 or c.nc > 24 for c in codecs):
         raise ValueError("codec widths must be in 1..24")
-    if any(c.dim <= 0 or len(c.codebook) != (1 << c.nc) * c.dim for c in codecs):
-        raise ValueError("codebook size must be (1 << nc) * dim")
+    for c in codecs:
+        if c.dim <= 0 or c.elem_bytes <= 0:
+            raise ValueError("codec dim and elem_bytes must be positive")
+        if len(c.codebook) != (1 << c.nc) * c.dim * c.elem_bytes:
+            raise ValueError(
+                f"codec {c.nc}b needs {(1 << c.nc) * c.dim * c.elem_bytes} codebook "
+                f"bytes, got {len(c.codebook)}"
+            )
 
     expert_count = max(s.expert for s in slots) + 1 if slots else 0
     layers = max(s.layer for s in slots) + 1 if slots else 0
@@ -125,30 +138,48 @@ def write_container(path: Path, slots, codecs) -> dict:
     rows = []
     payload_offset = _align(index_offset + ENTRY.size * len(slots))
     for slot in slots:
-        blob = slot.indices
-        rows.append((slot, blob, payload_offset))
-        payload_offset = _align(payload_offset + len(blob))
+        idx_off = payload_offset
+        payload_offset = _align(payload_offset + len(slot.indices))
+        scale_off = payload_offset
+        payload_offset = _align(payload_offset + len(slot.scales))
+        rows.append((slot, idx_off, scale_off))
 
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("wb") as handle:
         handle.write(HEADER.pack(MAGIC, VERSION, layers, expert_count, dim, len(codecs), len(slots)))
         for codec, off in zip(codecs, codebook_offsets):
-            handle.write(CODEC.pack(codec.nc, codec.dim, len(codec.codebook), off))
+            handle.write(CODEC.pack(codec.nc, codec.dim, codec.elem_bytes, 0, len(codec.codebook), off))
         handle.write(codebook_blob)
         handle.write(b"\0" * (index_offset - handle.tell()))
-        for slot, blob, off in rows:
-            handle.write(ENTRY.pack(slot.layer, slot.expert, slot.role, slot.codec_id, len(blob), off))
-        handle.write(b"\0" * (rows[0][2] - handle.tell() if rows else 0))
-        for _, blob, _ in rows:
-            handle.write(blob)
-            handle.write(b"\0" * (_align(len(blob)) - len(blob)))
+        for slot, idx_off, scale_off in rows:
+            handle.write(
+                ENTRY.pack(
+                    slot.layer,
+                    slot.expert,
+                    slot.role,
+                    slot.codec_id,
+                    len(slot.indices),
+                    idx_off,
+                    len(slot.scales),
+                    scale_off,
+                )
+            )
+        handle.write(b"\0" * ((rows[0][1] if rows else index_offset + ENTRY.size * len(slots)) - handle.tell()))
+        for slot, idx_off, scale_off in rows:
+            handle.write(slot.indices)
+            handle.write(b"\0" * (_align(len(slot.indices)) - len(slot.indices)))
+            handle.write(slot.scales)
+            handle.write(b"\0" * (_align(len(slot.scales)) - len(slot.scales)))
     size = path.stat().st_size
+    payload = sum(len(s.indices) + len(s.scales) for s in slots)
     return {
         "bytes": size,
-        "payload_bytes": sum(len(b) for _, b, _ in rows),
+        "payload_bytes": payload,
+        "index_bytes": sum(len(s.indices) for s in slots),
+        "scale_bytes": sum(len(s.scales) for s in slots),
         "slots": len(rows),
         "codecs": len(codecs),
-        "overhead_bytes": size - sum(len(b) for _, b, _ in rows),
+        "overhead_bytes": size - payload,
     }
 
 
@@ -168,12 +199,12 @@ def read_container(path: Path) -> dict:
 
     codecs = []
     for i in range(n_codecs):
-        nc, cdim, nbytes, off = CODEC.unpack_from(raw, HEADER.size + CODEC.size * i)
+        nc, cdim, elem, _pad, nbytes, off = CODEC.unpack_from(raw, HEADER.size + CODEC.size * i)
         if off + nbytes > len(raw):
             raise ValueError(f"codec {i} codebook runs past the end of the file")
-        if nbytes != (1 << nc) * cdim:
+        if nbytes != (1 << nc) * cdim * elem:
             raise ValueError(f"codec {i} codebook size does not match its width")
-        codecs.append(Codec(nc=nc, dim=cdim, codebook=raw[off : off + nbytes]))
+        codecs.append(Codec(nc=nc, dim=cdim, elem_bytes=elem, codebook=raw[off : off + nbytes]))
 
     index_offset = _align(HEADER.size + CODEC.size * n_codecs + sum(len(c.codebook) for c in codecs))
     if index_offset + ENTRY.size * n_slots > len(raw):
@@ -181,13 +212,15 @@ def read_container(path: Path) -> dict:
 
     slots = []
     for i in range(n_slots):
-        layer, expert, role, codec_id, length, off = ENTRY.unpack_from(
+        layer, expert, role, codec_id, length, off, n_scales, scale_off = ENTRY.unpack_from(
             raw, index_offset + ENTRY.size * i
         )
         if codec_id >= n_codecs:
             raise ValueError(f"slot {i} references codec {codec_id} of {n_codecs}")
         if length == 0 or off + length > len(raw):
             raise ValueError(f"slot {i} payload runs past the end of the file")
+        if n_scales and scale_off + n_scales > len(raw):
+            raise ValueError(f"slot {i} scales run past the end of the file")
         slots.append(
             ExpertSlot(
                 layer=layer,
@@ -195,6 +228,7 @@ def read_container(path: Path) -> dict:
                 role=role,
                 codec_id=codec_id,
                 indices=raw[off : off + length],
+                scales=raw[scale_off : scale_off + n_scales],
             )
         )
     return {
@@ -212,7 +246,8 @@ def self_check(path: Path, blocks: int = 64, seed: int = 11) -> dict:
 
     rng = random.Random(seed)
     codecs = [
-        Codec(nc=nc, dim=8, codebook=bytes(rng.randrange(256) for _ in range((1 << nc) * 8)))
+        Codec(nc=nc, dim=8, elem_bytes=2,
+              codebook=bytes(rng.randrange(256) for _ in range((1 << nc) * 8 * 2)))
         for nc in (9, 10, 12, 13)
     ]
     slots = []
@@ -221,6 +256,7 @@ def self_check(path: Path, blocks: int = 64, seed: int = 11) -> dict:
             codec_id = (layer + expert) % len(codecs)
             nc = codecs[codec_id].nc
             values = [rng.randrange(1 << nc) for _ in range(blocks)]
+            scales = struct.pack(f"<{blocks}H", *[rng.randrange(65536) for _ in range(blocks)])
             slots.append(
                 ExpertSlot(
                     layer=layer,
@@ -228,6 +264,7 @@ def self_check(path: Path, blocks: int = 64, seed: int = 11) -> dict:
                     role=(layer + expert) % 3,
                     codec_id=codec_id,
                     indices=_pack_indices(values, nc, 8),
+                    scales=scales,
                 )
             )
     accounting = write_container(path, slots, codecs)
@@ -245,6 +282,8 @@ def self_check(path: Path, blocks: int = 64, seed: int = 11) -> dict:
         nc = codecs[have.codec_id].nc
         if _unpack_indices(have.indices, blocks, nc) != _unpack_indices(want.indices, blocks, nc):
             raise AssertionError("index stream changed")
+        if have.scales != want.scales:
+            raise AssertionError("block scales changed")
     accounting["verified_slots"] = len(slots)
     return accounting
 

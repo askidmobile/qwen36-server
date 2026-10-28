@@ -19,26 +19,36 @@ from gguf import GGUFReader, quants
 
 
 def vq_error(matrix: np.ndarray, dim: int, nc: int, blocks: int, iters: int, seed: int) -> float:
+    """Relative error with one gain per row, which is what DQVP stores.
+
+    Per-block scales would cost 16 bits per ``dim`` elements — more than the
+    index stream itself — so the pack keeps one f16 gain per row instead.
+    """
     rng = np.random.default_rng(seed)
-    flat = matrix.reshape(-1, dim)
-    pick = rng.choice(len(flat), size=min(blocks, len(flat)), replace=False)
-    sample = flat[pick].astype(np.float32)
-    scale = np.abs(sample).max(axis=1, keepdims=True) / 3.0 + 1e-8
-    norm = sample / scale
+    rows = matrix.shape[0]
+    per_row = matrix.shape[1] // dim
+    want_rows = max(1, -(-blocks // per_row))
+    keep = rng.choice(rows, size=min(want_rows, rows), replace=False)
+    sub = matrix[keep].astype(np.float32)
+    scale = np.abs(sub).max(axis=1, keepdims=True) / 3.0 + 1e-8
+    norm = sub / scale
+    sample = sub.reshape(-1, dim)
     k = 1 << nc
-    if k > len(norm):
-        raise ValueError(f"{nc} bits needs {k} blocks, only {len(norm)} sampled")
-    codebook = norm[rng.choice(len(norm), size=k, replace=False)].copy()
+    flat = norm.reshape(-1, dim)
+    if k > len(flat):
+        raise ValueError(f"{nc} bits needs {k} blocks, only {len(flat)} available")
+    codebook = flat[rng.choice(len(flat), size=k, replace=False)].copy()
     for _ in range(iters):
-        dist = (norm * norm).sum(1)[:, None] - 2 * norm @ codebook.T + (codebook * codebook).sum(1)[None, :]
+        dist = (flat * flat).sum(1)[:, None] - 2 * flat @ codebook.T + (codebook * codebook).sum(1)[None, :]
         assign = dist.argmin(1)
         counts = np.bincount(assign, minlength=k)
         sums = np.zeros_like(codebook)
-        np.add.at(sums, assign, norm)
+        np.add.at(sums, assign, flat)
         used = counts > 0
         codebook[used] = sums[used] / counts[used][:, None]
-    dist = (norm * norm).sum(1)[:, None] - 2 * norm @ codebook.T + (codebook * codebook).sum(1)[None, :]
-    recon = codebook[dist.argmin(1)] * scale
+    dist = (flat * flat).sum(1)[:, None] - 2 * flat @ codebook.T + (codebook * codebook).sum(1)[None, :]
+    gains = np.repeat(scale, flat.shape[0] // len(scale), axis=0)
+    recon = (codebook[dist.argmin(1)] * gains).reshape(sample.shape)
     return float(((sample - recon) ** 2).sum() / (sample ** 2).sum())
 
 
