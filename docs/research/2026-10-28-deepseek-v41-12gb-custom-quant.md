@@ -125,7 +125,11 @@ DQVP v4 (index-expert pack)
 
 Что уже готово и проверено:
 
-- `scripts/qamq/ds41_vram_alloc.py` — аллокатор (20 тестов): `--mode uniform|hotness|calibrated`,
+- `scripts/qamq/dqvp_pack.py` — reference-контейнер DQVP v4: заголовок, таблица
+  codec'ов с per-expert шириной, битовая упаковка индексов, round-trip проверка
+  (`--self-check`) и инспекция (`--inspect`). Это то, чего GGUF выразить не может.
+- `scripts/qamq/vq_error.py` — измеренная кривая ошибки VQ на реальных тензорах.
+- `scripts/qamq/ds41_vram_alloc.py` — аллокатор (24 теста): `--mode uniform|hotness|calibrated`,
   чтение Strata/DS4/JSON routing, `L e nc` таблица, `STRP` и raw `uint32` профили,
   расчёт placement с `ssd_bytes_per_token` и потолком декода.
 - `docs/research/deepseek-v41-layout-2026-10-28/expert-profile.bin` — 61 440 B, 15 360

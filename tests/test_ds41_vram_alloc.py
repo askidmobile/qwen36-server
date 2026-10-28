@@ -338,6 +338,42 @@ class Ds41VramAllocTest(unittest.TestCase):
             self.assertIn("dsx", str(ctx.exception))
 
 
+    def test_dqvp_container_round_trips_mixed_widths(self):
+        import importlib.util as iu
+
+        spec = iu.spec_from_file_location(
+            "dqvp_pack", ROOT / "scripts" / "qamq" / "dqvp_pack.py"
+        )
+        dq = iu.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[spec.name] = dq
+        spec.loader.exec_module(dq)
+
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "pack.bin"
+            info = dq.self_check(path, blocks=32)
+            self.assertEqual(info["verified_slots"], 6)
+            got = dq.read_container(path)
+        self.assertEqual(got["layers"], 2)
+        self.assertEqual(sorted({c.nc for c in got["codecs"]}), [9, 10, 12, 13])
+
+    def test_dqvp_bit_packing_matches_the_byte_count(self):
+        import importlib.util as iu
+
+        spec = iu.spec_from_file_location(
+            "dqvp_pack2", ROOT / "scripts" / "qamq" / "dqvp_pack.py"
+        )
+        dq = iu.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[spec.name] = dq
+        spec.loader.exec_module(dq)
+
+        for nc in (9, 10, 12, 13):
+            values = list(range(1 << nc))
+            blob = dq._pack_indices(values, nc, 8)
+            self.assertEqual(len(blob), (len(values) * nc + 7) // 8)
+            self.assertEqual(dq._unpack_indices(blob, len(values), nc), values)
+
 
 if __name__ == "__main__":
     unittest.main()
