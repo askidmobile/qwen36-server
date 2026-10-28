@@ -374,6 +374,27 @@ class Ds41VramAllocTest(unittest.TestCase):
             self.assertEqual(len(blob), (len(values) * nc + 7) // 8)
             self.assertEqual(dq._unpack_indices(blob, len(values), nc), values)
 
+    def test_dense_budget_reproduces_the_downloaded_shard_size(self):
+        import importlib.util as iu
+
+        spec = iu.spec_from_file_location(
+            "dense_budget", ROOT / "scripts" / "qamq" / "dense_budget.py"
+        )
+        db = iu.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[spec.name] = db
+        spec.loader.exec_module(db)
+
+        shape = db.shapes()
+        self.assertEqual(len(shape), 1042)
+        # expert payload: 40 layers x 3 matrices x 384 experts x hidden x 2304
+        self.assertEqual(shape["blk.0.ffn_up_exps.weight"], (5120, 384 * 2304))
+        # hyper-connection fan-out is stored, not a scalar
+        self.assertEqual(shape["blk.0.hc_attn_fn.weight"], (20480, 24))
+        # a real f32 tensor is 4 bytes per element
+        self.assertEqual(db.nbytes((5120,), "F32"), 5120 * 4)
+        self.assertEqual(db.nbytes((5120, 384), "BF16"), 5120 * 384 * 2)
+
 
 if __name__ == "__main__":
     unittest.main()

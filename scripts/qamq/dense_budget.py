@@ -1,75 +1,142 @@
-import re, json, sys
+#!/usr/bin/env python3
+"""Split a DeepSeek-V4.1 Flash GGUF allocation into dense and routed-expert bytes.
+
+The tensor shapes here are not guesses: they were read out of the downloaded
+IQ2_XXS shards (``gguf_audit.py --shapes``) and this model reproduces the real
+backbone size to within shard-headers and padding. That matters because the
+dense spine decides how much VRAM is left for the expert cache.
+
+    python scripts/qamq/dense_budget.py ALLOCATION.txt [--real-bytes N]
+"""
+from __future__ import annotations
+
+import argparse
+import sys
 from pathlib import Path
 
-REAL_BYTES = {'DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS.rco-allocation.txt': 138238893056}
-
-# GGML block table from ISTA converter (elements per block, bytes per block)
+# GGML type -> (elements per block, bytes per block)
 GGML_BLOCK = {
- 'F32':(1,4),'F16':(1,2),'BF16':(1,2),'Q8_0':(32,34),'Q5_K':(256,176),'Q6_K':(256,210),
- 'Q4_K':(256,144),'Q3_K':(256,110),'Q2_K':(256,84),'IQ1_M':(256,56),'IQ1_S':(256,50),
- 'IQ2_XXS':(256,66),'IQ2_XS':(256,74),'IQ2_S':(256,82),'IQ2_M':(256,98),'IQ3_XXS':(256,98),
- 'IQ3_XS':(256,110),'IQ3_S':(256,110),'IQ4_NL':(32,18),'IQ4_XS':(256,136),'Q4_0':(32,18),
+    "F32": (1, 4), "F16": (1, 2), "BF16": (1, 2), "Q8_0": (32, 34), "Q5_K": (256, 176),
+    "Q6_K": (256, 210), "Q4_K": (256, 144), "Q3_K": (256, 110), "Q2_K": (256, 84),
+    "IQ1_M": (256, 56), "IQ1_S": (256, 50), "IQ2_XXS": (256, 66), "IQ2_XS": (256, 74),
+    "IQ2_S": (256, 82), "IQ2_M": (256, 98), "IQ3_XXS": (256, 98), "IQ3_XS": (256, 110),
+    "IQ3_S": (256, 110), "IQ4_NL": (32, 18), "IQ4_XS": (256, 136), "Q4_0": (32, 18),
 }
-H, I, E, L = 5120, 2304, 384, 40
-QL, QQ, KVH, HD, RD = 1280, 64, 1, 512, 64
-IDX, IDH, IH = 128, 128, 32
-def shapes():
-    s = {'token_embd.weight':(H,129280), 'output.weight':(129280,H), 'output_norm.weight':(H,)}
-    for l in range(L):
-        p=f'blk.{l}.'
-        s[p+'attn_q_a.weight']=(QL,H); s[p+'attn_q_b.weight']=(QQ*HD,QL)
-        s[p+'attn_kv.weight']=(HD,H); s[p+'attn_output_a.weight']=(QQ*HD//8, 8*1024)
-        s[p+'attn_output_b.weight']=(H,8*1024)
-        s[p+'attn_norm.weight']=(H,); s[p+'attn_q_a_norm.weight']=(QL,); s[p+'attn_kv_a_norm.weight']=(HD,)
-        s[p+'attn_sinks.weight']=(QQ,)
-        s[p+'ffn_norm.weight']=(H,); s[p+'ffn_gate_inp.weight']=(E,H)
-        s[p+'exp_probs_b.bias']=(E,); s[p+'exp_probs_b_vl.bias']=(E,)
-        s[p+'ffn_gate_shexp.weight']=(I,H); s[p+'ffn_up_shexp.weight']=(I,H); s[p+'ffn_down_shexp.weight']=(H,I)
-        s[p+'ffn_gate_exps.weight']=(H,E*I); s[p+'ffn_up_exps.weight']=(H,E*I); s[p+'ffn_down_exps.weight']=(E*I,H)
-        for hc in ('hc_attn_base','hc_attn_fn','hc_attn_scale','hc_ffn_base','hc_ffn_fn','hc_ffn_scale'):
-            s[p+hc+'.weight']=(4,)
-        if l in (1,14):
-            s[p+'engram_gate.weight']=(H,2048); s[p+'engram_kv.weight']=(H,2048)
-    for l in (2, 8, 14, 20):
-        p = f'blk.{l}.'
-        s[p+'attn_compressor_kv.weight']=(HD,H)
-        s[p+'attn_compressor_norm.weight']=(HD,)
-        if l != 20:
-            s[p+'attn_compressor_gate.weight']=(HD,H)
-    for l in (2, 8, 14, 20, 24, 28, 32, 36):
-        p = f'blk.{l}.'
-        if l in (2, 8, 14, 20):
-            s[p+'indexer.attn_k.weight']=(IDX,H)
-            s[p+'indexer.k_norm.weight']=(IDX,)
-        s[p+'indexer.attn_q_b.weight']=(IH*IDX,QL)
-        s[p+'indexer.proj.weight']=(IH,H)
+H, I, E = 5120, 2304, 384
+HIDDEN, HIDDEN_HEAD, Q_LORA, N_HEADS = 5120, 512, 1280, 64
+HC = 24  # hyper-connection width
+ENGRAM_WKV = (6144, 25600)
+KV_SOURCES = (2, 8, 14, 20)
+INDEX_SOURCES = (2, 8, 14, 20, 24, 28, 32, 36)
+ENGRAM_LAYERS = (1, 14)
+
+
+def shapes() -> dict[str, tuple[int, ...]]:
+    """Exact tensor shapes of the llama.cpp deepseek41 layout."""
+    s: dict[str, tuple[int, ...]] = {
+        "token_embd.weight": (HIDDEN, 129280),
+        "output.weight": (129280, HIDDEN),
+        "output_norm.weight": (HIDDEN,),
+    }
+    for layer in range(40):
+        p = f"blk.{layer}."
+        s.update({
+            p + "attn_q_a.weight": (HIDDEN, Q_LORA),
+            p + "attn_q_b.weight": (Q_LORA, N_HEADS * HIDDEN_HEAD),
+            p + "attn_kv.weight": (HIDDEN, HIDDEN_HEAD),
+            p + "attn_output_a.weight": (4096, 1024, 8),
+            p + "attn_output_b.weight": (8192, HIDDEN),
+            p + "attn_norm.weight": (HIDDEN,),
+            p + "attn_q_a_norm.weight": (Q_LORA,),
+            p + "attn_kv_a_norm.weight": (HIDDEN_HEAD,),
+            p + "attn_sinks.weight": (64,),
+            p + "ffn_norm.weight": (HIDDEN,),
+            p + "ffn_gate_inp.weight": (HIDDEN, E),
+            p + "exp_probs_b.bias": (E,),
+            p + "exp_probs_b_vl.bias": (E,),
+            p + "ffn_gate_shexp.weight": (HIDDEN, I),
+            p + "ffn_up_shexp.weight": (HIDDEN, I),
+            p + "ffn_down_shexp.weight": (I, HIDDEN),
+            p + "ffn_gate_exps.weight": (HIDDEN, E * I),
+            p + "ffn_up_exps.weight": (HIDDEN, E * I),
+            p + "ffn_down_exps.weight": (E * I, HIDDEN),
+            p + "hc_attn_base.weight": (HC,),
+            p + "hc_attn_fn.weight": (HIDDEN * 4, HC),
+            p + "hc_attn_scale.weight": (3,),
+            p + "hc_ffn_base.weight": (HC,),
+            p + "hc_ffn_fn.weight": (HIDDEN * 4, HC),
+            p + "hc_ffn_scale.weight": (3,),
+        })
+    for layer in KV_SOURCES:
+        p = f"blk.{layer}."
+        s[p + "attn_compressor_kv.weight"] = (HIDDEN, HIDDEN_HEAD)
+        s[p + "attn_compressor_norm.weight"] = (HIDDEN_HEAD,)
+        if layer != 20:  # ratio 2 pools, ratio 1 needs no gate
+            s[p + "attn_compressor_gate.weight"] = (HIDDEN, HIDDEN_HEAD)
+    for layer in INDEX_SOURCES:
+        p = f"blk.{layer}."
+        s[p + "indexer.attn_q_b.weight"] = (Q_LORA, 32 * 128)
+        s[p + "indexer.proj.weight"] = (HIDDEN, 32)
+        if layer in KV_SOURCES:  # only kv sources own the index keys
+            s[p + "indexer.attn_k.weight"] = (HIDDEN_HEAD, 128)
+            s[p + "indexer.k_norm.weight"] = (128,)
+    for layer in ENGRAM_LAYERS:
+        p = f"blk.{layer}."
+        # the released GGUF stores this layer as gate (q*k folded) + wkv, not q/k
+        s[p + "engram_gate.weight"] = (HIDDEN, 256)
+        s[p + "engram_kv.weight"] = (HIDDEN, 256)
     return s
 
-def nbytes(shape, t):
-    per, bb = GGML_BLOCK[t]
-    n=1
-    for d in shape: n*=d
-    if shape[0] % per: raise ValueError(f'row {shape[0]} not whole blocks of {t}')
-    return n//per*bb
 
-for name in sys.argv[1:]:
-    path=Path(name); alloc={}
-    for line in path.read_text().splitlines():
-        line=line.strip()
-        if not line or line.startswith('#'): continue
-        k,v=line.rsplit(': ',1); alloc[k]=v.strip()
-    sh=shapes()
-    missing=[k for k in sh if k not in alloc]
-    extra=[k for k in alloc if k not in sh and k!='per_layer_token_embd.weight']
-    if missing or extra:
-        raise SystemExit(f'{path.name}: unmatched tensors missing={missing[:3]} extra={extra[:3]}')
-    dense=sum(nbytes(sh[k], alloc[k]) for k in sh if 'exps' not in k)
-    experts=sum(nbytes(sh[k], alloc[k]) for k in sh if 'exps' in k)
-    print(f'== {path.name}')
-    print(f'   tensors matched: {len(sh)-len(missing)}/{len(sh)}  missing={missing[:3]} extra={extra[:3]}')
-    print(f'   dense (non-expert) : {dense/1e9:.2f} GB  {dense/1024**3:.2f} GiB')
-    print(f'   routed experts     : {experts/1e9:.2f} GB  {experts/1024**3:.2f} GiB')
-    print(f'   total backbone     : {(dense+experts)/1e9:.2f} GB  {(dense+experts)/1024**3:.2f} GiB')
-    real = REAL_BYTES.get(path.name)
-    if real:
-        print(f'   real shards        : {real/1e9:.2f} GB  delta {(dense+experts-real)/1e6:+.1f} MB')
+def nbytes(shape: tuple[int, ...], ggml_type: str) -> int:
+    per_block, block_bytes = GGML_BLOCK[ggml_type]
+    n = 1
+    for d in shape:
+        n *= d
+    if shape[0] % per_block:
+        raise ValueError(f"row {shape[0]} is not whole {ggml_type} blocks")
+    return n // per_block * block_bytes
+
+
+def read_allocation(path: Path) -> dict[str, str]:
+    alloc: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        name, _, ggml_type = line.rpartition(": ")
+        alloc[name] = ggml_type.strip()
+    return alloc
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("allocation", type=Path, nargs="+")
+    parser.add_argument("--real-bytes", type=int, help="total size of the downloaded shards")
+    args = parser.parse_args(argv)
+
+    shape = shapes()
+    status = 0
+    for path in args.allocation:
+        alloc = read_allocation(path)
+        missing = [k for k in shape if k not in alloc]
+        extra = [k for k in alloc if k not in shape and k != "per_layer_token_embd.weight"]
+        print(f"== {path.name}")
+        if missing or extra:
+            print(f"   UNMATCHED missing={missing[:3]} extra={extra[:3]}")
+            status = 1
+            continue
+        dense = sum(nbytes(shape[k], alloc[k]) for k in shape if "exps" not in k)
+        experts = sum(nbytes(shape[k], alloc[k]) for k in shape if "exps" in k)
+        print(f"   tensors matched    : {len(shape)}/{len(shape)}")
+        print(f"   dense (non-expert) : {dense/1e9:8.3f} GB  {dense/1024**3:7.3f} GiB")
+        print(f"   routed experts     : {experts/1e9:8.3f} GB  {experts/1024**3:7.3f} GiB")
+        print(f"   total backbone     : {(dense+experts)/1e9:8.3f} GB  {(dense+experts)/1024**3:7.3f} GiB")
+        if args.real_bytes:
+            delta = dense + experts - args.real_bytes
+            print(f"   real shards        : {args.real_bytes/1e9:8.3f} GB  delta {delta/1e6:+.1f} MB")
+    return status
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
