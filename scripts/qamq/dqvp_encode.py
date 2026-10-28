@@ -23,19 +23,38 @@ import numpy as np
 import dqvp_pack as dq
 
 
-def fit_codebook(blocks: np.ndarray, nc: int, iters: int, seed: int) -> np.ndarray:
-    """k-means codebook over scale-normalized blocks; returns (1<<nc, dim) f32."""
+def _assign(blocks: np.ndarray, codebook: np.ndarray, chunk: int = 1 << 16) -> np.ndarray:
+    """Nearest-codebook assignment in row chunks, so 11.8M blocks do not need a
+    (blocks x codes) distance matrix in memory at once."""
+    out = np.empty(len(blocks), dtype=np.int64)
+    cb2 = (codebook * codebook).sum(1)[None, :]
+    for start in range(0, len(blocks), chunk):
+        part = blocks[start:start + chunk]
+        dist = (part * part).sum(1)[:, None] - 2 * part @ codebook.T + cb2
+        out[start:start + len(part)] = dist.argmin(1)
+    return out
+
+
+def fit_codebook(blocks: np.ndarray, nc: int, iters: int, seed: int, sample: int = 1 << 18) -> np.ndarray:
+    """k-means codebook over scale-normalized blocks; returns (1<<nc, dim) f32.
+
+    The codebook is fitted on at most ``sample`` blocks but applied to all of them,
+    which is what keeps a 2304x5120 expert tractable.
+    """
     rng = np.random.default_rng(seed)
     k = 1 << nc
-    if len(blocks) < k:
-        raise ValueError(f"{nc} bits needs {k} blocks, only {len(blocks)} available")
-    codebook = blocks[rng.choice(len(blocks), size=k, replace=False)].copy()
+    if len(blocks) > sample:
+        fit_blocks = blocks[rng.choice(len(blocks), size=sample, replace=False)]
+    else:
+        fit_blocks = blocks
+    if len(fit_blocks) < k:
+        raise ValueError(f"{nc} bits needs {k} blocks, only {len(fit_blocks)} available")
+    codebook = fit_blocks[rng.choice(len(fit_blocks), size=k, replace=False)].copy()
     for _ in range(iters):
-        dist = (blocks * blocks).sum(1)[:, None] - 2 * blocks @ codebook.T + (codebook * codebook).sum(1)[None, :]
-        assign = dist.argmin(1)
+        assign = _assign(fit_blocks, codebook)
         counts = np.bincount(assign, minlength=k)
         sums = np.zeros_like(codebook)
-        np.add.at(sums, assign, blocks)
+        np.add.at(sums, assign, fit_blocks)
         used = counts > 0
         codebook[used] = sums[used] / counts[used][:, None]
     return codebook.astype(np.float32)
@@ -70,6 +89,30 @@ def decode(slots, codecs, rows: int, cols: int, dim: int, n_rows=None) -> np.nda
     return out
 
 
+def load_matrix(path: str, name: str | None) -> tuple[np.ndarray, str]:
+    """Read a GGUF tensor or a sliced-expert ``.npz`` written by extract_expert.py."""
+    if path.endswith(".npz"):
+        data = np.load(path)
+        return data["weight"].astype(np.float32), name or f"{path}:{data['meta']}"
+    import gguf
+    from gguf import quants
+
+    reader = gguf.GGUFReader(path)
+    if name:
+        tensor = next((t for t in reader.tensors if t.name == name), None)
+        if tensor is None:
+            raise SystemExit(f"{path}: no tensor {name}")
+    else:
+        candidates = [
+            t for t in reader.tensors
+            if len(t.shape) == 2 and int(min(t.shape)) >= 512 and int(np.prod(t.shape)) > 1 << 20
+        ]
+        if not candidates:
+            raise SystemExit("no 2-D tensor large enough")
+        tensor = max(candidates, key=lambda t: int(np.prod(t.shape)))
+    return quants.dequantize(tensor.data, tensor.tensor_type).astype(np.float32), tensor.name
+
+
 def encode(matrix: np.ndarray, plan: list[int], dim: int, iters: int, seed: int):
     """Split rows into len(plan) groups and VQ each at its width."""
     rows, cols = matrix.shape
@@ -90,8 +133,7 @@ def encode(matrix: np.ndarray, plan: list[int], dim: int, iters: int, seed: int)
         norm = chunk / gains
         blocks = norm.reshape(-1, dim)
         codebook = fit_codebook(blocks, nc, iters, seed + group)
-        dist = (blocks * blocks).sum(1)[:, None] - 2 * blocks @ codebook.T + (codebook * codebook).sum(1)[None, :]
-        idx = dist.argmin(1)
+        idx = _assign(blocks, codebook)
         recon[r0:r1] = (codebook[idx] * gains.repeat(blocks_per_row, axis=0)).reshape(chunk.shape)
 
         codec_id = len(codecs)
@@ -122,33 +164,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, default=Path("dqvp-pack.bin"))
     args = parser.parse_args(argv)
 
-    import gguf
-    from gguf import quants
-
-    reader = gguf.GGUFReader(args.model)
-    if args.tensor:
-        tensor = next((t for t in reader.tensors if t.name == args.tensor), None)
-        if tensor is None:
-            raise SystemExit(f"{args.model}: no tensor {args.tensor}")
-    else:
-        candidates = [
-            t for t in reader.tensors
-            if len(t.shape) == 2 and int(min(t.shape)) >= 512 and int(np.prod(t.shape)) > 1 << 20
-        ]
-        if not candidates:
-            raise SystemExit("no 2-D tensor large enough")
-        tensor = max(candidates, key=lambda t: int(np.prod(t.shape)))
-    matrix = quants.dequantize(tensor.data, tensor.tensor_type).astype(np.float32)
-
+    matrix, label = load_matrix(args.model, args.tensor)
     plan = [int(v) for v in args.plan.split(",") if v.strip()]
     if not plan:
         raise SystemExit("--plan must list at least one width")
-    # trim the plan until the row count divides evenly
     while len(plan) > 1 and matrix.shape[0] % len(plan):
         plan = plan[:-1]
     if matrix.shape[0] % len(plan):
         raise SystemExit(f"{matrix.shape[0]} rows do not split into {len(plan)} groups")
+    tensor = type("T", (), {"name": label})()
 
+    codecs, slots, recon = encode(matrix, plan, args.dim, args.iters, args.seed)
     codecs, slots, recon = encode(matrix, plan, args.dim, args.iters, args.seed)
     n_rows = {slot.expert: matrix.shape[0] // len(plan) for slot in slots}
     accounting = dq.write_container(args.out, slots, codecs)
