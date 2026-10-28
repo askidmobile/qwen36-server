@@ -1,8 +1,8 @@
 # Plan: терминальный монитор yforge
 
-**Date:** 2026-10-28  
-**Status:** 📝 Planning  
-**Priority:** P1  
+**Date:** 2026-10-28
+**Status:** 🟡 Implemented; Windows/Linux terminal smoke pending
+**Priority:** P1
 **Specification:** [docs/specs/2026-10-28-yforge-monitor.md](../specs/2026-10-28-yforge-monitor.md)
 
 ## Goal
@@ -38,13 +38,13 @@ graph TD
 ### Server metrics
 
 #### Files:
-- [ ] `src/metrics.rs` — shared request counters, recent request buffer, uptime, GPU/system collectors.
-- [ ] `src/api.rs` — add `Arc<RequestMetrics>` to `AppState`; route `/v1/status` under auth.
-- [ ] `src/api/status.rs` — build JSON snapshot from metrics, engine info and collectors.
-- [ ] `src/api/openai.rs` — create request guard and record completion/error usage.
-- [ ] `src/api/responses.rs` — same request guard lifecycle.
-- [ ] `src/api/anthropic.rs` — same request guard lifecycle.
-- [ ] `src/main.rs` — initialize metrics before router; expose status endpoint.
+- [x] `src/metrics.rs` — shared request counters, recent request buffer, uptime, GPU/system collectors.
+- [x] `src/api.rs` — add `Arc<RequestMetrics>` to `AppState`; route `/v1/status` under auth.
+- [x] `src/api/status.rs` — build JSON snapshot from metrics, engine info and collectors.
+- [x] `src/api/openai.rs` — create request guard and record completion/error usage.
+- [x] `src/api/responses.rs` — same request guard lifecycle.
+- [x] `src/api/anthropic.rs` — same request guard lifecycle.
+- [x] `src/main.rs` — initialize metrics before router; expose status endpoint.
 
 #### Endpoint:
 
@@ -88,10 +88,10 @@ StatusSnapshot {
 ### Terminal client
 
 #### Files:
-- [ ] `src/cli.rs` — optional `monitor` subcommand with URL, api-key and refresh interval.
-- [ ] `src/monitor.rs` — HTTP polling, rolling speed calculation and ANSI renderer.
-- [ ] `src/main.rs` — dispatch monitor before Config/model load.
-- [ ] `Cargo.toml` — add `crossterm` for raw keyboard input; add `sysinfo` for CPU/RAM on the server.
+- [x] `src/cli.rs` — optional `monitor` subcommand with URL, api-key and refresh interval.
+- [x] `src/monitor.rs` — HTTP polling, rolling speed calculation and ANSI renderer.
+- [x] `src/main.rs` — dispatch monitor before Config/model load.
+- [x] `Cargo.toml` — add `crossterm` for raw keyboard input; add `sysinfo` for CPU/RAM on the server.
 
 #### UI structure:
 
@@ -106,29 +106,29 @@ Monitor
 ```
 
 ### Phase 1: Metrics foundation (estimate: 5 h)
-- [ ] Add `RequestMetrics` and a RAII `RequestGuard`.
-- [ ] Wire guard into all three generation APIs; record only usage and metadata.
-- [ ] Add `/v1/status` with model/runtime/counters but optional GPU/system fields.
-- [ ] Unit-test ring buffer, rolling speed and redaction behavior.
+- [x] Add `RequestMetrics` and a RAII `RequestGuard`.
+- [x] Wire guard into all three generation APIs; record only usage and metadata.
+- [x] Add `/v1/status` with model/runtime/counters but optional GPU/system fields.
+- [x] Unit-test ring buffer, rolling speed and redaction behavior.
 - **Independent check:** `cargo test --features cuda-turing status_metrics` locally; query `/v1/status` with valid/invalid key on yttri-win.
 
 ### Phase 2: System collectors (estimate: 4 h)
-- [ ] Add bounded `nvidia-smi` GPU collector with timeout and cache.
-- [ ] Add sysinfo CPU/RAM collector.
-- [ ] Degrade missing metrics to `null`, not errors.
+- [x] Add bounded `nvidia-smi` GPU collector with timeout and cache.
+- [x] Add sysinfo CPU/RAM collector.
+- [x] Degrade missing metrics to `null`, not errors.
 - **Independent check:** status returns GPU/system values on yttri-win; with `PATH` lacking nvidia-smi it still returns HTTP 200.
 
 ### Phase 3: Terminal overview (estimate: 7 h)
-- [ ] Add `monitor` subcommand and URL/API-key validation.
-- [ ] Build ANSI renderer for wide and narrow terminals.
-- [ ] Implement one-second polling, rolling tok/s and reconnect status.
-- [ ] Implement `q`, `r`, Ctrl+C and terminal cleanup.
+- [x] Add `monitor` subcommand and URL/API-key validation.
+- [x] Build ANSI renderer for wide and narrow terminals.
+- [x] Implement one-second polling, rolling tok/s and reconnect status.
+- [x] Implement `q`, `r`, Ctrl+C and terminal cleanup.
 - **Independent check:** run monitor against test server, submit a 200-token request in another terminal, verify live output speed and request history update.
 
 ### Phase 4: Compatibility and polish (estimate: 4 h)
 - [ ] Windows and Linux terminal smoke tests on yttri-win.
-- [ ] `NO_COLOR=1`, redirect/non-TTY behavior and Unicode fallback.
-- [ ] Document command, auth and read-only boundary in README.
+- [x] `NO_COLOR=1`, redirect/non-TTY behavior and Unicode fallback.
+- [x] Document command, auth and read-only boundary in README.
 - **Independent check:** clean `cargo test`, `cargo check --features cuda-turing`, and manual monitor run without leaving server stopped.
 
 ## Traceability: Requirements → Tasks

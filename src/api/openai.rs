@@ -426,14 +426,15 @@ pub async fn chat_completions(
         Ok(request) => request,
         Err(response) => return response,
     };
+    let metrics = state.metrics.begin("chat.completions");
     if req.stream {
         // tools в запросе → буферизуем текст (иначе <tool_call> разметка
         // утекает в SSE-поток раньше парсинга — аудит 2026-08-10).
         let has_tools = tools_enabled(req.tools.as_ref());
-        return stream_chat(state, request, include_usage, has_tools).await;
+        return stream_chat(state, request, include_usage, has_tools, metrics).await;
     }
 
-    let out = match generate_collect(state.engine.as_ref(), request).await {
+    let out = match generate_collect(state.engine.as_ref(), request, metrics).await {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -685,6 +686,7 @@ async fn stream_chat(
     request: crate::engine_types::InferenceRequest,
     include_usage: bool,
     has_tools: bool,
+    metrics: crate::metrics::RequestGuard,
 ) -> Response {
     let id = format!("chatcmpl-{}", uuid::Uuid::new_v4().simple());
     let model = state.engine.model_info().id;
@@ -737,7 +739,7 @@ async fn stream_chat(
     let mut gemma_buf = String::new();
     // 0=ищем thought-open, 1=в thought (до close), 2=ищем final-open, 3=в final
     let mut gemma_phase: u8 = 0;
-    sse_response(rx, cancel, move |ev, out| match ev {
+    sse_response(rx, cancel, metrics, move |ev, out| match ev {
         StreamEvent::Delta {
             text: d,
             logprobs: lp,
@@ -1157,6 +1159,7 @@ async fn stream_chat(
 
 pub async fn list_models(State(state): State<AppState>) -> Response {
     let info = state.engine.model_info();
+    let runtime = crate::metrics::RuntimeStatus::current();
     // OpenAI-минимум + расширения (BD-015) для внешних систем: нативный
     // контекст, веса, возможности, дефолты и пресеты сэмплинга (BD-016).
     let (path, _, _) = state
@@ -1247,6 +1250,13 @@ pub async fn list_models(State(state): State<AppState>) -> Response {
                 }),
                 "thinking": true,
                 "apis": ["chat_completions", "responses", "messages"],
+            },
+            "runtime": {
+                "backend": runtime.backend,
+                "attention": runtime.attention,
+                "prefill": runtime.prefill,
+                "paged_prefill": runtime.paged_prefill,
+                "cuda_graphs": runtime.cuda_graphs,
             },
             // Effective defaults: ровно тот пресет, который использует API,
             // если клиент не передал параметры явно.

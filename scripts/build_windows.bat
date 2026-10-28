@@ -5,7 +5,7 @@ rem qwen36-server Windows CUDA build. Production: VS 2022 + CUDA 13.2.
 rem CUDA 12.4 rollback: set YTTRI_CUDA=...\v12.4 перед запуском.
 rem CUDA_PATH устанавливается ПОСЛЕ VsDevCmd, иначе VS env её перетирает.
 if not defined CUDA_COMPUTE_CAP set "CUDA_COMPUTE_CAP=86"
-set "YTTRI_CUDA=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2"
+if not defined YTTRI_CUDA set "YTTRI_CUDA=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2"
 
 if not exist "%CUDA_PATH%\bin\nvcc.exe" (
   echo ERROR: nvcc not found: "%CUDA_PATH%\bin\nvcc.exe"
@@ -38,7 +38,11 @@ set "LIB=%CUDA_PATH%\lib\x64;%LIB%"
 
 echo [build] CUDA_PATH=%CUDA_PATH%
 echo [build] CUDA_COMPUTE_CAP=%CUDA_COMPUTE_CAP%
-cargo build --release --features cuda || exit /b 1
+set "YTTRI_FEATURES=cuda"
+if "%CUDA_COMPUTE_CAP%"=="75" set "YTTRI_FEATURES=cuda-turing"
+if "%YTTRI_TURING%"=="1" set "YTTRI_FEATURES=cuda-turing"
+echo [build] features=%YTTRI_FEATURES%
+cargo build --release --features %YTTRI_FEATURES% || exit /b 1
 
 echo [ok] target\release\yforge.exe
 endlocal

@@ -1,7 +1,7 @@
 # Specification: терминальный монитор yforge
 
-**Date:** 2026-10-28  
-**Priority:** P1  
+**Date:** 2026-10-28
+**Priority:** P1
 **Type:** New feature
 
 ## 1. Problem
@@ -35,9 +35,9 @@
 4. `q` отключает монитор, сервер продолжает работать.
 
 **Acceptance criteria (Given / When / Then):**
-- [ ] Given работающий сервер, when открыт monitor, then видны model id, ready/loading/error, slots, context used/limit, prompt/completion tokens и rolling output tok/s.
-- [ ] Given CUDA, when доступен `nvidia-smi`, then видны GPU util, VRAM used/total, temperature и power.
-- [ ] Given нет части системных метрик, when открыт monitor, then экран продолжает работать и показывает `n/a` только для отсутствующих полей.
+- [x] Given работающий сервер, when открыт monitor, then видны model id, ready/loading/error, slots, context used/limit, prompt/completion tokens и rolling output tok/s.
+- [x] Given CUDA, when доступен `nvidia-smi`, then видны GPU util, VRAM used/total, temperature и power.
+- [x] Given нет части системных метрик, when открыт monitor, then экран продолжает работать и показывает `n/a` только для отсутствующих полей.
 - [ ] Given нажата `q` или Ctrl+C, when monitor завершается, then inference-сервер не останавливается.
 
 ### Scenario 2: Последние запросы (P1)
@@ -45,9 +45,9 @@
 **As** оператор, **I want** видеть последние завершённые запросы, **so that** понимать, кто создаёт нагрузку и какие запросы медленные.
 
 **Acceptance criteria:**
-- [ ] Given минимум пять завершённых запросов, when открыт monitor, then видно время, endpoint, prompt/completion tokens, tok/s, duration и finish reason.
-- [ ] Given активный запрос, when обновляется overview, then его состояние отображается в очереди/active без ожидания завершения.
-- [ ] Given failed request, when он попадает в историю, then ошибка отображается как error без текста секретов или тела запроса.
+- [x] Given минимум пять завершённых запросов, when открыт monitor, then видно время, endpoint, prompt/completion tokens, tok/s, duration и finish reason.
+- [x] Given активный запрос, when обновляется overview, then его состояние отображается в очереди/active без ожидания завершения.
+- [x] Given failed request, when он попадает в историю, then ошибка отображается как error без текста секретов или тела запроса.
 
 ## 5. Functional requirements
 
@@ -149,5 +149,5 @@ graph TD
 
 - [ ] `yforge monitor` показывает живой overview на Windows и Linux.
 - [ ] `q` отключает только монитор.
-- [ ] `/v1/status` не раскрывает prompts/completions и требует API key.
-- [ ] Экран остаётся работоспособным при отсутствии `nvidia-smi` или части системных данных.
+- [x] `/v1/status` не раскрывает prompts/completions и требует API key.
+- [x] Экран остаётся работоспособным при отсутствии `nvidia-smi` или части системных данных.

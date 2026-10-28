@@ -854,6 +854,9 @@ impl Engine for BatchedEngine {
     fn model_info(&self) -> ModelInfo {
         self.info.clone()
     }
+    fn in_flight(&self) -> Option<usize> {
+        Some(self.in_flight())
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────

@@ -38,6 +38,9 @@ fn log_section(title: &str) {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Some(qwen36_server::cli::Commands::Monitor(args)) = &cli.command {
+        return qwen36_server::monitor::run(args.clone()).await;
+    }
     // Сайдкар Yttri: ни env-файла, ни HTTP — только stdio (T-682 Yttri).
     if cli.sidecar {
         return qwen36_server::sidecar::run().await;
@@ -45,6 +48,9 @@ async fn main() -> Result<()> {
     // Флаги — в окружение ДО чтения env-файла: файл пишет только незанятые
     // имена, поэтому приоритет «флаг > окружение > файл» получается сам.
     cli.apply_to_env();
+
+    #[cfg(feature = "cuda-turing")]
+    configure_turing(&cli)?;
 
     #[cfg(feature = "cuda")]
     qwen36_server::engine::cuda_prefer_blocking_sync();
@@ -137,7 +143,8 @@ async fn main() -> Result<()> {
     // 12 ГБ это прямо удваивает достижимый контекст. Раньше одиночный слот
     // уходил на CandleEngine и терял CUDA-графы вместе со скоростью декода.
     // FORCE_CANDLE_ENGINE=1 возвращает прежний путь для отладки.
-    let force_candle = std::env::var("FORCE_CANDLE_ENGINE").as_deref() == Ok("1");
+    let force_candle =
+        cfg!(feature = "cuda-turing") || std::env::var("FORCE_CANDLE_ENGINE").as_deref() == Ok("1");
     let engine: Arc<dyn Engine> = if qwen35 && !force_candle {
         let bcfg = BatchConfig {
             model_path: cfg.model.to_string_lossy().into_owned(),
@@ -240,6 +247,8 @@ async fn main() -> Result<()> {
         cfg.ctx,
         cfg.slots,
     ));
+    let metrics = Arc::new(qwen36_server::metrics::RequestMetrics::default());
+    let host_status = Arc::new(qwen36_server::metrics::HostCollector::default());
     let state = AppState {
         engine: switcher.clone(),
         media,
@@ -253,6 +262,8 @@ async fn main() -> Result<()> {
         sampling_policy: std::sync::Arc::new(std::sync::RwLock::new(cfg.sampling_policy.clone())),
         presets: std::sync::Arc::new(std::sync::RwLock::new(cfg.presets.clone())),
         env_file: cfg.env_file.clone(),
+        metrics,
+        host_status,
     };
     let app = build_router(state).merge(qwen36_server::api::proxy::proxy_router(
         cfg.studio_url.clone(),
@@ -275,11 +286,44 @@ async fn main() -> Result<()> {
 
 /// Имя бекенда для строки версии — как `llama.cpp` печатает свой билд.
 fn backend_name() -> &'static str {
-    if cfg!(feature = "cuda") {
+    if cfg!(feature = "cuda-turing") {
+        "CUDA / Turing"
+    } else if cfg!(feature = "cuda") {
         "CUDA"
     } else if cfg!(feature = "metal") {
         "Metal"
     } else {
         "CPU"
     }
+}
+
+#[cfg(feature = "cuda-turing")]
+fn configure_turing(cli: &Cli) -> Result<()> {
+    if cli.sidecar {
+        anyhow::bail!("sidecar mode is not supported by the cuda-turing build");
+    }
+    let mtp = cli.mtp.map(u8::from).or_else(|| {
+        std::env::var("MTP")
+            .ok()
+            .and_then(|value| value.parse::<u8>().ok())
+    });
+    if mtp == Some(1) {
+        anyhow::bail!("MTP is not supported by the cuda-turing build yet");
+    }
+
+    for (name, value) in [
+        ("SLOTS", "1"),
+        ("FLASH_ATTN", "0"),
+        ("PGRAPH", "off"),
+        ("CUDA_GRAPHS", "0"),
+        ("KV_POOL_Q8", "0"),
+        ("MTP", "0"),
+    ] {
+        std::env::set_var(name, value);
+    }
+    eprintln!(
+        "yforge: cuda-turing profile: single slot, split-K decode, reference prefill; \
+         FA2/paged/graphs/MTP/GPU-vision disabled"
+    );
+    Ok(())
 }

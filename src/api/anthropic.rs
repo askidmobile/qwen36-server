@@ -230,9 +230,10 @@ pub async fn messages(
         Ok(request) => request,
         Err(response) => return response,
     };
+    let metrics = state.metrics.begin("messages");
 
     if !req.stream {
-        let out = match generate_collect(state.engine.as_ref(), request).await {
+        let out = match generate_collect(state.engine.as_ref(), request, metrics).await {
             Ok(o) => o,
             Err(r) => return r,
         };
@@ -278,7 +279,7 @@ pub async fn messages(
     })
     .to_string();
 
-    sse_response(rx, cancel, move |ev, out| match ev {
+    sse_response(rx, cancel, metrics, move |ev, out| match ev {
         StreamEvent::Delta { text: d, .. } => {
             if !started {
                 started = true;

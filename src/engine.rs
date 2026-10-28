@@ -383,6 +383,10 @@ pub trait Engine: Send + Sync {
     fn load_error(&self) -> Option<String> {
         None
     }
+    /// Requests admitted or waiting in the engine queue, when exposed.
+    fn in_flight(&self) -> Option<usize> {
+        None
+    }
 }
 
 // ── CandleEngine ────────────────────────────────────────────────────────────

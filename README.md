@@ -284,6 +284,11 @@ schtasks /query /tn yforge
 ```
 
 `CUDA_COMPUTE_CAP` под вашу карту: 86 — RTX 30xx, 89 — RTX 40xx, 120 — RTX 50xx.
+Для Turing (RTX 20xx) используйте `CUDA_COMPUTE_CAP=75` и отдельный профиль
+`--features cuda-turing`: `scripts\build_windows.bat` выбирает его автоматически
+по этому значению. Профиль работает в один слот с FP16 KV, split-K decode и
+reference prefill; FA2, CUDA graphs, paged prefill, MTP и GPU vision в нём
+отключены.
 
 ### Linux + CUDA
 
@@ -293,6 +298,13 @@ schtasks /query /tn yforge
 export CUDA_COMPUTE_CAP=86
 cargo build --release --features cuda --bin yforge
 ./target/release/yforge --env prod.env
+```
+
+Для RTX 20xx:
+
+```bash
+export CUDA_COMPUTE_CAP=75
+cargo build --release --features cuda-turing --bin yforge
 ```
 
 **Как systemd-служба** — `/etc/systemd/system/yforge.service`:
@@ -440,6 +452,27 @@ Qwen или Ornith.
    fallback на встроенный `web/index.html` (admin-чат).
 4. В Studio UI: Connections → Add Provider → Base URL
    `http://127.0.0.1:18099/v1`, ключ из `--api-key`.
+
+---
+
+## Мониторинг в терминале
+
+`yforge monitor` подключается к уже запущенному серверу и показывает модель,
+runtime, скорость, контекст, очередь, GPU/RAM и последние запросы. Это
+read-only клиент: `q` отключает только экран, модель и HTTP-сервер продолжают
+работать. Отдельный процесс или сервис не нужен.
+
+```bash
+yforge monitor --api-key KEY
+yforge monitor --url http://127.0.0.1:18099 --api-key KEY
+YFORGE_API_KEY=KEY yforge monitor --url http://server:18099
+```
+
+Без `--url` используется `YFORGE_URL`, затем `http://127.0.0.1:$PORT`.
+Ключ также можно передать через `YFORGE_API_KEY`, `API_KEY` или первый ключ из
+`API_KEYS`. Сам endpoint `GET /v1/status` требует обычную Bearer-авторизацию и
+возвращает только счётчики и метаданные: тексты prompts/completions и ключи
+в него не попадают.
 
 ---
 

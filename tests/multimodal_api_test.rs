@@ -93,6 +93,8 @@ fn app(engine: Arc<CaptureEngine>) -> axum::Router {
             qwen36_server::config::SamplingPresets::new(),
         )),
         env_file: std::path::PathBuf::from(".env"),
+        metrics: Arc::new(qwen36_server::metrics::RequestMetrics::default()),
+        host_status: Arc::new(qwen36_server::metrics::HostCollector::default()),
     })
 }
 
