@@ -329,6 +329,15 @@ class Ds41VramAllocTest(unittest.TestCase):
         self.assertGreater(errors[1], errors[2])
         self.assertGreater(errors[0], 0.0)
 
+    def test_dsx_activation_stats_are_rejected_with_a_pointer(self):
+        with tempfile.TemporaryDirectory() as td:
+            stats = Path(td) / "L00.json"
+            stats.write_text('{"experts": {"0": {"n_eval": 8, "e_q2_0": 0.1}}}')
+            with self.assertRaises(ValueError) as ctx:
+                alloc.read_stats([stats])
+            self.assertIn("dsx", str(ctx.exception))
+
+
 
 if __name__ == "__main__":
     unittest.main()

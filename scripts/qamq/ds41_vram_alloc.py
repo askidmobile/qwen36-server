@@ -377,6 +377,14 @@ def read_stats(
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
+            if line.startswith("{"):
+                raise ValueError(
+                    f"{path}: looks like dsx activation stats (stats/L*.json). "
+                    "This reader only understands the YoungAi 'L e nc error' table; "
+                    "dsx tiers are scalar codecs with different byte sizes, so they "
+                    "must not be fed to the VQ allocator. See "
+                    "docs/research/2026-10-28-deepseek-v41-12gb-custom-quant.md."
+                )
             fields = line.split()
             try:
                 layer, expert, nc = map(int, fields[:3])
