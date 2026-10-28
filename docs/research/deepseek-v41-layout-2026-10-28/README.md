@@ -153,6 +153,25 @@ layer-uniform 12-битную раскладку, а не доказанное �
 Ожидание: DeepSeek на 2 bpw может выиграть по качеству у Qwen Q1/Q2, но проиграет
 по latency на этой машине из-за 64 GB RAM, HDD и потоковой подкачки experts.
 
+## Загрузка и конвертация
+
+Проверено 2026-10-28 20:20 на `yttri-win`: шард 1 (39.08 GB) и шард 2 (39.39 GB)
+готовы, шард 3 скачан на 32.3 GB из ~39.1 GB. Скорость около 10 MB/s, осталось
+около 3 часов на шард 3 и 4.
+
+**Важно:** имена файлов `-0000N-of-00004.gguf` означают раскладку до 27 октября.
+llama.cpp b11870 и текущий Strata читают только новый 6-шарочный layout, поэтому
+после загрузки обязателен `convert_ds41_upstream.py` из репозитория ISTA-DASLab:
+
+```sh
+hf download ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF convert_ds41_upstream.py --local-dir .
+python convert_ds41_upstream.py X:\Strata\data\models\deepseek-v4.1-flash-IST-DAS-2.00bpw --delete-old
+```
+
+Конвертеру нужно свободное место под новые шарды (138 GB для 2.00bpw). На `C:` сейчас
+217 GB free, на `X:` около 969 GB, поэтому `--out` на `C:` и затем junction обратно.
+Без конвертации `strata-dsv41` не откроет pack, и все замеры ниже недействительны.
+
 ## Обязательная приёмка после загрузки
 
 1. `strata-dsv41 --pack-info`: все файлы pack присутствуют.
