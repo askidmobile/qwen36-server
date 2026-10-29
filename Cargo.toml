@@ -67,7 +67,7 @@ http-body-util = "0.1"
 default = []
 metal = ["qwen35-batch/metal", "candle-core/metal", "candle-transformers/metal"]
 cuda = ["qwen35-batch/cuda", "candle-core/cuda", "candle-transformers/cuda", "dep:candle-flash-attn"]
-cuda-turing = ["cuda", "qwen35-batch/turing"]
+cuda-turing = ["cuda", "qwen35-batch/turing", "candle-flash-attn/turing-stub"]
 
 # Пробники CUDA-ядер: собираются только с фичей cuda (на macOS/CPU их нет).
 [[bin]]
