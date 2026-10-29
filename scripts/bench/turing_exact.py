@@ -30,6 +30,8 @@ def nonstream(host, port, key, prompt, model):
             "messages": [{"role": "user", "content": prompt}],
             "thinking": False,
             "temperature": 0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
             "max_tokens": 1,
             "stream": False,
         },
@@ -53,6 +55,8 @@ def stream(host, port, key, prompt, model):
             "messages": [{"role": "user", "content": prompt}],
             "thinking": False,
             "temperature": 0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
             "max_tokens": 128,
             "stream": True,
             "stream_options": {"include_usage": True},
@@ -100,7 +104,8 @@ def main():
     host, port = parsed.hostname, parsed.port or 80
     prompt = ("alpha " * 477) + "\nIgnore the repeated text. Count from 1 to 120 separated by commas. Do not explain."
 
-    nonstream(host, port, args.api_key, prompt, args.model)  # graph capture / warmup
+    nonstream(host, port, args.api_key, prompt, args.model)  # prefill graph capture
+    stream(host, port, args.api_key, prompt, args.model)  # decode graph capture
     prefill = []
     for _ in range(args.runs):
         elapsed, usage = nonstream(host, port, args.api_key, prompt, args.model)
