@@ -1914,6 +1914,22 @@ impl ForkSampler for IndexedSampler {
         0 // не используется — scheduler всегда sample_indexed
     }
 
+    fn greedy_for_slot(&self, slot_idx: usize) -> bool {
+        let params = self
+            .params
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(st) = params.get(&slot_idx) else {
+            return false;
+        };
+        let p = &st.params;
+        p.temperature <= 1e-5
+            && p.suppress_tokens.is_empty()
+            && p.presence_penalty == 0.0
+            && p.repetition_penalty == 1.0
+            && p.logprobs.is_none()
+    }
+
     fn checkpoint(&self, slot_idx: usize) -> SamplerCheckpoint {
         let checkpoint = self
             .params
@@ -2240,5 +2256,38 @@ mod tests {
         };
         let logits = vec![0.1, 0.9, 0.2, 5.0];
         assert_eq!(s.sample_indexed(99, &[], &logits), 3);
+    }
+
+    #[test]
+    fn indexed_sampler_marks_only_exact_argmax_policy_as_greedy() {
+        let params = GenParams {
+            temperature: 0.0,
+            presence_penalty: 0.0,
+            repetition_penalty: 1.0,
+            ..Default::default()
+        };
+        let shared = Arc::new(Mutex::new(HashMap::from([(
+            0,
+            SlotSampler {
+                params,
+                rng: Rng::new(1),
+                seen: HashSet::new(),
+                seen_len: 0,
+                pending_logprobs: Vec::new(),
+            },
+        )])));
+        let indexed = IndexedSampler {
+            params: shared.clone(),
+        };
+        assert!(indexed.greedy_for_slot(0));
+
+        shared
+            .lock()
+            .unwrap()
+            .get_mut(&0)
+            .unwrap()
+            .params
+            .suppress_tokens = vec![1];
+        assert!(!indexed.greedy_for_slot(0));
     }
 }
