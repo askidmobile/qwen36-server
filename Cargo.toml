@@ -89,3 +89,8 @@ required-features = ["cuda"]
 name = "mmq_ab_probe"
 path = "src/bin/mmq_ab_probe.rs"
 required-features = ["cuda"]
+
+[[bin]]
+name = "mmvq_parity"
+path = "src/bin/mmvq_parity.rs"
+required-features = ["cuda"]
