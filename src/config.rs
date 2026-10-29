@@ -663,7 +663,7 @@ pub fn moe_placement_from_env() -> String {
         .expect("MOE_EXPERTS валидирован в Config::from_env")
 }
 
-fn load_env_file(path: &Path) -> Result<()> {
+pub fn load_env_file(path: &Path) -> Result<()> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),

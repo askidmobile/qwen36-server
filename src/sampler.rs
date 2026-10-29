@@ -344,12 +344,34 @@ pub fn sample_with_seen(
 }
 
 fn argmax(logits: &[f32]) -> u32 {
-    let mut best = 0u32;
-    let mut best_v = f32::NEG_INFINITY;
-    for (i, &v) in logits.iter().enumerate() {
-        if v > best_v {
-            best_v = v;
-            best = i as u32;
+    // Four independent scans let the compiler issue independent compares and
+    // keep the CPU memory pipeline busy on the 248K-token vocabulary.
+    let mut best_v = [f32::NEG_INFINITY; 4];
+    let mut best_i = [0u32; 4];
+    let chunks = logits.chunks_exact(4);
+    let base_len = chunks.len() * 4;
+    for (chunk_idx, chunk) in chunks.enumerate() {
+        let base = (chunk_idx * 4) as u32;
+        for lane in 0..4 {
+            if chunk[lane] > best_v[lane] {
+                best_v[lane] = chunk[lane];
+                best_i[lane] = base + lane as u32;
+            }
+        }
+    }
+    for (offset, &v) in logits[base_len..].iter().enumerate() {
+        let i = (base_len + offset) as u32;
+        if v > best_v[0] {
+            best_v[0] = v;
+            best_i[0] = i;
+        }
+    }
+    let mut best = best_i[0];
+    let mut value = best_v[0];
+    for lane in 1..4 {
+        if best_v[lane] > value || (best_v[lane] == value && best_i[lane] < best) {
+            value = best_v[lane];
+            best = best_i[lane];
         }
     }
     best

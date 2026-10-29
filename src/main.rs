@@ -49,6 +49,12 @@ async fn main() -> Result<()> {
     // имена, поэтому приоритет «флаг > окружение > файл» получается сам.
     cli.apply_to_env();
 
+    // The env file is an input to the Turing profile too. Load it before the
+    // profile applies defaults, otherwise PGRAPH=on in the file is masked by
+    // the profile's conservative default.
+    let env_path = std::env::var("ENV_FILE").unwrap_or_else(|_| ".env".into());
+    qwen36_server::config::load_env_file(std::path::Path::new(&env_path))?;
+
     #[cfg(feature = "cuda-turing")]
     configure_turing(&cli)?;
 
@@ -143,8 +149,7 @@ async fn main() -> Result<()> {
     // 12 ГБ это прямо удваивает достижимый контекст. Раньше одиночный слот
     // уходил на CandleEngine и терял CUDA-графы вместе со скоростью декода.
     // FORCE_CANDLE_ENGINE=1 возвращает прежний путь для отладки.
-    let force_candle =
-        cfg!(feature = "cuda-turing") || std::env::var("FORCE_CANDLE_ENGINE").as_deref() == Ok("1");
+    let force_candle = std::env::var("FORCE_CANDLE_ENGINE").as_deref() == Ok("1");
     let engine: Arc<dyn Engine> = if qwen35 && !force_candle {
         let bcfg = BatchConfig {
             model_path: cfg.model.to_string_lossy().into_owned(),
@@ -311,19 +316,25 @@ fn configure_turing(cli: &Cli) -> Result<()> {
         anyhow::bail!("MTP is not supported by the cuda-turing build yet");
     }
 
+    let cuda_graphs = if matches!(std::env::var("GPROF").as_deref(), Ok("2") | Ok("3")) {
+        "0".to_string()
+    } else {
+        std::env::var("CUDA_GRAPHS").unwrap_or_else(|_| "1".into())
+    };
+    let pgraph = std::env::var("PGRAPH").unwrap_or_else(|_| "off".into());
     for (name, value) in [
         ("SLOTS", "1"),
         ("FLASH_ATTN", "0"),
-        ("PGRAPH", "off"),
-        ("CUDA_GRAPHS", "0"),
+        ("PGRAPH", pgraph.as_str()),
+        ("CUDA_GRAPHS", cuda_graphs.as_str()),
         ("KV_POOL_Q8", "0"),
         ("MTP", "0"),
     ] {
         std::env::set_var(name, value);
     }
     eprintln!(
-        "yforge: cuda-turing profile: single slot, split-K decode, reference prefill; \
-         FA2/paged/graphs/MTP/GPU-vision disabled"
+        "yforge: cuda-turing profile: single slot, sm75 FA, split-K decode, paged graph prefill; \
+         MTP/GPU-vision disabled"
     );
     Ok(())
 }

@@ -233,6 +233,8 @@ pub struct BatchedEngine {
     load_error: Arc<RwLock<String>>,
     /// Официальный chat template из GGUF (minijinja). None → встроенный ChatML.
     chat_tpl: Option<crate::chat_template::ChatTemplate>,
+    /// Split the first chunk only when a prefix-cache snapshot can use it.
+    prefix_cache_enabled: bool,
 }
 
 impl Drop for BatchedEngine {
@@ -335,6 +337,7 @@ impl BatchedEngine {
             chat_tpl: crate::chat_template::ChatTemplate::from_gguf(std::path::Path::new(
                 &cfg.model_path,
             )),
+            prefix_cache_enabled: cfg.prefix_cache_mib > 0,
         });
 
         let tokenizer = engine.tokenizer.clone();
@@ -811,11 +814,13 @@ impl Engine for BatchedEngine {
         // хода: начало генерационного суффикса, то есть токен `<|im_start|>`
         // последнего сообщения. Режем первый чанк ровно здесь — иначе промпт
         // длиннее одного чанка не даёт снимка, пригодного следующему ходу.
-        let first_chunk_cut = {
+        let first_chunk_cut = if self.prefix_cache_enabled {
             let tok = self.tokenizer.lock().unwrap_or_else(|e| e.into_inner());
             tok.token_to_id("<|im_start|>")
                 .and_then(|id| prompt.iter().rposition(|t| *t == id))
                 .filter(|p| *p > 0 && *p < prompt.len())
+        } else {
+            None
         };
 
         let (out_tx, out_rx) = mpsc::channel(SLOT_CHAN_CAP);
@@ -1234,10 +1239,9 @@ fn dispatch_loop(
         // 5. Нет работы — ждём с polling shutdown (таймаут 50мс, иначе shutdown
         // не виден пока не придёт сообщение; blocking_recv блокирует навечно).
         if !did_work && pending.is_empty() && bindings.iter().all(|b| b.is_none()) {
-            // Спим коротко: 50 мс стояли прямо в TTFT коротких запросов (замер
-            // 2026-09-16: 11-токенный промпт отвечал ~0.24 с при ~25 мс работы).
-            // Верхняя граница ожидания нового запроса теперь 5 мс.
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            // Idle poll: 1 ms caps the scheduler's wake-up cost while avoiding
+            // a busy 100% CPU thread. The old 5 ms delay was visible in TTFT.
+            std::thread::sleep(std::time::Duration::from_millis(1));
             match rx.try_recv() {
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break 'outer,
                 Ok(_) if shutdown.load(Ordering::Relaxed) => break 'outer,
