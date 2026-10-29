@@ -327,6 +327,9 @@ fn configure_turing(cli: &Cli) -> Result<()> {
         ("FLASH_ATTN", "0"),
         ("PGRAPH", pgraph.as_str()),
         ("CUDA_GRAPHS", cuda_graphs.as_str()),
+        // F16 KV-пул обязателен для split-K decode на sm75: dispatch_flash_decode_paged
+        // читает k/v пул как __half (bail при U8), а legacy-путь через FA2 недоступен
+        // (turing-stub). Поэтому int8 пул здесь не работает.
         ("KV_POOL_Q8", "0"),
         ("MTP", "0"),
     ] {
