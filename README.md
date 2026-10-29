@@ -308,6 +308,7 @@ export CUDA_COMPUTE_CAP=75
 export CUDA_HOME=/usr/local/cuda-12.4
 export RUSTFLAGS='-C link-arg=-lcudart_static'
 cargo build --release --features cuda-turing --bin yforge
+python3 scripts/bench/turing_exact.py --api-key "$YFORGE_KEY"
 ```
 
 **Как systemd-служба** — `/etc/systemd/system/yforge.service`:
