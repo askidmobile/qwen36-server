@@ -1,0 +1,83 @@
+{
+  "reference_bits": 12,
+  "dim": 8,
+  "blocks": 40000,
+  "experts": [
+    {
+      "meta": {
+        "tensor": "blk.0.ffn_up_exps.weight",
+        "shard": "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf",
+        "data_offset": 1987581504,
+        "ggml_type": 29,
+        "expert": 0,
+        "experts_total": 384,
+        "shape": [
+          2304,
+          5120
+        ],
+        "intermediate": 2304,
+        "hidden": 5120
+      },
+      "curve": {
+        "9": 0.23590560257434845,
+        "10": 0.17202641069889069,
+        "11": 0.10939374566078186,
+        "12": 0.05619961395859718,
+        "13": 0.02420516312122345
+      }
+    },
+    {
+      "meta": {
+        "tensor": "blk.39.ffn_up_exps.weight",
+        "shard": "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00004-of-00004.gguf",
+        "data_offset": 14364758144,
+        "ggml_type": 17,
+        "expert": 383,
+        "experts_total": 384,
+        "shape": [
+          2304,
+          5120
+        ],
+        "intermediate": 2304,
+        "hidden": 5120
+      },
+      "curve": {
+        "9": 0.264553427696228,
+        "10": 0.21135587990283966,
+        "11": 0.16294324398040771,
+        "12": 0.11914870887994766,
+        "13": 0.07915604114532471
+      }
+    },
+    {
+      "meta": {
+        "tensor": "blk.20.ffn_up_exps.weight",
+        "shard": "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00002-of-00004.gguf",
+        "data_offset": 26135472864,
+        "ggml_type": 29,
+        "expert": 7,
+        "experts_total": 384,
+        "shape": [
+          2304,
+          5120
+        ],
+        "intermediate": 2304,
+        "hidden": 5120
+      },
+      "curve": {
+        "9": 0.2268407940864563,
+        "10": 0.16296608746051788,
+        "11": 0.1021612361073494,
+        "12": 0.05177051201462746,
+        "13": 0.021702537313103676
+      }
+    }
+  ],
+  "median_ratio_to_reference": {
+    "9": 4.1976,
+    "10": 3.061,
+    "11": 1.9465,
+    "12": 1.0,
+    "13": 0.4307
+  }
+}

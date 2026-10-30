@@ -8,6 +8,8 @@ pub mod config;
 pub mod engine;
 pub mod engine_swap;
 pub mod media;
+pub mod metrics;
+pub mod monitor;
 pub mod prefix_cache;
 pub mod profile;
 pub mod sampler;

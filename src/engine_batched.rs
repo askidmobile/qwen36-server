@@ -233,6 +233,8 @@ pub struct BatchedEngine {
     load_error: Arc<RwLock<String>>,
     /// Официальный chat template из GGUF (minijinja). None → встроенный ChatML.
     chat_tpl: Option<crate::chat_template::ChatTemplate>,
+    /// Split the first chunk only when a prefix-cache snapshot can use it.
+    prefix_cache_enabled: bool,
 }
 
 impl Drop for BatchedEngine {
@@ -335,6 +337,7 @@ impl BatchedEngine {
             chat_tpl: crate::chat_template::ChatTemplate::from_gguf(std::path::Path::new(
                 &cfg.model_path,
             )),
+            prefix_cache_enabled: cfg.prefix_cache_mib > 0,
         });
 
         let tokenizer = engine.tokenizer.clone();
@@ -811,11 +814,13 @@ impl Engine for BatchedEngine {
         // хода: начало генерационного суффикса, то есть токен `<|im_start|>`
         // последнего сообщения. Режем первый чанк ровно здесь — иначе промпт
         // длиннее одного чанка не даёт снимка, пригодного следующему ходу.
-        let first_chunk_cut = {
+        let first_chunk_cut = if self.prefix_cache_enabled {
             let tok = self.tokenizer.lock().unwrap_or_else(|e| e.into_inner());
             tok.token_to_id("<|im_start|>")
                 .and_then(|id| prompt.iter().rposition(|t| *t == id))
                 .filter(|p| *p > 0 && *p < prompt.len())
+        } else {
+            None
         };
 
         let (out_tx, out_rx) = mpsc::channel(SLOT_CHAN_CAP);
@@ -853,6 +858,9 @@ impl Engine for BatchedEngine {
     }
     fn model_info(&self) -> ModelInfo {
         self.info.clone()
+    }
+    fn in_flight(&self) -> Option<usize> {
+        Some(self.in_flight())
     }
 }
 
@@ -1231,10 +1239,9 @@ fn dispatch_loop(
         // 5. Нет работы — ждём с polling shutdown (таймаут 50мс, иначе shutdown
         // не виден пока не придёт сообщение; blocking_recv блокирует навечно).
         if !did_work && pending.is_empty() && bindings.iter().all(|b| b.is_none()) {
-            // Спим коротко: 50 мс стояли прямо в TTFT коротких запросов (замер
-            // 2026-09-16: 11-токенный промпт отвечал ~0.24 с при ~25 мс работы).
-            // Верхняя граница ожидания нового запроса теперь 5 мс.
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            // Idle poll: 1 ms caps the scheduler's wake-up cost while avoiding
+            // a busy 100% CPU thread. The old 5 ms delay was visible in TTFT.
+            std::thread::sleep(std::time::Duration::from_millis(1));
             match rx.try_recv() {
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break 'outer,
                 Ok(_) if shutdown.load(Ordering::Relaxed) => break 'outer,
@@ -1907,6 +1914,22 @@ impl ForkSampler for IndexedSampler {
         0 // не используется — scheduler всегда sample_indexed
     }
 
+    fn greedy_for_slot(&self, slot_idx: usize) -> bool {
+        let params = self
+            .params
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(st) = params.get(&slot_idx) else {
+            return false;
+        };
+        let p = &st.params;
+        p.temperature <= 1e-5
+            && p.suppress_tokens.is_empty()
+            && p.presence_penalty == 0.0
+            && p.repetition_penalty == 1.0
+            && p.logprobs.is_none()
+    }
+
     fn checkpoint(&self, slot_idx: usize) -> SamplerCheckpoint {
         let checkpoint = self
             .params
@@ -2233,5 +2256,38 @@ mod tests {
         };
         let logits = vec![0.1, 0.9, 0.2, 5.0];
         assert_eq!(s.sample_indexed(99, &[], &logits), 3);
+    }
+
+    #[test]
+    fn indexed_sampler_marks_only_exact_argmax_policy_as_greedy() {
+        let params = GenParams {
+            temperature: 0.0,
+            presence_penalty: 0.0,
+            repetition_penalty: 1.0,
+            ..Default::default()
+        };
+        let shared = Arc::new(Mutex::new(HashMap::from([(
+            0,
+            SlotSampler {
+                params,
+                rng: Rng::new(1),
+                seen: HashSet::new(),
+                seen_len: 0,
+                pending_logprobs: Vec::new(),
+            },
+        )])));
+        let indexed = IndexedSampler {
+            params: shared.clone(),
+        };
+        assert!(indexed.greedy_for_slot(0));
+
+        shared
+            .lock()
+            .unwrap()
+            .get_mut(&0)
+            .unwrap()
+            .params
+            .suppress_tokens = vec![1];
+        assert!(!indexed.greedy_for_slot(0));
     }
 }

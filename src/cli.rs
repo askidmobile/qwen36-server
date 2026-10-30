@@ -12,7 +12,7 @@
 //! имя читают обе стороны, сервер и движок, поэтому флаг пишет ровно одно
 //! имя и зеркалирование не нужно.
 
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
 /// Сервер локального инференса GGUF-моделей (Qwen 3.5/3.6/3.8, Ornith 1.x).
@@ -29,10 +29,14 @@ use std::path::PathBuf;
         yforge --model model.gguf --ctx 131072 --slots 1\n  \
         yforge --env prod.env\n  \
         yforge --env prod.env --ctx 65536      # флаг переопределяет файл\n  \
-        CTX=65536 yforge --env prod.env        # окружение переопределяет файл\n\n\
+        CTX=65536 yforge --env prod.env        # окружение переопределяет файл\n  \
+        yforge monitor --api-key KEY            # live overview, read-only\n\n\
         Логи идут в stdout/stderr — перенаправляйте обычными средствами оболочки."
 )]
 pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<Commands>,
+
     // ── Источник настроек ────────────────────────────────────────────────
     /// Env-файл с параметрами (NAME=value). Значения из него применяются
     /// последними: флаги и окружение процесса имеют приоритет.
@@ -202,6 +206,25 @@ pub struct Cli {
     /// сервера и env-файл не читаются.
     #[arg(long)]
     pub sidecar: bool,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum Commands {
+    /// Live read-only server overview in the current terminal.
+    Monitor(MonitorArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct MonitorArgs {
+    /// Server base URL (default: http://127.0.0.1:$PORT).
+    #[arg(long, value_name = "URL")]
+    pub url: Option<String>,
+    /// API key. If omitted, reads YFORGE_API_KEY, API_KEY or the first API_KEYS entry.
+    #[arg(long, value_name = "KEY")]
+    pub api_key: Option<String>,
+    /// Refresh period in seconds.
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..=60))]
+    pub refresh_secs: u64,
 }
 
 impl Cli {

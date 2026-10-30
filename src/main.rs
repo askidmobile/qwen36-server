@@ -38,6 +38,9 @@ fn log_section(title: &str) {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Some(qwen36_server::cli::Commands::Monitor(args)) = &cli.command {
+        return qwen36_server::monitor::run(args.clone()).await;
+    }
     // Сайдкар Yttri: ни env-файла, ни HTTP — только stdio (T-682 Yttri).
     if cli.sidecar {
         return qwen36_server::sidecar::run().await;
@@ -45,6 +48,15 @@ async fn main() -> Result<()> {
     // Флаги — в окружение ДО чтения env-файла: файл пишет только незанятые
     // имена, поэтому приоритет «флаг > окружение > файл» получается сам.
     cli.apply_to_env();
+
+    // The env file is an input to the Turing profile too. Load it before the
+    // profile applies defaults, otherwise PGRAPH=on in the file is masked by
+    // the profile's conservative default.
+    let env_path = std::env::var("ENV_FILE").unwrap_or_else(|_| ".env".into());
+    qwen36_server::config::load_env_file(std::path::Path::new(&env_path))?;
+
+    #[cfg(feature = "cuda-turing")]
+    configure_turing(&cli)?;
 
     #[cfg(feature = "cuda")]
     qwen36_server::engine::cuda_prefer_blocking_sync();
@@ -240,6 +252,8 @@ async fn main() -> Result<()> {
         cfg.ctx,
         cfg.slots,
     ));
+    let metrics = Arc::new(qwen36_server::metrics::RequestMetrics::default());
+    let host_status = Arc::new(qwen36_server::metrics::HostCollector::default());
     let state = AppState {
         engine: switcher.clone(),
         media,
@@ -253,6 +267,8 @@ async fn main() -> Result<()> {
         sampling_policy: std::sync::Arc::new(std::sync::RwLock::new(cfg.sampling_policy.clone())),
         presets: std::sync::Arc::new(std::sync::RwLock::new(cfg.presets.clone())),
         env_file: cfg.env_file.clone(),
+        metrics,
+        host_status,
     };
     let app = build_router(state).merge(qwen36_server::api::proxy::proxy_router(
         cfg.studio_url.clone(),
@@ -275,11 +291,53 @@ async fn main() -> Result<()> {
 
 /// Имя бекенда для строки версии — как `llama.cpp` печатает свой билд.
 fn backend_name() -> &'static str {
-    if cfg!(feature = "cuda") {
+    if cfg!(feature = "cuda-turing") {
+        "CUDA / Turing"
+    } else if cfg!(feature = "cuda") {
         "CUDA"
     } else if cfg!(feature = "metal") {
         "Metal"
     } else {
         "CPU"
     }
+}
+
+#[cfg(feature = "cuda-turing")]
+fn configure_turing(cli: &Cli) -> Result<()> {
+    if cli.sidecar {
+        anyhow::bail!("sidecar mode is not supported by the cuda-turing build");
+    }
+    let mtp = cli.mtp.map(u8::from).or_else(|| {
+        std::env::var("MTP")
+            .ok()
+            .and_then(|value| value.parse::<u8>().ok())
+    });
+    if mtp == Some(1) {
+        anyhow::bail!("MTP is not supported by the cuda-turing build yet");
+    }
+
+    let cuda_graphs = if matches!(std::env::var("GPROF").as_deref(), Ok("2") | Ok("3")) {
+        "0".to_string()
+    } else {
+        std::env::var("CUDA_GRAPHS").unwrap_or_else(|_| "1".into())
+    };
+    let pgraph = std::env::var("PGRAPH").unwrap_or_else(|_| "off".into());
+    for (name, value) in [
+        ("SLOTS", "1"),
+        ("FLASH_ATTN", "0"),
+        ("PGRAPH", pgraph.as_str()),
+        ("CUDA_GRAPHS", cuda_graphs.as_str()),
+        // F16 KV-пул обязателен для split-K decode на sm75: dispatch_flash_decode_paged
+        // читает k/v пул как __half (bail при U8), а legacy-путь через FA2 недоступен
+        // (turing-stub). Поэтому int8 пул здесь не работает.
+        ("KV_POOL_Q8", "0"),
+        ("MTP", "0"),
+    ] {
+        std::env::set_var(name, value);
+    }
+    eprintln!(
+        "yforge: cuda-turing profile: single slot, sm75 FA, split-K decode, paged graph prefill; \
+         MTP/GPU-vision disabled"
+    );
+    Ok(())
 }

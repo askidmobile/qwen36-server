@@ -118,6 +118,8 @@ fn app_with_finish(deltas: Vec<&str>, finish_reason: &str) -> axum::Router {
             qwen36_server::config::SamplingPresets::new(),
         )),
         env_file: std::path::PathBuf::from(".env"),
+        metrics: Arc::new(qwen36_server::metrics::RequestMetrics::default()),
+        host_status: Arc::new(qwen36_server::metrics::HostCollector::default()),
     })
 }
 
@@ -198,6 +200,50 @@ async fn unauthorized_without_key() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     let body = body_string(resp).await;
     assert!(body.contains("authentication_error"));
+}
+
+#[tokio::test]
+async fn status_requires_auth_and_exposes_metadata_only() {
+    let app = app(vec!["private completion text"]);
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/status")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    let resp = app
+        .clone()
+        .oneshot(authed(json_req(
+            "POST",
+            "/v1/chat/completions",
+            serde_json::json!({
+                "messages": [{"role": "user", "content": "private prompt text"}]
+            }),
+        )))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/status")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(authed(req)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let raw = body_string(resp).await;
+    assert!(!raw.contains("private prompt text"));
+    assert!(!raw.contains("private completion text"));
+    let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(value["model"]["id"], "qwen3.6-27b");
+    assert_eq!(value["totals"]["completed_requests"], 1);
+    assert_eq!(value["totals"]["prompt_tokens"], 10);
+    assert_eq!(value["totals"]["completion_tokens"], 3);
+    assert_eq!(value["recent_requests"][0]["endpoint"], "chat.completions");
+    assert!(value.get("prompt").is_none());
+    assert!(value.get("completion").is_none());
 }
 
 #[tokio::test]

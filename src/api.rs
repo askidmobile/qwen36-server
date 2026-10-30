@@ -6,6 +6,7 @@ pub mod media;
 pub mod openai;
 pub mod proxy;
 pub mod responses;
+pub mod status;
 pub mod tools;
 
 use axum::{
@@ -53,6 +54,10 @@ pub struct AppState {
     pub presets: Arc<RwLock<crate::config::SamplingPresets>>,
     /// Путь к .env для персистентности дефолтов.
     pub env_file: std::path::PathBuf,
+    /// Read-only request counters for `/v1/status`.
+    pub metrics: Arc<crate::metrics::RequestMetrics>,
+    /// Cached CPU/RAM/GPU samples, refreshed in-process once per second.
+    pub host_status: Arc<crate::metrics::HostCollector>,
 }
 
 #[derive(Debug, Clone)]
@@ -151,6 +156,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/messages", axum::routing::post(anthropic::messages))
         .route("/media", axum::routing::post(media::upload))
         .route("/models", axum::routing::get(openai::list_models))
+        .route("/status", axum::routing::get(status::status))
         .route(
             "/available_models",
             axum::routing::get(admin::available_models),
@@ -182,6 +188,7 @@ pub fn build_router(state: AppState) -> Router {
 pub fn sse_response<F>(
     rx: tokio::sync::mpsc::Receiver<crate::engine_types::StreamEvent>,
     cancel: crate::engine_types::CancelFlag,
+    mut metrics: crate::metrics::RequestGuard,
     mut map: F,
 ) -> Response
 where
@@ -210,6 +217,15 @@ where
                 },
                 _ = tx.closed() => return,
             };
+            match &ev {
+                crate::engine_types::StreamEvent::Delta { .. } => metrics.delta(),
+                crate::engine_types::StreamEvent::Done {
+                    finish_reason,
+                    usage,
+                    ..
+                } => metrics.finish(usage, finish_reason.clone()),
+                crate::engine_types::StreamEvent::Error(_) => metrics.fail("engine error"),
+            }
             let cont = map(ev, &mut buf);
             for e in buf.drain(..) {
                 if tx.send(Ok(e)).await.is_err() {
@@ -384,6 +400,7 @@ pub fn engine_error(error: anyhow::Error) -> Response {
 pub async fn generate_collect(
     engine: &dyn Engine,
     request: crate::engine_types::InferenceRequest,
+    mut metrics: crate::metrics::RequestGuard,
 ) -> Result<GenOutcome, Response> {
     let guard = request.cancel.guard();
     let mut rx = engine.generate(request).await.map_err(engine_error)?;
@@ -395,6 +412,7 @@ pub async fn generate_collect(
                 text: d,
                 logprobs: lp,
             } => {
+                metrics.delta();
                 text.push_str(&d);
                 if let Some(lp) = lp {
                     logprobs.get_or_insert_with(Vec::new).extend(lp);
@@ -406,6 +424,7 @@ pub async fn generate_collect(
                 ended_in_thinking,
             } => {
                 guard.disarm();
+                metrics.finish(&usage, finish_reason.clone());
                 return Ok(GenOutcome {
                     text,
                     finish_reason,
@@ -416,6 +435,7 @@ pub async fn generate_collect(
             }
             crate::engine_types::StreamEvent::Error(e) => {
                 guard.disarm();
+                metrics.fail("engine error");
                 return Err(internal_error(e));
             }
         }
