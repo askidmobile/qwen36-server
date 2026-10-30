@@ -155,7 +155,9 @@ async fn main() -> Result<()> {
             model_path: cfg.model.to_string_lossy().into_owned(),
             slots: cfg.slots,
             max_queue: 64,
-            req_timeout: std::time::Duration::from_secs(600),
+            // req_timeout из env/CLI (было захардкожено 600 с — вотчдог
+            // убивал любой prefill дольше 10 минут, например 128k у 35B).
+            req_timeout: std::time::Duration::from_secs(cfg.req_timeout),
             context_length: cfg.ctx,
             kv_budget_mib: cfg.kv_budget_mib,
             kv_per_tok_mib: cfg.kv_per_tok_mib,
