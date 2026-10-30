@@ -6,6 +6,7 @@
 //! мерить отдельно — здесь, без модели и без движка.
 //!
 //! Запуск: fa_probe [seqlen] [iters]
+//! FA_PROBE_COMPARE=1 — сверка с F32-эталоном, seqlen <= 2048.
 
 use candle_core::{DType, Device, Tensor};
 use std::time::Instant;
@@ -14,7 +15,13 @@ fn main() -> candle_core::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let t: usize = args.first().and_then(|v| v.parse().ok()).unwrap_or(16384);
     let iters: usize = args.get(1).and_then(|v| v.parse().ok()).unwrap_or(3);
-    let (h, h_k, d) = (16usize, 4usize, 256usize);
+    let compare = std::env::var("FA_PROBE_COMPARE").as_deref() == Ok("1");
+    if t == 0 || iters == 0 || (compare && t > 2048) {
+        candle_core::bail!(
+            "seqlen/iters must be positive; FA_PROBE_COMPARE requires seqlen <= 2048"
+        );
+    }
+    let (h, h_k, d) = (16usize, 4usize, 256usize); // Ornith 1.5 9B
     let dev = Device::new_cuda(0)?;
     let cuda = dev.as_cuda_device()?.clone();
     let scale = (1.0 / (d as f64).sqrt()) as f32;
@@ -44,9 +51,80 @@ fn main() -> candle_core::Result<()> {
             best = best.min(ms);
         }
     }
+    if compare {
+        // Численная сверка с F32-эталоном на той же форме: FA2 считает в F16 с
+        // F32-аккумулятором, поэтому ждём ~1e-3, а не побитового совпадения.
+        let out = candle_flash_attn::flash_attn(&q, &k, &v, scale, true)?;
+        let qf = q.to_dtype(DType::F32)?.transpose(1, 2)?.contiguous()?; // [1,h,T,d]
+        let kf = k.to_dtype(DType::F32)?.transpose(1, 2)?.contiguous()?;
+        let vf = v.to_dtype(DType::F32)?.transpose(1, 2)?.contiguous()?;
+        let g = h / h_k;
+        let kf = kf
+            .unsqueeze(2)?
+            .broadcast_as((1, h_k, g, t, d))?
+            .contiguous()?
+            .reshape((1, h, t, d))?;
+        let vf = vf
+            .unsqueeze(2)?
+            .broadcast_as((1, h_k, g, t, d))?
+            .contiguous()?
+            .reshape((1, h, t, d))?;
+        let scores = (qf.matmul(&kf.transpose(2, 3)?.contiguous()?)? * scale as f64)?;
+        let mask: Vec<f32> = (0..t)
+            .flat_map(|i| (0..t).map(move |j| if j <= i { 0.0 } else { f32::NEG_INFINITY }))
+            .collect();
+        let mask = Tensor::from_vec(mask, (1, 1, t, t), &dev)?;
+        let scores = scores.broadcast_add(&mask)?;
+        let m = scores.max_keepdim(candle_core::D::Minus1)?;
+        let e = scores.broadcast_sub(&m)?.exp()?;
+        let z = e.sum_keepdim(candle_core::D::Minus1)?;
+        let probs = e.broadcast_div(&z)?;
+        let reference = probs.matmul(&vf)?.transpose(1, 2)?.contiguous()?;
+        let error = (&out.to_dtype(DType::F32)? - &reference)?;
+        let diff = error.abs()?.max_all()?.to_scalar::<f32>()?;
+        // Где именно расходится: по головам и по строкам. Если ломается только
+        // первая голова — это GQA-индекс; если хвост строк — тайл или маска.
+        let (per_head, per_row) = error_profile(&error)?;
+        println!("per-head max diff: {per_head:?}");
+        let bad: Vec<(usize, f32)> = per_row
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| **v > 1e-2)
+            .map(|(i, v)| (i, *v))
+            .take(8)
+            .collect();
+        println!("first bad rows (idx,maxdiff): {bad:?}");
+        println!("max |FA2 - F32 ref| = {diff:.3e}");
+    }
     println!(
         "FA2 dense causal: T={t} h={h} h_k={h_k} d={d} -> {best:.1} ms = {:.2} TFLOPS",
         flops / (best * 1e-3) / 1e12
     );
     Ok(())
+}
+
+// Ошибка имеет раскладку FA2 [1, seq, heads, dim].
+fn error_profile(error: &Tensor) -> candle_core::Result<(Vec<f32>, Vec<f32>)> {
+    let abs = error.abs()?;
+    let per_head = abs.max(3)?.max(1)?.squeeze(0)?.to_vec1::<f32>()?;
+    let per_row = abs.max(3)?.max(2)?.squeeze(0)?.to_vec1::<f32>()?;
+    Ok((per_head, per_row))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_profile_separates_heads_from_sequence_rows() -> candle_core::Result<()> {
+        let error = Tensor::from_vec(
+            vec![-1f32, 2., 3., 4., 5., -6., 7., 8., 9., 10., -11., 12.],
+            (1, 3, 2, 2),
+            &Device::Cpu,
+        )?;
+        let (heads, rows) = error_profile(&error)?;
+        assert_eq!(heads, vec![10., 12.]);
+        assert_eq!(rows, vec![4., 8., 12.]);
+        Ok(())
+    }
 }
